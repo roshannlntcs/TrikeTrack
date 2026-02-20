@@ -1,0 +1,21 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "Obrero-Agdao Geofence" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [125.6085, 7.0905],
+            [125.6295, 7.0905],
+            [125.6295, 7.0715],
+            [125.6085, 7.0715],
+            [125.6085, 7.0905]
+          ]
+        ]
+      }
+    }
+  ]
+}

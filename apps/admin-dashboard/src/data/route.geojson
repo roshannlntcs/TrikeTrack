@@ -1,0 +1,18 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "Obrero to Agdao Route" },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [125.6154, 7.08633],
+          [125.61418, 7.0777],
+          [125.62583, 7.07437],
+          [125.62323, 7.08173]
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "users": [
+    {
+      "id": "admin-001",
+      "email": "todaadmin@gmail.com",
+      "passwordHash": "pbkdf2$sha512$210000$aca50226c99fd2878603df9d6482fe25$da3d5efb805ae9592e9797a8aea78ea4b01924dd1d918ed4c8496d36551dd3c88f610be85ea6ccbb8ba10bfc5f6a07602be1a2f4dd139b1c6267cf814f369689",
+      "createdAt": "2026-02-18T00:00:00.000Z"
+    }
+  ]
+}
