@@ -3,19 +3,111 @@
   "features": [
     {
       "type": "Feature",
-      "properties": { "name": "Obrero-Agdao Geofence" },
+      "properties": {
+        "name": "UMASA TODA Geofence",
+        "routeId": "umasa-brgy-18b-geofence"
+      },
       "geometry": {
         "type": "Polygon",
         "coordinates": [
           [
-            [125.6085, 7.0905],
-            [125.6295, 7.0905],
-            [125.6295, 7.0715],
-            [125.6085, 7.0715],
-            [125.6085, 7.0905]
+            [125.6242034, 7.0832297],
+            [125.6172481, 7.0769755],
+            [125.6142794, 7.0790363],
+            [125.61345, 7.0817],
+            [125.6126754, 7.0835656],
+            [125.6121403, 7.0849408],
+            [125.6128229, 7.0868171],
+            [125.6176972, 7.090956],
+            [125.6242034, 7.0832297]
           ]
         ]
       }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Boundary Polyline",
+        "routeId": "umasa-brgy-18b-geofence"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [125.6242034, 7.0832297],
+          [125.6172481, 7.0769755],
+          [125.6142794, 7.0790363],
+          [125.61345, 7.0817],
+          [125.6126754, 7.0835656],
+          [125.6121403, 7.0849408],
+          [125.6128229, 7.0868171],
+          [125.6176972, 7.090956],
+          [125.6242034, 7.0832297]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "pointNumber": 1,
+        "name": "AUB Dacudao Avenue"
+      },
+      "geometry": { "type": "Point", "coordinates": [125.6242034, 7.0832297] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "pointNumber": 2,
+        "name": "Sta. Ana Shrine Parish Church"
+      },
+      "geometry": { "type": "Point", "coordinates": [125.6172481, 7.0769755] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "pointNumber": 3,
+        "name": "De Guzman Street (Starbucks GMall Davao)"
+      },
+      "geometry": { "type": "Point", "coordinates": [125.6142794, 7.0790363] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "pointNumber": 4,
+        "name": "Umasi Corp (Polo Street)"
+      },
+      "geometry": { "type": "Point", "coordinates": [125.61345, 7.0817] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "pointNumber": 5,
+        "name": "Bajada Suites (Inigo Street)"
+      },
+      "geometry": { "type": "Point", "coordinates": [125.6126754, 7.0835656] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "pointNumber": 6,
+        "name": "McDonald's Bajada (Lacson Street)"
+      },
+      "geometry": { "type": "Point", "coordinates": [125.6121403, 7.0849408] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "pointNumber": 7,
+        "name": "Health Center Brgy. 20-B (Veloso Street)"
+      },
+      "geometry": { "type": "Point", "coordinates": [125.6128229, 7.0868171] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "pointNumber": 8,
+        "name": "Chick N' Roll (Veloso St. cor Dacudao Ave.)"
+      },
+      "geometry": { "type": "Point", "coordinates": [125.6176972, 7.090956] }
     }
   ]
 }

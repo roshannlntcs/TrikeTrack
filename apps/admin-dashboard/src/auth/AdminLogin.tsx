@@ -1,22 +1,40 @@
-import { useState, type FormEvent } from "react"
+import { useEffect, useState, type FormEvent } from "react"
 import "./AdminLogin.css"
 
 type AdminLoginProps = {
-  onSignIn: (identifier: string, password: string) => Promise<string | null>
+  onSignIn: (
+    identifier: string,
+    password: string,
+    rememberMe: boolean
+  ) => Promise<string | null>
+  initialIdentifier?: string
+  initialRememberMe?: boolean
+  initialErrorMessage?: string | null
 }
 
-export default function AdminLogin({ onSignIn }: AdminLoginProps) {
-  const [identifier, setIdentifier] = useState("")
+export default function AdminLogin({
+  onSignIn,
+  initialIdentifier = "",
+  initialRememberMe = false,
+  initialErrorMessage = null
+}: AdminLoginProps) {
+  const [identifier, setIdentifier] = useState(initialIdentifier)
   const [password, setPassword] = useState("")
-  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [showPassword, setShowPassword] = useState(false)
+  const [rememberMe, setRememberMe] = useState(initialRememberMe)
+  const [errorMessage, setErrorMessage] = useState<string | null>(initialErrorMessage)
   const [isSubmitting, setIsSubmitting] = useState(false)
+
+  useEffect(() => {
+    setErrorMessage(initialErrorMessage)
+  }, [initialErrorMessage])
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (isSubmitting) return
     setIsSubmitting(true)
     setErrorMessage(null)
-    const error = await onSignIn(identifier.trim(), password)
+    const error = await onSignIn(identifier.trim(), password, rememberMe)
     if (error) setErrorMessage(error)
     setIsSubmitting(false)
   }
@@ -29,7 +47,7 @@ export default function AdminLogin({ onSignIn }: AdminLoginProps) {
             <img src="/triketrack_logo.png" alt="TrikeTrack logo" className="brand-logo" />
             <h1 className="brand-title">
               <span className="brand-title--blue">TRIKE</span>
-              <span className="brand-title--white">TRACK</span>
+              <span className="brand-title--green">TRACK</span>
             </h1>
             <p className="brand-subtitle">TODA Route Monitoring System</p>
           </div>
@@ -70,23 +88,49 @@ export default function AdminLogin({ onSignIn }: AdminLoginProps) {
               </span>
               <input
                 id="password"
-                type="password"
+                type={showPassword ? "text" : "password"}
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
                 placeholder="Enter your password"
                 autoComplete="off"
                 required
               />
-              <span className="input-wrap__hint" aria-hidden="true">
-                <svg viewBox="0 0 24 24">
-                  <path d="M12 7c-4.9 0-8.9 4.5-9 4.7L2.5 12l.5.3C3.1 12.5 7.1 17 12 17s8.9-4.5 9-4.7l.5-.3l-.5-.3C20.9 11.5 16.9 7 12 7Zm0 8a3 3 0 1 1 0-6a3 3 0 0 1 0 6Z" />
-                </svg>
-              </span>
+              <button
+                type="button"
+                className="input-wrap__toggle"
+                onClick={() => setShowPassword((current) => !current)}
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                aria-pressed={showPassword}
+              >
+                {showPassword ? (
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 7c-4.9 0-8.9 4.5-9 4.7L2.5 12l.5.3C3.1 12.5 7.1 17 12 17s8.9-4.5 9-4.7l.5-.3l-.5-.3C20.9 11.5 16.9 7 12 7Zm0 8a3 3 0 1 1 0-6a3 3 0 0 1 0 6Z" />
+                  </svg>
+                ) : (
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 7c-4.9 0-8.9 4.5-9 4.7L2.5 12l.5.3C3.1 12.5 7.1 17 12 17c1.5 0 2.9-.4 4.1-1.1l-1.5-1.5a3 3 0 0 1-4.1-4.1L9 8.8c.9-.5 1.9-.8 3-.8c3.3 0 5.8 2.5 6.6 3.4c-.4.6-1.3 1.5-2.5 2.3l1.4 1.4c2-1.3 3.2-2.8 3.3-2.9l.5-.3l-.5-.3C20.9 11.5 16.9 7 12 7Z" />
+                    <line
+                      x1="3"
+                      y1="3"
+                      x2="21"
+                      y2="21"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                )}
+              </button>
             </div>
 
             <div className="login-meta-row">
               <label className="remember-me">
-                <input type="checkbox" name="rememberMe" />
+                <input
+                  type="checkbox"
+                  name="rememberMe"
+                  checked={rememberMe}
+                  onChange={(event) => setRememberMe(event.target.checked)}
+                />
                 <span>Remember Me</span>
               </label>
               <a

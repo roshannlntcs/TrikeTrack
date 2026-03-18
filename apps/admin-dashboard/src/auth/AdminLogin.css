@@ -18,16 +18,33 @@
   position: relative;
   overflow: hidden;
   background-color: #57c7a8;
-  background-image:
-    linear-gradient(
-      to bottom,
-      rgba(87, 199, 168, 0.78),
-      rgba(87, 199, 168, 0.72)
-    ),
-    url("/login_bg.png");
-  background-size: cover;
+  isolation: isolate;
+}
+
+.login-shell__brand::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: url("/login_bg2.png");
   background-repeat: no-repeat;
-  background-position: 74% center;
+  background-size: cover;
+  background-position: center;
+  opacity: 0.96;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.login-shell__brand::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: url("/login_bg3.png");
+  background-repeat: no-repeat;
+  background-size: cover;
+  background-position: center;
+  opacity: 0.40;
+  z-index: 1;
+  pointer-events: none;
 }
 
 .brand-block {
@@ -48,7 +65,7 @@
 
 .brand-title {
   margin: 0 0 8px;
-  font-size: clamp(1.65rem, 3vw, 2.7rem);
+  font-size: clamp(0.5rem, 3vw, 2.20rem);
   font-weight: 800;
   line-height: 1;
   letter-spacing: -0.02em;
@@ -65,7 +82,7 @@
 
 .brand-subtitle {
   margin: 0;
-  font-size: clamp(0.96rem, 1.35vw, 1.35rem);
+  font-size: clamp(0.96rem, 1.35vw, 1rem);
   font-weight: 500;
   color: #09181a;
   white-space: nowrap;
@@ -136,7 +153,7 @@
 }
 
 .input-wrap__icon,
-.input-wrap__hint {
+.input-wrap__toggle {
   width: 16px;
   height: 16px;
   color: #1d2327;
@@ -147,10 +164,23 @@
 }
 
 .input-wrap__icon svg,
-.input-wrap__hint svg {
+.input-wrap__toggle svg {
   width: 16px;
   height: 16px;
   fill: currentColor;
+}
+
+.input-wrap__toggle {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.input-wrap__toggle:focus-visible {
+  outline: 2px solid #2a9d78;
+  outline-offset: 2px;
 }
 
 .login-meta-row {
@@ -195,24 +225,24 @@
   margin-top: 0;
 }
 
-.login-form button {
+.login-form > button[type="submit"] {
   margin: 14px auto 0;
   width: 176px;
   height: 44px;
   border: 0;
-  border-radius: 0;
-  background: #121214;
+  border-radius: 30px;
+  background: #53C296;
   color: #ffffff;
   font-size: 0.92rem;
   font-weight: 600;
   cursor: pointer;
 }
 
-.login-form button:hover {
-  background: #0a0a0a;
+.login-form > button[type="submit"]:hover {
+  background: #32c389;
 }
 
-.login-form button:disabled {
+.login-form > button[type="submit"]:disabled {
   opacity: 0.75;
   cursor: not-allowed;
 }

@@ -1,11 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import maplibregl from "maplibre-gl"
 import * as turf from "@turf/turf"
-import type { GeoJSON as RouteGeoJSON } from "../types/geojson"
+import type { GeoJSON as MapGeoJSON } from "../types/geojson"
 import type { DriverLocationEvent, ViolationEvent } from "../../../../common/types"
-import routeRaw from "../data/route.geojson?raw"
+import type { AdminProfile } from "../lib/admin-profile"
+import {
+  fetchDashboardData,
+  type DashboardDataSnapshot,
+  type DashboardDriverRecord,
+  type DashboardViolationRecord
+} from "../lib/dashboard-data"
+import geofenceRaw from "../data/geofence.geojson?raw"
 import { enqueueViolation, getOutboxCount, savePoint } from "../lib/db"
 import { syncOutbox } from "../lib/outbox"
+import { supabase } from "../lib/supabase"
+import SuperadminPage from "../superadmin/SuperadminPage"
+import TodaManagementPage from "../toda/TodaManagementPage"
 import "./AdminShell.css"
 
 type DriverStreamState = {
@@ -16,22 +26,22 @@ type DriverStreamState = {
   recentPoints: DriverLocationEvent[]
 }
 
-type ActivityItem = {
-  id: string
-  title: string
-  subtitle: string
-  ts: number
-  variant: "ok" | "alert"
-}
-
-type NavKey = "home" | "live-map" | "drivers" | "alerts" | "trip-logs"
+type NavKey =
+  | "superadmin"
+  | "toda-admin"
+  | "home"
+  | "live-map"
+  | "drivers"
+  | "tricycles"
+  | "alerts"
+  | "trip-logs"
 
 type NavItem = {
   key: NavKey
   label: string
 }
 
-const NAV_ITEMS: NavItem[] = [
+const BASE_NAV_ITEMS: NavItem[] = [
   { key: "home", label: "Home" },
   { key: "live-map", label: "Live Map" },
   { key: "drivers", label: "Drivers" },
@@ -39,46 +49,38 @@ const NAV_ITEMS: NavItem[] = [
   { key: "trip-logs", label: "Trip Logs" }
 ]
 
-const ROUTE_ID = "obrero-agdao"
-const GEOFENCE_RADIUS_METERS = 1200
+const TODA_NAV_ITEMS: NavItem[] = [
+  { key: "home", label: "Home" },
+  { key: "live-map", label: "Live Map" },
+  { key: "drivers", label: "Drivers" },
+  { key: "tricycles", label: "Tricycles" },
+  { key: "alerts", label: "Alerts" },
+  { key: "trip-logs", label: "Trip Logs" }
+]
+
+const ROUTE_ID = "umasa-brgy-18b-geofence"
 const DRIVER_OFFLINE_MS = 15000
 const VIOLATION_DEDUP_MS = 60000
 const RECENT_POINTS_PER_DRIVER = 8
 const MAX_ALERTS = 40
 const OUTBOX_SYNC_MS = 5000
 const MAP_STYLE_URL = "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json"
-const REGISTERED_DRIVERS = 60
+const OBRERO_CENTER: [number, number] = [125.6128, 7.0848]
+const DAVAO_CITY_BOUNDS: [[number, number], [number, number]] = [
+  [125.48, 6.96],
+  [125.71, 7.18]
+]
+const DEFAULT_CITY_ZOOM = 11
+const HOME_ALERT_SUMMARY_LIMIT = 5
+const HOME_TRIP_LOG_SUMMARY_LIMIT = 6
+const ALERT_URGENT_WINDOW_MS = 15 * 60 * 1000
 
-const toDriverLocationEvent = (
-  payload: unknown
-): DriverLocationEvent | null => {
-  if (!payload || typeof payload !== "object") return null
-  const raw = payload as Record<string, unknown>
-  const isFiniteNumber = (value: unknown): value is number =>
-    typeof value === "number" && Number.isFinite(value)
-  const isString = (value: unknown): value is string =>
-    typeof value === "string" && value.trim().length > 0
-
-  if (raw.type !== "driver_location") return null
-  if (!isString(raw.driverId)) return null
-  if (!isFiniteNumber(raw.ts)) return null
-  if (!isFiniteNumber(raw.lng) || !isFiniteNumber(raw.lat)) return null
-  if (raw.speed !== undefined && !isFiniteNumber(raw.speed)) return null
-  if (raw.heading !== undefined && !isFiniteNumber(raw.heading)) return null
-  if (raw.accuracy !== undefined && !isFiniteNumber(raw.accuracy)) return null
-  if (raw.tripId !== undefined && !isString(raw.tripId)) return null
-
-  return {
-    type: "driver_location",
-    driverId: raw.driverId,
-    ts: raw.ts,
-    lng: raw.lng,
-    lat: raw.lat,
-    speed: raw.speed,
-    heading: raw.heading,
-    accuracy: raw.accuracy,
-    tripId: raw.tripId
-  }
+const ALERT_REASON_PRIORITY: Record<string, number> = {
+  EMERGENCY: 100,
+  PANIC: 100,
+  COLLISION: 95,
+  SPEED: 80,
+  OUTSIDE_ROUTE_CORRIDOR: 60
 }
 
 const formatLastSeen = (lastSeenTs: number, nowTs: number) => {
@@ -90,17 +92,107 @@ const formatLastSeen = (lastSeenTs: number, nowTs: number) => {
   return `${diffHours}h ago`
 }
 
+const formatDriverCode = (driverId: number) => `D-${String(driverId).padStart(3, "0")}`
+
 const formatPoint = (point: DriverLocationEvent) =>
   `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`
 
-type AdminShellProps = {
-  onLogout: () => void
+const formatAlertReason = (reason: ViolationEvent["reason"]) => {
+  if (reason === "OUTSIDE_ROUTE_CORRIDOR") return "OUTSIDE_GEOFENCE_BOUNDARY"
+  return reason
 }
 
-export default function AdminShell({ onLogout }: AdminShellProps) {
+const getAlertPriority = (alert: { reason: string }) => {
+  const normalizedReason = alert.reason.toUpperCase()
+  for (const [reasonKey, score] of Object.entries(ALERT_REASON_PRIORITY)) {
+    if (normalizedReason.includes(reasonKey)) return score
+  }
+  return 40
+}
+
+type AdminShellProps = {
+  onLogout: () => void
+  adminProfile: AdminProfile
+  accessToken: string
+}
+
+type LiveDriverLocationRow = {
+  driver_id: number
+  driver_code: string
+  latitude: number
+  longitude: number
+  speed: number | null
+  heading: number | null
+  accuracy: number | null
+  is_online: boolean
+  recorded_at: string
+  updated_at: string
+}
+
+type HandleLocationOptions = {
+  queueViolation?: boolean
+  cachePoint?: boolean
+}
+
+type DriverDirectoryRow = DashboardDriverRecord & {
+  liveState?: DriverStreamState
+}
+
+type AlertListItem = {
+  key: string
+  driverId: string
+  driverName?: string
+  todaName?: string
+  barangayName?: string
+  ts: number
+  reason: string
+  description?: string
+  status?: string
+  lat?: number
+  lng?: number
+}
+
+const createPointSignature = (point: Pick<DriverLocationEvent, "ts" | "lng" | "lat">) =>
+  `${point.ts}|${point.lng.toFixed(5)}|${point.lat.toFixed(5)}`
+
+const createLiveAlertListItem = (alert: ViolationEvent): AlertListItem => ({
+  key: `live-${alert.driverId}-${alert.ts}`,
+  driverId: alert.driverId,
+  ts: alert.ts,
+  reason: formatAlertReason(alert.reason),
+  description: `Geofence deviation at ${alert.lat.toFixed(5)}, ${alert.lng.toFixed(5)}`,
+  lat: alert.lat,
+  lng: alert.lng,
+  status: "open"
+})
+
+const createStoredAlertListItem = (alert: DashboardViolationRecord): AlertListItem => ({
+  key: `stored-${alert.violationId}`,
+  driverId: String(alert.driverId ?? "N/A"),
+  driverName: alert.driverName,
+  todaName: alert.todaName,
+  barangayName: alert.barangayName,
+  ts: new Date(alert.detectedAt).getTime(),
+  reason: alert.violationTypeLabel,
+  description: alert.description,
+  status: alert.status
+})
+
+export default function AdminShell({
+  onLogout,
+  adminProfile,
+  accessToken
+}: AdminShellProps) {
   const mapEl = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
-  const [activePage, setActivePage] = useState<NavKey>("live-map")
+  const contentEl = useRef<HTMLElement | null>(null)
+  const mapHeaderEl = useRef<HTMLDivElement | null>(null)
+  const geofenceBoundsRef = useRef<[[number, number], [number, number]] | null>(null)
+  const [activePage, setActivePage] = useState<NavKey>(
+    adminProfile.role === "superadmin"
+      ? "superadmin"
+      : "home"
+  )
 
   const [syncStatus, setSyncStatus] = useState<
     "connecting" | "connected" | "disconnected"
@@ -115,7 +207,26 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
   const [driversById, setDriversById] = useState<Record<string, DriverStreamState>>(
     {}
   )
+  const [dashboardData, setDashboardData] = useState<DashboardDataSnapshot | null>(null)
+  const [dashboardError, setDashboardError] = useState<string | null>(null)
   const [clockTs, setClockTs] = useState<number>(Date.now())
+  const [liveMapCanvasHeight, setLiveMapCanvasHeight] = useState<number | null>(null)
+  const [searchQuery, setSearchQuery] = useState<string>("")
+  const visibleDriverIdentifiersRef = useRef<Set<string>>(new Set())
+  const trimmedSearchQuery = searchQuery.trim()
+  const normalizedSearchQuery = trimmedSearchQuery.toLowerCase()
+  const hasSearchQuery = normalizedSearchQuery.length > 0
+  const showLiveMapView = activePage === "home" || activePage === "live-map"
+
+  const refreshDashboardData = async () => {
+    try {
+      const snapshot = await fetchDashboardData(accessToken)
+      setDashboardData(snapshot)
+      setDashboardError(null)
+    } catch (error) {
+      setDashboardError(String(error))
+    }
+  }
 
   useEffect(() => {
     const timer = window.setInterval(() => setClockTs(Date.now()), 3000)
@@ -123,27 +234,72 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
   }, [])
 
   useEffect(() => {
+    let active = true
+    let timer: number | undefined
+
+    const load = async () => {
+      try {
+        const snapshot = await fetchDashboardData(accessToken)
+        if (!active) return
+        setDashboardData(snapshot)
+        setDashboardError(null)
+      } catch (error) {
+        if (!active) return
+        setDashboardError(String(error))
+      }
+    }
+
+    void load()
+    timer = window.setInterval(() => {
+      void load()
+    }, 15000)
+
+    return () => {
+      active = false
+      if (timer) window.clearInterval(timer)
+    }
+  }, [accessToken])
+
+  useEffect(() => {
+    const identifiers = new Set<string>()
+    for (const driver of dashboardData?.drivers ?? []) {
+      identifiers.add(String(driver.driverId))
+      identifiers.add(driver.driverCode.trim().toUpperCase())
+    }
+    visibleDriverIdentifiersRef.current = identifiers
+  }, [dashboardData?.drivers])
+
+  useEffect(() => {
     if (!mapEl.current) return
 
-    const route = JSON.parse(routeRaw) as RouteGeoJSON
+    const geofence = JSON.parse(geofenceRaw) as MapGeoJSON
     const VIOLATION_SYNC_ENDPOINT =
       import.meta.env.VITE_VIOLATIONS_ENDPOINT || "/api/violations/batch"
 
     const map = new maplibregl.Map({
       container: mapEl.current,
       style: MAP_STYLE_URL,
-      center: [125.4553, 7.1907],
-      zoom: 13,
+      center: OBRERO_CENTER,
+      zoom: DEFAULT_CITY_ZOOM,
+      minZoom: 10,
       maxZoom: 19
     })
     mapRef.current = map
+    map.addControl(
+      new maplibregl.NavigationControl({
+        showCompass: false,
+        visualizePitch: false
+      }),
+      "top-right"
+    )
 
     map.on("error", (error) => {
       console.error("MapLibre error:", (error as any)?.error || error)
     })
 
-    let reconnectTimer: number | undefined
-    let socket: WebSocket | null = null
+    let liveLocationChannel:
+      | ReturnType<typeof supabase.channel>
+      | null = null
     let active = true
     let onlineHandler: (() => void) | null = null
     let outboxTimer: number | undefined
@@ -192,13 +348,46 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
       return markerEl
     }
 
+    const isDriverVisibleToAdmin = (driverIdentifier: string) => {
+      if (adminProfile.role === "superadmin") return true
+      const normalized = driverIdentifier.trim().toUpperCase()
+      const visible = visibleDriverIdentifiersRef.current
+      return visible.has(normalized) || visible.has(driverIdentifier)
+    }
+
+    const removeDriverState = (driverIdentifier: string) => {
+      setDriversById((previous) => {
+        if (!(driverIdentifier in previous)) return previous
+        const next = { ...previous }
+        delete next[driverIdentifier]
+        return next
+      })
+    }
+
+    const removeDriverMarker = (driverIdentifier: string) => {
+      const marker = markers.get(driverIdentifier)
+      if (!marker) return
+      marker.remove()
+      markers.delete(driverIdentifier)
+    }
+
+    const removeDriverLivePresence = (identifiers: string[]) => {
+      for (const identifier of identifiers) {
+        removeDriverMarker(identifier)
+        removeDriverState(identifier)
+      }
+    }
+
     const upsertDriverState = (event: DriverLocationEvent, isViolation: boolean) => {
       setDriversById((previous) => {
         const existing = previous[event.driverId]
-        const updatedRecent = [event, ...(existing?.recentPoints ?? [])].slice(
-          0,
-          RECENT_POINTS_PER_DRIVER
-        )
+        const dedupedRecent = [event, ...(existing?.recentPoints ?? [])]
+          .sort((a, b) => b.ts - a.ts)
+          .filter((point, index, all) => {
+            const signature = createPointSignature(point)
+            return index === all.findIndex((candidate) => createPointSignature(candidate) === signature)
+          })
+          .slice(0, RECENT_POINTS_PER_DRIVER)
         return {
           ...previous,
           [event.driverId]: {
@@ -206,63 +395,50 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
             lastSeenTs: Math.max(existing?.lastSeenTs ?? 0, event.ts),
             latestPoint: event,
             violationCount: (existing?.violationCount ?? 0) + (isViolation ? 1 : 0),
-            recentPoints: updatedRecent
+            recentPoints: dedupedRecent
           }
         }
       })
     }
 
     map.on("load", () => {
-      const routeFeature = (route as any).features?.[0]
-      if (!routeFeature) {
-        console.error("route.geojson has no features[0]. Add a LineString feature.")
+      const geofencePolygon = (geofence as any).features?.find(
+        (feature: any) => feature.geometry?.type === "Polygon"
+      )
+      if (!geofencePolygon) {
+        console.error("geofence.geojson is missing a Polygon feature.")
         return
       }
 
-      const coords = routeFeature.geometry?.coordinates as number[][]
-      if (!Array.isArray(coords) || coords.length < 2) {
-        console.error("route.geojson LineString must have at least 2 coordinates.")
+      const polygonRing = geofencePolygon.geometry?.coordinates?.[0] as number[][]
+      if (!Array.isArray(polygonRing) || polygonRing.length < 4) {
+        console.error("geofence.geojson Polygon ring must have at least 4 coordinates.")
         return
       }
 
-      const routeBounds = new maplibregl.LngLatBounds()
-      for (const [lng, lat] of coords) {
-        routeBounds.extend([lng, lat])
+      const geofencePolyline =
+        (geofence as any).features?.find(
+          (feature: any) => feature.geometry?.type === "LineString"
+        ) ?? turf.polygonToLine(geofencePolygon as any)
+
+      const geofencePoints = {
+        type: "FeatureCollection",
+        features: ((geofence as any).features ?? []).filter(
+          (feature: any) => feature.geometry?.type === "Point"
+        )
       }
-      map.fitBounds(routeBounds, {
-        padding: { top: 40, right: 40, bottom: 40, left: 40 },
-        maxZoom: 17,
+
+      geofenceBoundsRef.current = DAVAO_CITY_BOUNDS
+      map.setMaxBounds(DAVAO_CITY_BOUNDS)
+      map.easeTo({
+        center: OBRERO_CENTER,
+        zoom: DEFAULT_CITY_ZOOM,
         duration: 0
       })
 
-      const panBounds = turf.bbox(
-        turf.buffer(routeFeature, 800, { units: "meters" }) as any
-      )
-      map.setMaxBounds([
-        [panBounds[0], panBounds[1]],
-        [panBounds[2], panBounds[3]]
-      ])
-
-      map.addSource("route", { type: "geojson", data: route as any })
-      map.addLayer({
-        id: "route-line",
-        type: "line",
-        source: "route",
-        paint: {
-          "line-color": "#ff2d2d",
-          "line-width": 6,
-          "line-opacity": 0.9
-        }
-      })
-
-      const geofenceCenter = turf.center(routeFeature)
-      const geofenceCircle = turf.circle(geofenceCenter, GEOFENCE_RADIUS_METERS, {
-        units: "meters",
-        steps: 72
-      })
       map.addSource("area-geofence", {
         type: "geojson",
-        data: geofenceCircle as any
+        data: geofencePolygon as any
       })
       map.addLayer({
         id: "area-geofence-fill",
@@ -284,17 +460,72 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
         }
       })
 
-      const corridor = turf.buffer(routeFeature, 30, { units: "meters" })
-      map.addSource("corridor", { type: "geojson", data: corridor as any })
+      map.addSource("geofence-boundary", {
+        type: "geojson",
+        data: geofencePolyline as any
+      })
       map.addLayer({
-        id: "corridor-fill",
-        type: "fill",
-        source: "corridor",
+        id: "geofence-boundary-line",
+        type: "line",
+        source: "geofence-boundary",
         paint: {
-          "fill-color": "#22c55e",
-          "fill-opacity": 0.2
+          "line-color": "#2563eb",
+          "line-width": 4,
+          "line-opacity": 0.95
         }
       })
+
+      if (geofencePoints.features.length > 0) {
+        map.addSource("geofence-points", {
+          type: "geojson",
+          data: geofencePoints as any
+        })
+        map.addLayer({
+          id: "geofence-points-layer",
+          type: "circle",
+          source: "geofence-points",
+          paint: {
+            "circle-color": "#ef4444",
+            "circle-radius": 6,
+            "circle-stroke-width": 2,
+            "circle-stroke-color": "#ffffff"
+          }
+        })
+        map.addLayer({
+          id: "geofence-points-labels",
+          type: "symbol",
+          source: "geofence-points",
+          layout: {
+            "text-field": ["to-string", ["coalesce", ["get", "pointNumber"], ""]],
+            "text-size": 11,
+            "text-anchor": "top",
+            "text-offset": [0, 1.2]
+          },
+          paint: {
+            "text-color": "#991b1b",
+            "text-halo-color": "#ffffff",
+            "text-halo-width": 1.2
+          }
+        })
+
+        map.on("click", "geofence-points-layer", (event) => {
+          const feature = event.features?.[0]
+          if (!feature || feature.geometry.type !== "Point") return
+          const coords = feature.geometry.coordinates as [number, number]
+          const props = feature.properties as Record<string, unknown> | undefined
+          const title = String(props?.name ?? "Boundary Point")
+          const number = String(props?.pointNumber ?? "")
+          const label = number ? `Point ${number}: ${title}` : title
+          new maplibregl.Popup({ offset: 10 }).setLngLat(coords).setText(label).addTo(map)
+        })
+
+        map.on("mouseenter", "geofence-points-layer", () => {
+          map.getCanvas().style.cursor = "pointer"
+        })
+        map.on("mouseleave", "geofence-points-layer", () => {
+          map.getCanvas().style.cursor = ""
+        })
+      }
 
       const updateMarker = (event: DriverLocationEvent, inside: boolean) => {
         const color = inside ? "#2563eb" : "#ef4444"
@@ -347,91 +578,130 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
         await refreshOutboxCount()
       }
 
-      const handleLocationEvent = async (event: DriverLocationEvent) => {
+      const handleLocationEvent = async (
+        event: DriverLocationEvent,
+        options: HandleLocationOptions = {}
+      ) => {
+        if (!isDriverVisibleToAdmin(event.driverId)) return
+        const shouldQueueViolation = options.queueViolation ?? true
+        const shouldCachePoint = options.cachePoint ?? true
         const inside = turf.booleanPointInPolygon(
           turf.point([event.lng, event.lat]),
-          corridor as any
+          geofencePolygon as any
         )
         const isViolation = !inside
 
         updateMarker(event, inside)
         upsertDriverState(event, isViolation)
 
-        if (isViolation) {
+        if (isViolation && shouldQueueViolation) {
           await enqueueViolationEvent(event)
         }
 
-        await savePoint({
-          driverId: event.driverId,
-          ts: event.ts,
-          lng: event.lng,
-          lat: event.lat,
-          speed: event.speed,
-          heading: event.heading,
-          accuracy: event.accuracy,
-          tripId: event.tripId,
-          violation: isViolation
-        })
+        if (shouldCachePoint) {
+          await savePoint({
+            driverId: event.driverId,
+            ts: event.ts,
+            lng: event.lng,
+            lat: event.lat,
+            speed: event.speed,
+            heading: event.heading,
+            accuracy: event.accuracy,
+            tripId: event.tripId,
+            violation: isViolation
+          })
+        }
       }
 
-      const WS_URL =
-        import.meta.env.VITE_WS_URL ||
-        `${window.location.protocol === "https:" ? "wss" : "ws"}://${
-          window.location.host
-        }/ws`
-      console.log("WS URL:", import.meta.env.VITE_WS_URL)
+      const toLocationEventFromRow = (
+        row: LiveDriverLocationRow
+      ): DriverLocationEvent => ({
+        type: "driver_location",
+        driverId: row.driver_code.trim().toUpperCase(),
+        ts: new Date(row.recorded_at ?? row.updated_at).getTime(),
+        lng: row.longitude,
+        lat: row.latitude,
+        speed: row.speed ?? undefined,
+        heading: row.heading ?? undefined,
+        accuracy: row.accuracy ?? undefined
+      })
 
-      const connectSocket = () => {
+      const applyLocationRow = async (row: LiveDriverLocationRow) => {
+        const identifiers = [row.driver_code.trim().toUpperCase(), String(row.driver_id)]
+        if (!row.is_online) {
+          removeDriverLivePresence(identifiers)
+          return
+        }
+
+        const locationEvent = toLocationEventFromRow(row)
+        await handleLocationEvent(locationEvent, { queueViolation: true, cachePoint: false })
+        if (active) setLastUpdateTs(locationEvent.ts)
+      }
+
+      const loadLiveDriverLocations = async () => {
+        setSyncStatus("connecting")
+        const { data, error } = await supabase
+          .from("driver_locations")
+          .select(
+            "driver_id,driver_code,latitude,longitude,speed,heading,accuracy,is_online,recorded_at,updated_at"
+          )
+          .eq("is_online", true)
+
+        if (error) {
+          console.warn("Live driver location hydration failed:", error.message)
+          if (active) setSyncStatus("disconnected")
+          return
+        }
+
+        for (const row of (data ?? []) as LiveDriverLocationRow[]) {
+          await applyLocationRow(row)
+        }
+
+        if (active) setSyncStatus("connected")
+      }
+
+      const connectRealtime = () => {
         if (!active) return
-        if (socket && socket.readyState === WebSocket.OPEN) return
-        if (socket && socket.readyState === WebSocket.CONNECTING) return
+        if (liveLocationChannel) {
+          void supabase.removeChannel(liveLocationChannel)
+          liveLocationChannel = null
+        }
 
         setSyncStatus("connecting")
-        socket = new WebSocket(WS_URL)
-
-        socket.onopen = () => {
-          console.log("ADMIN WS connected")
-          setSyncStatus("connected")
-        }
-
-        socket.onmessage = (messageEvent) => {
-          console.log("ADMIN WS message", messageEvent.data)
-          if (!active) return
-          try {
-            const payload = JSON.parse(messageEvent.data as string) as unknown
-            const locationEvent = toDriverLocationEvent(payload)
-            if (!locationEvent) {
-              console.warn("Rejected WS payload: invalid DriverLocationEvent")
+        liveLocationChannel = supabase
+          .channel(`driver-locations-${adminProfile.adminId}`)
+          .on(
+            "postgres_changes",
+            {
+              event: "*",
+              schema: "public",
+              table: "driver_locations"
+            },
+            (payload) => {
+              if (!active) return
+              const row = (payload.new || payload.old) as LiveDriverLocationRow | undefined
+              if (!row) return
+              void applyLocationRow(row)
+            }
+          )
+          .subscribe((status) => {
+            if (!active) return
+            if (status === "SUBSCRIBED") {
+              setSyncStatus("connected")
               return
             }
-            void handleLocationEvent(locationEvent).then(() => {
-              if (active) setLastUpdateTs(Date.now())
-            })
-          } catch (error) {
-            console.warn("WS payload error:", error)
-          }
-        }
-
-        socket.onerror = (errorEvent) => {
-          console.log("ADMIN WS error", errorEvent)
-          setSyncStatus("disconnected")
-        }
-
-        socket.onclose = () => {
-          console.log("ADMIN WS closed")
-          setSyncStatus("disconnected")
-          if (reconnectTimer) window.clearTimeout(reconnectTimer)
-          if (navigator.onLine) {
-            reconnectTimer = window.setTimeout(connectSocket, 3000)
-          }
-        }
+            if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+              setSyncStatus("disconnected")
+            }
+          })
       }
 
       const handleOnlineState = () => {
         const isOnline = navigator.onLine
         setOnline(isOnline)
         if (isOnline) {
-          connectSocket()
+          void loadLiveDriverLocations()
+          connectRealtime()
         } else {
           setSyncStatus("disconnected")
           setOutboxStatus("offline")
@@ -441,7 +711,8 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
       onlineHandler = handleOnlineState
       window.addEventListener("online", handleOnlineState)
       window.addEventListener("offline", handleOnlineState)
-      connectSocket()
+      void loadLiveDriverLocations()
+      connectRealtime()
     })
 
     void refreshOutboxCount()
@@ -458,8 +729,9 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
 
     return () => {
       active = false
-      if (reconnectTimer) window.clearTimeout(reconnectTimer)
-      if (socket) socket.close()
+      if (liveLocationChannel) {
+        void supabase.removeChannel(liveLocationChannel)
+      }
       if (onlineHandler) {
         window.removeEventListener("online", onlineHandler)
         window.removeEventListener("offline", onlineHandler)
@@ -474,64 +746,262 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
       }
       map.remove()
       mapRef.current = null
+      geofenceBoundsRef.current = null
     }
-  }, [])
+  }, [accessToken, adminProfile.adminId, adminProfile.role])
 
   useEffect(() => {
-    if (activePage === "live-map" && mapRef.current) {
+    if (showLiveMapView && mapRef.current) {
       window.setTimeout(() => {
         mapRef.current?.resize()
       }, 0)
     }
+  }, [showLiveMapView])
+
+  useEffect(() => {
+    if (activePage !== "live-map") return
+
+    let rafId: number | undefined
+    const updateLiveMapHeight = () => {
+      const contentHeight = contentEl.current?.clientHeight ?? 0
+      const headerHeight = mapHeaderEl.current?.offsetHeight ?? 0
+      if (!contentHeight || !headerHeight) return
+
+      const nextHeight = Math.max(360, contentHeight - headerHeight - 2)
+      setLiveMapCanvasHeight(nextHeight)
+      rafId = window.requestAnimationFrame(() => {
+        const map = mapRef.current
+        if (!map) return
+        map.resize()
+      })
+    }
+
+    updateLiveMapHeight()
+    window.addEventListener("resize", updateLiveMapHeight)
+
+    return () => {
+      window.removeEventListener("resize", updateLiveMapHeight)
+      if (rafId) window.cancelAnimationFrame(rafId)
+    }
   }, [activePage])
 
-  const driverRows = useMemo(() => {
+  const liveDriverRows = useMemo(() => {
     return Object.values(driversById).sort((a, b) => b.lastSeenTs - a.lastSeenTs)
   }, [driversById])
 
+  const driverDirectoryRows = useMemo<DriverDirectoryRow[]>(() => {
+    const directory = new Map<string, DriverDirectoryRow>()
+    const knownDriverIdentifiers = new Set<string>()
+
+    for (const driver of dashboardData?.drivers ?? []) {
+      const numericDriverId = String(driver.driverId)
+      knownDriverIdentifiers.add(numericDriverId)
+      knownDriverIdentifiers.add(driver.driverCode)
+      directory.set(numericDriverId, {
+        ...driver,
+        liveState: driversById[driver.driverCode] ?? driversById[numericDriverId]
+      })
+    }
+
+    for (const liveDriver of liveDriverRows) {
+      if (!knownDriverIdentifiers.has(liveDriver.driverId)) {
+        directory.set(liveDriver.driverId, {
+          driverId: Number(liveDriver.driverId) || 0,
+          driverCode:
+            Number(liveDriver.driverId) > 0
+              ? formatDriverCode(Number(liveDriver.driverId))
+              : liveDriver.driverId,
+          todaId: 0,
+          todaName: "Unassigned TODA",
+          barangayId: 0,
+          barangayName: "Unassigned Barangay",
+          tricycleId: undefined,
+          tricycleNo: undefined,
+          qrId: undefined,
+          passwordSet: false,
+          firstName: "Live",
+          lastName: `Driver ${liveDriver.driverId}`,
+          contactNo: undefined,
+          status: "active",
+          createdAt: new Date(liveDriver.lastSeenTs).toISOString(),
+          liveState: liveDriver
+        })
+      }
+    }
+
+    return [...directory.values()].sort((a, b) => {
+      const aLastSeen = a.liveState?.lastSeenTs ?? 0
+      const bLastSeen = b.liveState?.lastSeenTs ?? 0
+      if (aLastSeen !== bLastSeen) return bLastSeen - aLastSeen
+      return `${a.lastName} ${a.firstName}`.localeCompare(`${b.lastName} ${b.firstName}`)
+    })
+  }, [dashboardData?.drivers, driversById, liveDriverRows])
+
+  const activeDriverRows = useMemo(() => {
+    return driverDirectoryRows.filter((driver) => {
+      const lastSeenTs = driver.liveState?.lastSeenTs ?? 0
+      return lastSeenTs > 0 && clockTs - lastSeenTs <= DRIVER_OFFLINE_MS
+    })
+  }, [driverDirectoryRows, clockTs])
+
   const activeDriverCount = useMemo(() => {
-    return driverRows.filter((driver) => clockTs - driver.lastSeenTs <= DRIVER_OFFLINE_MS)
-      .length
-  }, [driverRows, clockTs])
+    return activeDriverRows.length
+  }, [activeDriverRows])
 
   const totalTripsToday = useMemo(() => {
     const today = new Date()
-    return driverRows.reduce((total, driver) => {
-      const pointsToday = driver.recentPoints.filter((point) => {
-        const dt = new Date(point.ts)
-        return (
-          dt.getFullYear() === today.getFullYear() &&
-          dt.getMonth() === today.getMonth() &&
-          dt.getDate() === today.getDate()
-        )
-      }).length
-      return total + pointsToday
+    return (dashboardData?.recentTrips ?? []).reduce((total, trip) => {
+      const dt = new Date(trip.tripStart)
+      return total + (dt.getFullYear() === today.getFullYear() &&
+        dt.getMonth() === today.getMonth() &&
+        dt.getDate() === today.getDate()
+        ? 1
+        : 0)
     }, 0)
-  }, [driverRows])
+  }, [dashboardData?.recentTrips])
 
-  const recentActivities = useMemo<ActivityItem[]>(() => {
-    const driverActivities = driverRows.map((driver) => ({
-      id: `driver-${driver.driverId}-${driver.lastSeenTs}`,
-      title: driver.driverId,
-      subtitle: driver.latestPoint.tripId ?? "Route update",
-      ts: driver.lastSeenTs,
-      variant: "ok" as const
-    }))
+  const filteredAllDriverRows = useMemo(() => {
+    if (!hasSearchQuery) return driverDirectoryRows
+    return driverDirectoryRows.filter((driver) => {
+      const tripId = driver.liveState?.latestPoint.tripId ?? ""
+      const driverName = `${driver.firstName} ${driver.lastName}`.toLowerCase()
+      return (
+        String(driver.driverId).toLowerCase().includes(normalizedSearchQuery) ||
+        driver.driverCode.toLowerCase().includes(normalizedSearchQuery) ||
+        driverName.includes(normalizedSearchQuery) ||
+        driver.todaName.toLowerCase().includes(normalizedSearchQuery) ||
+        driver.barangayName.toLowerCase().includes(normalizedSearchQuery) ||
+        tripId.toLowerCase().includes(normalizedSearchQuery) ||
+        (driver.liveState
+          ? formatPoint(driver.liveState.latestPoint).toLowerCase().includes(normalizedSearchQuery)
+          : false)
+      )
+    })
+  }, [driverDirectoryRows, hasSearchQuery, normalizedSearchQuery])
 
-    const alertActivities = alerts.map((alert) => ({
-      id: `alert-${alert.driverId}-${alert.ts}`,
-      title: `${alert.driverId} violation`,
-      subtitle: alert.reason,
-      ts: alert.ts,
-      variant: "alert" as const
-    }))
+  const filteredActiveDriverRows = useMemo(() => {
+    if (!hasSearchQuery) return activeDriverRows
+    return activeDriverRows.filter((driver) => {
+      const tripId = driver.liveState?.latestPoint.tripId ?? ""
+      const driverName = `${driver.firstName} ${driver.lastName}`.toLowerCase()
+      return (
+        String(driver.driverId).toLowerCase().includes(normalizedSearchQuery) ||
+        driver.driverCode.toLowerCase().includes(normalizedSearchQuery) ||
+        driverName.includes(normalizedSearchQuery) ||
+        driver.todaName.toLowerCase().includes(normalizedSearchQuery) ||
+        driver.barangayName.toLowerCase().includes(normalizedSearchQuery) ||
+        tripId.toLowerCase().includes(normalizedSearchQuery) ||
+        (driver.liveState
+          ? formatPoint(driver.liveState.latestPoint).toLowerCase().includes(normalizedSearchQuery)
+          : false)
+      )
+    })
+  }, [activeDriverRows, hasSearchQuery, normalizedSearchQuery])
 
-    return [...alertActivities, ...driverActivities]
-      .sort((a, b) => b.ts - a.ts)
-      .slice(0, 8)
-  }, [alerts, driverRows])
+  const alertRows = useMemo<AlertListItem[]>(() => {
+    const combined = [
+      ...(dashboardData?.recentViolations ?? []).map(createStoredAlertListItem),
+      ...alerts.map(createLiveAlertListItem)
+    ]
 
-  const pageLabel = NAV_ITEMS.find((item) => item.key === activePage)?.label ?? "Dashboard"
+    const deduped = new Map<string, AlertListItem>()
+    for (const alert of combined) {
+      const key = `${alert.driverId}|${alert.reason}|${alert.ts}`
+      if (!deduped.has(key)) {
+        deduped.set(key, alert)
+      }
+    }
+
+    return [...deduped.values()].sort((a, b) => b.ts - a.ts)
+  }, [dashboardData?.recentViolations, alerts])
+
+  const filteredAlerts = useMemo(() => {
+    if (!hasSearchQuery) return alertRows
+    return alertRows.filter((alert) => {
+      const point =
+        alert.lat !== undefined && alert.lng !== undefined
+          ? `${alert.lat.toFixed(5)}, ${alert.lng.toFixed(5)}`
+          : ""
+      return (
+        alert.driverId.toLowerCase().includes(normalizedSearchQuery) ||
+        (alert.driverName?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
+        alert.reason.toLowerCase().includes(normalizedSearchQuery) ||
+        (alert.description?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
+        point.toLowerCase().includes(normalizedSearchQuery)
+      )
+    })
+  }, [alertRows, hasSearchQuery, normalizedSearchQuery])
+
+  const homeAlertSummary = useMemo(() => {
+    const prioritized = [...filteredAlerts].sort((a, b) => {
+      const priorityGap = getAlertPriority(b) - getAlertPriority(a)
+      if (priorityGap !== 0) return priorityGap
+      return b.ts - a.ts
+    })
+    const urgent = prioritized.filter((alert) => clockTs - alert.ts <= ALERT_URGENT_WINDOW_MS)
+    const source = urgent.length > 0 ? urgent : prioritized
+    return source.slice(0, HOME_ALERT_SUMMARY_LIMIT)
+  }, [filteredAlerts, clockTs])
+
+  const tripRows = useMemo(() => {
+    return dashboardData?.recentTrips ?? []
+  }, [dashboardData?.recentTrips])
+
+  const filteredTripRows = useMemo(() => {
+    if (!hasSearchQuery) return tripRows
+    return tripRows.filter((trip) => {
+      return (
+        String(trip.tripId).includes(trimmedSearchQuery) ||
+        String(trip.driverId).includes(trimmedSearchQuery) ||
+        trip.driverName.toLowerCase().includes(normalizedSearchQuery) ||
+        trip.plateNo.toLowerCase().includes(normalizedSearchQuery) ||
+        trip.routeName.toLowerCase().includes(normalizedSearchQuery) ||
+        trip.todaName.toLowerCase().includes(normalizedSearchQuery) ||
+        trip.barangayName.toLowerCase().includes(normalizedSearchQuery)
+      )
+    })
+  }, [tripRows, hasSearchQuery, trimmedSearchQuery, normalizedSearchQuery])
+
+  const homeTripLogSummary = useMemo(() => {
+    if (filteredTripRows.length > 0) {
+      return filteredTripRows.slice(0, HOME_TRIP_LOG_SUMMARY_LIMIT)
+    }
+    return filteredAllDriverRows.slice(0, HOME_TRIP_LOG_SUMMARY_LIMIT)
+  }, [filteredAllDriverRows, filteredTripRows])
+
+  const navItems = useMemo<NavItem[]>(() => {
+    if (adminProfile.role === "superadmin") {
+      return [
+        { key: "superadmin", label: "System Setup" },
+        ...BASE_NAV_ITEMS
+      ]
+    }
+
+    if (adminProfile.role === "toda_admin") {
+      return TODA_NAV_ITEMS
+    }
+
+    return BASE_NAV_ITEMS
+  }, [adminProfile.role])
+
+  const pageLabel = navItems.find((item) => item.key === activePage)?.label ?? "Dashboard"
+  const headerBarangay = adminProfile.barangayName ?? "Unassigned Barangay"
+  const headerToda = adminProfile.todaName ?? "All TODAs"
+  const profileInitials = adminProfile.email
+    .split("@")[0]
+    .split(/[._-]/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? "")
+    .join("") || "AD"
+  const profileScope =
+    adminProfile.role === "superadmin"
+      ? "System Admin"
+      : adminProfile.todaName
+        ? `${adminProfile.role.replace("_", " ")} - ${adminProfile.todaName}`
+        : adminProfile.barangayName
+          ? `${adminProfile.role.replace("_", " ")} - ${adminProfile.barangayName}`
+          : adminProfile.role.replace("_", " ")
 
   return (
     <div className="admin-shell">
@@ -549,7 +1019,7 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
         </div>
 
         <nav className="sidebar-nav">
-          {NAV_ITEMS.map((item) => (
+          {navItems.map((item) => (
             <button
               key={item.key}
               type="button"
@@ -571,23 +1041,55 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
       <div className="admin-main">
         <header className="admin-topbar">
           <div>
-            <div className="admin-topbar__crumb">DASHBOARD / BRGY 18-B</div>
-            <div className="admin-topbar__sub">TODA : UMASA</div>
+            <div className="admin-topbar__crumb">
+              DASHBOARD / {headerBarangay.toUpperCase()}
+            </div>
+            <div className="admin-topbar__sub">TODA : {headerToda.toUpperCase()}</div>
           </div>
 
           <div className="admin-topbar__controls">
-            <input className="topbar-search" placeholder="Search unit ID..." />
+            <input
+              className="topbar-search"
+              placeholder="Search unit ID..."
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              aria-label="Search by unit ID"
+            />
             <div className="topbar-profile">
-              <div className="profile-avatar">JV</div>
+              <div className="profile-avatar">{profileInitials}</div>
               <div>
-                <div className="profile-name">J. VILLAVERDE</div>
-                <div className="profile-meta">DRIVER - 12345</div>
+                <div className="profile-name">{adminProfile.email}</div>
+                <div className="profile-meta">{profileScope}</div>
               </div>
             </div>
           </div>
         </header>
 
-        <main className="admin-content">
+        <main className="admin-content" ref={contentEl}>
+          {dashboardError && activePage !== "superadmin" && activePage !== "toda-admin" && (
+            <div className="page-panel" style={{ padding: "12px 14px", marginBottom: "14px" }}>
+              <div className="muted">Dashboard data sync issue: {dashboardError}</div>
+            </div>
+          )}
+
+          {activePage === "superadmin" && adminProfile.role === "superadmin" && (
+            <SuperadminPage
+              accessToken={accessToken}
+              mode="superadmin"
+              onDataChanged={() => void refreshDashboardData()}
+            />
+          )}
+
+          {activePage === "toda-admin" && adminProfile.role === "toda_admin" && (
+            <SuperadminPage
+              accessToken={accessToken}
+              mode="toda-admin"
+              lockedTodaId={adminProfile.todaId}
+              lockedTodaLabel={adminProfile.todaName}
+              onDataChanged={() => void refreshDashboardData()}
+            />
+          )}
+
           {activePage === "home" && (
             <section className="page-stack">
               <div className="overview-grid">
@@ -595,14 +1097,14 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
                   <div className="overview-card__label">Active Tricycles</div>
                   <div className="overview-card__value">
                     {activeDriverCount}
-                    <span>/{REGISTERED_DRIVERS}</span>
+                    <span>/{dashboardData?.counts.tricycles ?? 0}</span>
                   </div>
                 </article>
 
                 <article className="overview-card">
                   <div className="overview-card__label">Active Alerts</div>
                   <div className="overview-card__value overview-card__value--danger">
-                    {alerts.length.toString().padStart(2, "0")}
+                    {alertRows.length.toString().padStart(2, "0")}
                   </div>
                 </article>
 
@@ -613,42 +1115,139 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
 
                 <article className="overview-card">
                   <div className="overview-card__label">Registered Drivers</div>
-                  <div className="overview-card__value">{REGISTERED_DRIVERS}</div>
+                  <div className="overview-card__value">{dashboardData?.counts.drivers ?? 0}</div>
                 </article>
               </div>
 
-              <section className="page-panel">
-                <div className="page-panel__header">
-                  <h2>Recent Activities</h2>
-                  <p>Real-time monitoring updates</p>
-                </div>
-                <div className="activity-list">
-                  {recentActivities.length === 0 ? (
-                    <div className="muted">No activities yet. Open Live Map to start tracking.</div>
-                  ) : (
-                    recentActivities.map((activity) => (
-                      <div key={activity.id} className="activity-row">
-                        <div className={`activity-icon activity-icon--${activity.variant}`} />
-                        <div className="activity-text">
-                          <div className="activity-title">{activity.title}</div>
-                          <div className="activity-subtitle">{activity.subtitle}</div>
-                        </div>
-                        <div className="activity-time">{formatLastSeen(activity.ts, clockTs)}</div>
+              <section className="home-summary-grid">
+                <section className="page-panel">
+                  <div className="page-panel__header page-panel__header--compact">
+                    <div>
+                      <h3>Alerts Highlights</h3>
+                      <p>View alert details in the Alerts page.</p>
+                    </div>
+                    <button
+                      type="button"
+                      className="summary-link"
+                      onClick={() => setActivePage("alerts")}
+                    >
+                      View all
+                    </button>
+                  </div>
+                  <div className="alerts-list alerts-list--summary">
+                    {homeAlertSummary.length === 0 ? (
+                      <div className="muted">
+                        {hasSearchQuery
+                          ? `No alerts match "${trimmedSearchQuery}".`
+                          : "No geofence boundary alerts yet."}
                       </div>
-                    ))
-                  )}
-                </div>
+                    ) : (
+                      homeAlertSummary.map((alert) => (
+                        <div key={alert.key} className="alert-row">
+                          <div className="alert-row__top">
+                            <strong>{alert.driverName ?? `Driver ${alert.driverId}`}</strong>
+                            <span>{new Date(alert.ts).toLocaleTimeString()}</span>
+                          </div>
+                          <div className="alert-row__meta">{alert.reason}</div>
+                          {alert.description && (
+                            <div className="alert-row__meta">{alert.description}</div>
+                          )}
+                          {alert.lat !== undefined && alert.lng !== undefined && (
+                            <div className="alert-row__meta">
+                              {alert.lat.toFixed(5)}, {alert.lng.toFixed(5)}
+                            </div>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </section>
+
+                <section className="page-panel">
+                  <div className="page-panel__header page-panel__header--compact">
+                    <div>
+                      <h3>Trip Logs Summary</h3>
+                      <p>View all trips in the Trip Logs page.</p>
+                    </div>
+                    <button
+                      type="button"
+                      className="summary-link"
+                      onClick={() => setActivePage("trip-logs")}
+                    >
+                      View all
+                    </button>
+                  </div>
+                  <div className="trip-logs-list trip-logs-list--summary">
+                    {homeTripLogSummary.length === 0 ? (
+                      <div className="muted">
+                        {hasSearchQuery
+                          ? `No trip logs match "${trimmedSearchQuery}".`
+                          : "Trip stream will appear once messages arrive."}
+                      </div>
+                    ) : (
+                      homeTripLogSummary.map((item) => {
+                        if ("tripId" in item) {
+                          return (
+                            <div key={`trip-${item.tripId}`} className="trip-driver">
+                              <div className="trip-driver__top">
+                                <strong>{item.driverName}</strong>
+                                <span>{item.tripStatus.toUpperCase()}</span>
+                              </div>
+                              <div className="trip-driver__meta">
+                                Trip #{item.tripId} | {item.plateNo} | {item.routeName}
+                              </div>
+                            </div>
+                          )
+                        }
+
+                        const isDriverOnline =
+                          online &&
+                          ((item.liveState?.lastSeenTs ?? 0) > 0) &&
+                          clockTs - (item.liveState?.lastSeenTs ?? 0) <= DRIVER_OFFLINE_MS
+                        return (
+                          <div key={`driver-${item.driverId}`} className="trip-driver">
+                            <div className="trip-driver__top">
+                              <strong>{item.firstName} {item.lastName}</strong>
+                              <span
+                                className={
+                                  isDriverOnline ? "status-badge online" : "status-badge offline"
+                                }
+                              >
+                                {isDriverOnline ? "Online" : "Offline"}
+                              </span>
+                            </div>
+                            <div className="trip-driver__meta">
+                              {item.driverCode} | {item.todaName} | Status {item.status}
+                            </div>
+                          </div>
+                        )
+                      })
+                    )}
+                  </div>
+                </section>
               </section>
             </section>
           )}
 
-          <section className={`live-map-grid ${activePage === "live-map" ? "" : "page-hidden"}`}>
+          <section
+            className={`live-map-grid ${showLiveMapView ? "" : "page-hidden"} ${
+              activePage === "home" ? "live-map-grid--home" : ""
+            } ${activePage === "live-map" ? "live-map-grid--live" : ""}`}
+          >
               <section className="page-panel page-panel--map">
-                <div className="page-panel__header">
+                <div className="page-panel__header" ref={mapHeaderEl}>
                   <h2>Live Map</h2>
-                  <p>Obrero to Agdao TODA Route</p>
+                  <p>UMASA TODA Geofence Boundary</p>
                 </div>
-                <div className="admin-map" ref={mapEl} />
+                <div
+                  className="admin-map"
+                  ref={mapEl}
+                  style={
+                    activePage === "live-map" && liveMapCanvasHeight
+                      ? { height: `${liveMapCanvasHeight}px` }
+                      : undefined
+                  }
+                />
               </section>
 
               <aside className="live-map-side">
@@ -663,7 +1262,7 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
                     <div>
                       {outboxCount} pending ({outboxStatus})
                     </div>
-                    <div>Last WS update</div>
+                    <div>Last data update</div>
                     <div>{lastUpdateTs ? new Date(lastUpdateTs).toLocaleTimeString() : "-"}</div>
                   </div>
                 </section>
@@ -671,16 +1270,22 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
                 <section className="page-panel side-card">
                   <div className="admin-pane__title">Drivers</div>
                   <div className="drivers-list">
-                    {driverRows.length === 0 ? (
-                      <div className="muted">No active drivers yet.</div>
+                    {filteredActiveDriverRows.length === 0 ? (
+                      <div className="muted">
+                        {hasSearchQuery
+                          ? `No drivers match "${trimmedSearchQuery}".`
+                          : "No active drivers yet."}
+                      </div>
                     ) : (
-                      driverRows.slice(0, 8).map((driver) => {
+                      filteredActiveDriverRows.slice(0, 8).map((driver) => {
                         const isDriverOnline =
-                          online && clockTs - driver.lastSeenTs <= DRIVER_OFFLINE_MS
+                          online &&
+                          ((driver.liveState?.lastSeenTs ?? 0) > 0) &&
+                          clockTs - (driver.liveState?.lastSeenTs ?? 0) <= DRIVER_OFFLINE_MS
                         return (
                           <div className="driver-row" key={driver.driverId}>
                             <div className="driver-row__top">
-                              <strong>{driver.driverId}</strong>
+                              <strong>{driver.firstName} {driver.lastName}</strong>
                               <span
                                 className={
                                   isDriverOnline
@@ -692,9 +1297,19 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
                               </span>
                             </div>
                             <div className="driver-row__meta">
-                              Last seen {formatLastSeen(driver.lastSeenTs, clockTs)}
+                              {driver.driverCode} | {driver.todaName}
                             </div>
-                            <div className="driver-row__meta">Point {formatPoint(driver.latestPoint)}</div>
+                            <div className="driver-row__meta">
+                              {driver.tricycleNo
+                                ? `Tricycle ${driver.tricycleNo}`
+                                : "No tricycle assigned"}
+                              {driver.qrId ? ` | QR #${driver.qrId}` : ""}
+                            </div>
+                            <div className="driver-row__meta">
+                              {driver.liveState
+                                ? `Point ${formatPoint(driver.liveState.latestPoint)}`
+                                : "Waiting for live GPS point"}
+                            </div>
                           </div>
                         )
                       })
@@ -702,120 +1317,130 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
                   </div>
                 </section>
 
-                <section className="page-panel side-card">
-                  <div className="admin-pane__title">Alerts</div>
-                  <div className="alerts-list">
-                    {alerts.length === 0 ? (
-                      <div className="muted">No route-corridor alerts yet.</div>
-                    ) : (
-                      alerts.slice(0, 8).map((alert) => (
-                        <div key={`${alert.driverId}-${alert.ts}`} className="alert-row">
-                          <div className="alert-row__top">
-                            <strong>{alert.driverId}</strong>
-                            <span>{new Date(alert.ts).toLocaleTimeString()}</span>
-                          </div>
-                          <div className="alert-row__meta">{alert.reason}</div>
-                          <div className="alert-row__meta">
-                            {alert.lat.toFixed(5)}, {alert.lng.toFixed(5)}
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </section>
-
-                <section className="page-panel side-card side-card--grow">
-                  <div className="admin-pane__title">Trip Logs</div>
-                  <div className="trip-logs-list">
-                    {driverRows.length === 0 ? (
-                      <div className="muted">Trip stream will appear once messages arrive.</div>
-                    ) : (
-                      driverRows.slice(0, 6).map((driver) => (
-                        <div key={driver.driverId} className="trip-driver">
-                          <div className="trip-driver__top">
-                            <strong>{driver.driverId}</strong>
-                            <span>{driver.recentPoints.length} recent points</span>
-                          </div>
-                          <div className="trip-driver__meta">
-                            Last seen {formatLastSeen(driver.lastSeenTs, clockTs)} | Violations{" "}
-                            {driver.violationCount} | Sync {syncStatus}
-                          </div>
-                          <div className="trip-points">
-                            {driver.recentPoints.map((point) => (
-                              <div className="trip-point" key={`${driver.driverId}-${point.ts}`}>
-                                <span>{new Date(point.ts).toLocaleTimeString()}</span>
-                                <span>
-                                  {point.lat.toFixed(5)}, {point.lng.toFixed(5)}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </section>
               </aside>
           </section>
 
           {activePage === "drivers" && (
-            <section className="page-panel page-stack">
-              <div className="page-panel__header">
-                <h2>Drivers</h2>
-                <p>{driverRows.length} tracked drivers</p>
-              </div>
-              <div className="drivers-list drivers-list--page">
-                {driverRows.length === 0 ? (
-                  <div className="muted">No active drivers yet.</div>
-                ) : (
-                  driverRows.map((driver) => {
-                    const isDriverOnline =
-                      online && clockTs - driver.lastSeenTs <= DRIVER_OFFLINE_MS
-                    return (
-                      <div className="driver-row" key={driver.driverId}>
-                        <div className="driver-row__top">
-                          <strong>{driver.driverId}</strong>
-                          <span
-                            className={
-                              isDriverOnline ? "status-badge online" : "status-badge offline"
-                            }
-                          >
-                            {isDriverOnline ? "Online" : "Offline"}
-                          </span>
+            adminProfile.role === "toda_admin" ? (
+              <TodaManagementPage
+                accessToken={accessToken}
+                page="drivers"
+                lockedTodaId={adminProfile.todaId}
+                lockedTodaLabel={adminProfile.todaName}
+                onDataChanged={() => void refreshDashboardData()}
+              />
+            ) : (
+              <section className="page-panel page-stack">
+                <div className="page-panel__header">
+                  <h2>Drivers</h2>
+                  <p>
+                    {hasSearchQuery
+                      ? `${filteredAllDriverRows.length} matches for "${trimmedSearchQuery}"`
+                      : `${driverDirectoryRows.length} tracked drivers`}
+                  </p>
+                </div>
+                <div className="drivers-list drivers-list--page">
+                  {filteredAllDriverRows.length === 0 ? (
+                    <div className="muted">
+                      {hasSearchQuery ? `No drivers match "${trimmedSearchQuery}".` : "No drivers yet."}
+                    </div>
+                  ) : (
+                    filteredAllDriverRows.map((driver) => {
+                      const isDriverOnline =
+                        online &&
+                        ((driver.liveState?.lastSeenTs ?? 0) > 0) &&
+                        clockTs - (driver.liveState?.lastSeenTs ?? 0) <= DRIVER_OFFLINE_MS
+                      return (
+                        <div className="driver-row" key={driver.driverId}>
+                          <div className="driver-row__top">
+                            <strong>{driver.firstName} {driver.lastName}</strong>
+                            <span
+                              className={
+                                isDriverOnline ? "status-badge online" : "status-badge offline"
+                              }
+                            >
+                              {isDriverOnline ? "Online" : "Offline"}
+                            </span>
+                          </div>
+                          <div className="driver-row__meta">
+                            {driver.driverCode} | {driver.barangayName} | {driver.todaName}
+                          </div>
+                          <div className="driver-row__meta">
+                            {driver.tricycleNo
+                              ? `Tricycle ${driver.tricycleNo}`
+                              : "No tricycle assigned"}
+                            {driver.qrId ? ` | QR #${driver.qrId}` : ""}
+                            {` | Password ${driver.passwordSet ? "set" : "pending"}`}
+                          </div>
+                          <div className="driver-row__meta">
+                            {driver.liveState
+                              ? `Last seen ${formatLastSeen(driver.liveState.lastSeenTs, clockTs)}`
+                              : "No live point yet"}
+                          </div>
+                          <div className="driver-row__meta">
+                            {driver.liveState
+                              ? `Point ${formatPoint(driver.liveState.latestPoint)}`
+                              : `Status ${driver.status}`}
+                          </div>
                         </div>
-                        <div className="driver-row__meta">
-                          Last seen {formatLastSeen(driver.lastSeenTs, clockTs)}
-                        </div>
-                        <div className="driver-row__meta">Point {formatPoint(driver.latestPoint)}</div>
-                        <div className="driver-row__meta">Violations {driver.violationCount}</div>
-                      </div>
-                    )
-                  })
-                )}
-              </div>
-            </section>
+                      )
+                    })
+                  )}
+                </div>
+              </section>
+            )
+          )}
+
+          {activePage === "tricycles" && adminProfile.role === "toda_admin" && (
+            <TodaManagementPage
+              accessToken={accessToken}
+              page="tricycles"
+              lockedTodaId={adminProfile.todaId}
+              lockedTodaLabel={adminProfile.todaName}
+              onDataChanged={() => void refreshDashboardData()}
+            />
           )}
 
           {activePage === "alerts" && (
             <section className="page-panel page-stack">
               <div className="page-panel__header">
                 <h2>Alerts</h2>
-                <p>{alerts.length} total violations flagged</p>
+                <p>
+                  {hasSearchQuery
+                    ? `${filteredAlerts.length} matches for "${trimmedSearchQuery}"`
+                    : `${alertRows.length} total violations flagged`}
+                </p>
               </div>
               <div className="alerts-list alerts-list--page">
-                {alerts.length === 0 ? (
-                  <div className="muted">No route-corridor alerts yet.</div>
+                {filteredAlerts.length === 0 ? (
+                  <div className="muted">
+                    {hasSearchQuery
+                      ? `No alerts match "${trimmedSearchQuery}".`
+                      : "No geofence boundary alerts yet."}
+                  </div>
                 ) : (
-                  alerts.map((alert) => (
-                    <div key={`${alert.driverId}-${alert.ts}`} className="alert-row">
+                  filteredAlerts.map((alert) => (
+                    <div key={alert.key} className="alert-row">
                       <div className="alert-row__top">
-                        <strong>{alert.driverId}</strong>
+                        <strong>{alert.driverName ?? `Driver ${alert.driverId}`}</strong>
                         <span>{new Date(alert.ts).toLocaleString()}</span>
                       </div>
                       <div className="alert-row__meta">{alert.reason}</div>
-                      <div className="alert-row__meta">
-                        {alert.lat.toFixed(5)}, {alert.lng.toFixed(5)}
-                      </div>
+                      {alert.description && (
+                        <div className="alert-row__meta">{alert.description}</div>
+                      )}
+                      {alert.lat !== undefined && alert.lng !== undefined && (
+                        <div className="alert-row__meta">
+                          {alert.lat.toFixed(5)}, {alert.lng.toFixed(5)}
+                        </div>
+                      )}
+                      {(alert.todaName || alert.barangayName || alert.status) && (
+                        <div className="alert-row__meta">
+                          {[alert.barangayName, alert.todaName, alert.status]
+                            .filter(Boolean)
+                            .join(" | ")}
+                        </div>
+                      )}
                     </div>
                   ))
                 )}
@@ -827,31 +1452,46 @@ export default function AdminShell({ onLogout }: AdminShellProps) {
             <section className="page-panel page-stack">
               <div className="page-panel__header">
                 <h2>Trip Logs</h2>
-                <p>{pageLabel} monitoring stream</p>
+                <p>
+                  {hasSearchQuery
+                    ? `${filteredTripRows.length} matches for "${trimmedSearchQuery}"`
+                    : `${pageLabel} monitoring stream`}
+                </p>
               </div>
               <div className="trip-logs-list trip-logs-list--page">
-                {driverRows.length === 0 ? (
-                  <div className="muted">Trip stream will appear once messages arrive.</div>
+                {filteredTripRows.length === 0 ? (
+                  <div className="muted">
+                    {hasSearchQuery
+                      ? `No trip logs match "${trimmedSearchQuery}".`
+                      : "No stored trips yet."}
+                  </div>
                 ) : (
-                  driverRows.map((driver) => (
-                    <div key={driver.driverId} className="trip-driver">
+                  filteredTripRows.map((trip) => (
+                    <div key={trip.tripId} className="trip-driver">
                       <div className="trip-driver__top">
-                        <strong>{driver.driverId}</strong>
-                        <span>{driver.recentPoints.length} recent points</span>
+                        <strong>{trip.driverName}</strong>
+                        <span>{trip.tripStatus.toUpperCase()}</span>
                       </div>
                       <div className="trip-driver__meta">
-                        Last seen {formatLastSeen(driver.lastSeenTs, clockTs)} | Violations{" "}
-                        {driver.violationCount} | Sync {syncStatus}
+                        Trip #{trip.tripId} | {trip.plateNo} | {trip.routeName}
                       </div>
                       <div className="trip-points">
-                        {driver.recentPoints.map((point) => (
-                          <div className="trip-point" key={`${driver.driverId}-${point.ts}`}>
-                            <span>{new Date(point.ts).toLocaleTimeString()}</span>
-                            <span>
-                              {point.lat.toFixed(5)}, {point.lng.toFixed(5)}
-                            </span>
-                          </div>
-                        ))}
+                        <div className="trip-point">
+                          <span>Start</span>
+                          <span>{new Date(trip.tripStart).toLocaleString()}</span>
+                        </div>
+                        <div className="trip-point">
+                          <span>End</span>
+                          <span>{trip.tripEnd ? new Date(trip.tripEnd).toLocaleString() : "-"}</span>
+                        </div>
+                        <div className="trip-point">
+                          <span>Fare</span>
+                          <span>{trip.fareAmount !== undefined ? `PHP ${trip.fareAmount.toFixed(2)}` : "-"}</span>
+                        </div>
+                        <div className="trip-point">
+                          <span>Duration</span>
+                          <span>{trip.durationMinutes !== undefined ? `${trip.durationMinutes} min` : "-"}</span>
+                        </div>
                       </div>
                     </div>
                   ))

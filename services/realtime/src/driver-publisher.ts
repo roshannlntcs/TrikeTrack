@@ -2,7 +2,7 @@ import WebSocket from "ws"
 import type { DriverLocationEvent } from "../../../common/types"
 
 const WS_URL = process.env.WS_URL ?? "ws://localhost:4001/ws"
-const DRIVER_ID = process.env.DRIVER_ID ?? "DRIVER-001"
+const DRIVER_ID = process.env.DRIVER_ID ?? "D-001"
 
 const track: Array<[number, number]> = [
   [125.6154, 7.08633],

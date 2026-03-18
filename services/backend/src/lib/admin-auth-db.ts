@@ -1,95 +1,76 @@
-import fs from "node:fs"
-import path from "node:path"
+import { ensureDatabaseReady, query } from "./database"
 
-export type AdminUser = {
-  id: string
+export type AdminProfile = {
+  adminId: number
+  authUserId: string
   email: string
-  passwordHash: string
-  createdAt: string
+  role: "superadmin" | "barangay_admin" | "toda_admin"
+  status: "active" | "inactive" | "suspended"
+  barangayId?: number
+  barangayName?: string
+  todaId?: number
+  todaName?: string
+  city?: string
 }
 
-type AdminAuthDatabase = {
-  users: AdminUser[]
+type AdminProfileRow = {
+  admin_id: number
+  auth_user_id: string
+  email: string
+  admin_role: AdminProfile["role"]
+  status: AdminProfile["status"]
+  barangay_id: number | null
+  barangay_name: string | null
+  toda_id: number | null
+  toda_name: string | null
+  city: string | null
 }
 
-const DEFAULT_ADMIN_EMAIL = "todaadmin@gmail.com"
-const DEFAULT_ADMIN_PASSWORD_HASH =
-  "pbkdf2$sha512$210000$aca50226c99fd2878603df9d6482fe25$da3d5efb805ae9592e9797a8aea78ea4b01924dd1d918ed4c8496d36551dd3c88f610be85ea6ccbb8ba10bfc5f6a07602be1a2f4dd139b1c6267cf814f369689"
-
-const DB_PATH = path.join(process.cwd(), "data", "admin-users.json")
-
-const normalizeEmail = (value: string) => value.trim().toLowerCase()
-
-const defaultDatabase = (): AdminAuthDatabase => ({
-  users: [
-    {
-      id: "admin-001",
-      email: DEFAULT_ADMIN_EMAIL,
-      passwordHash: DEFAULT_ADMIN_PASSWORD_HASH,
-      createdAt: new Date().toISOString()
-    }
-  ]
+const mapAdminProfile = (row: AdminProfileRow): AdminProfile => ({
+  adminId: Number(row.admin_id),
+  authUserId: row.auth_user_id,
+  email: row.email,
+  role: row.admin_role,
+  status: row.status,
+  barangayId: row.barangay_id === null ? undefined : Number(row.barangay_id),
+  barangayName: row.barangay_name ?? undefined,
+  todaId: row.toda_id === null ? undefined : Number(row.toda_id),
+  todaName: row.toda_name ?? undefined,
+  city: row.city ?? undefined
 })
 
-const writeDatabase = (db: AdminAuthDatabase) => {
-  const dir = path.dirname(DB_PATH)
-  fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), "utf8")
-}
+export const getAdminProfileByAuthUserId = async (authUserId: string) => {
+  await ensureDatabaseReady()
 
-const readDatabase = (): AdminAuthDatabase => {
-  if (!fs.existsSync(DB_PATH)) {
-    const seeded = defaultDatabase()
-    writeDatabase(seeded)
-    return seeded
-  }
-
-  try {
-    const raw = fs.readFileSync(DB_PATH, "utf8")
-    const parsed = JSON.parse(raw) as AdminAuthDatabase
-    if (!parsed || !Array.isArray(parsed.users)) {
-      const seeded = defaultDatabase()
-      writeDatabase(seeded)
-      return seeded
-    }
-    return parsed
-  } catch {
-    const seeded = defaultDatabase()
-    writeDatabase(seeded)
-    return seeded
-  }
-}
-
-export const ensureDefaultAdminUser = () => {
-  const db = readDatabase()
-  const defaultUserIndex = db.users.findIndex(
-    (user) => normalizeEmail(user.email) === DEFAULT_ADMIN_EMAIL
+  const result = await query<AdminProfileRow>(
+    `
+      SELECT
+        aa.admin_id,
+        aa.auth_user_id,
+        au.email,
+        aa.admin_role,
+        aa.status,
+        COALESCE(aa.barangay_id, tb.barangay_id) AS barangay_id,
+        COALESCE(b.barangay_name, tb.barangay_name) AS barangay_name,
+        aa.toda_id,
+        t.toda_name,
+        COALESCE(b.city, tb.city) AS city
+      FROM public.admin_accounts aa
+      JOIN auth.users au
+        ON au.id = aa.auth_user_id
+      LEFT JOIN public.barangays b
+        ON b.barangay_id = aa.barangay_id
+      LEFT JOIN public.todas t
+        ON t.toda_id = aa.toda_id
+      LEFT JOIN public.barangays tb
+        ON tb.barangay_id = t.barangay_id
+      WHERE aa.auth_user_id = $1
+        AND aa.status = 'active'
+      LIMIT 1
+    `,
+    [authUserId]
   )
 
-  if (defaultUserIndex === -1) {
-    db.users.push({
-      id: "admin-001",
-      email: DEFAULT_ADMIN_EMAIL,
-      passwordHash: DEFAULT_ADMIN_PASSWORD_HASH,
-      createdAt: new Date().toISOString()
-    })
-    writeDatabase(db)
-    return
-  }
-
-  const defaultUser = db.users[defaultUserIndex]
-  if (defaultUser.passwordHash === DEFAULT_ADMIN_PASSWORD_HASH) return
-
-  db.users[defaultUserIndex] = {
-    ...defaultUser,
-    passwordHash: DEFAULT_ADMIN_PASSWORD_HASH
-  }
-  writeDatabase(db)
-}
-
-export const findAdminByEmail = (email: string) => {
-  ensureDefaultAdminUser()
-  const db = readDatabase()
-  const normalized = normalizeEmail(email)
-  return db.users.find((user) => normalizeEmail(user.email) === normalized) ?? null
+  const row = result.rows[0]
+  return row ? mapAdminProfile(row) : null
 }

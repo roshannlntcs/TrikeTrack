@@ -66,18 +66,20 @@
 }
 
 .logout-button {
-  border: 1px solid #2f3d50;
-  background: #0a0f17;
-  color: #e2e8f0;
+  border: 1px solid #7f4a52;
+  background: #d61a36;
+  color: #f8ecee;
   border-radius: 8px;
   padding: 8px 12px;
   font-size: 0.9rem;
   font-weight: 600;
   cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
 }
 
 .logout-button:hover {
-  background: #111a27;
+  background: #7f1c2b;
+  border-color: #8c535c;
 }
 
 .sidebar-logout {
@@ -249,6 +251,47 @@
   color: #5d6776;
 }
 
+.page-panel__header--compact {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.page-panel__header--compact h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.page-panel__header--compact p {
+  margin: 2px 0 0;
+  font-size: 0.82rem;
+}
+
+.summary-link {
+  border: 1px solid #9dc8ba;
+  background: #e7f6f1;
+  color: #0f4a3b;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.summary-link:hover {
+  background: #d4eee6;
+}
+
+.home-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .activity-list {
   min-height: 0;
 }
@@ -298,6 +341,18 @@
   gap: 12px;
 }
 
+.live-map-grid--home {
+  margin-top: 14px;
+}
+
+.live-map-grid--live {
+  grid-template-columns: 1fr;
+}
+
+.live-map-grid.page-hidden {
+  display: none;
+}
+
 .page-panel--map {
   overflow: hidden;
 }
@@ -308,11 +363,20 @@
   min-height: 460px;
 }
 
+.live-map-grid--live .admin-map {
+  min-height: 0;
+}
+
 .live-map-side {
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto auto minmax(220px, 1fr);
+  grid-template-rows: auto auto;
   gap: 12px;
+}
+
+.live-map-grid--live .live-map-side {
+  grid-template-columns: 1fr;
+  grid-template-rows: auto auto;
 }
 
 .side-card {
@@ -350,6 +414,12 @@
 .alerts-list--page,
 .trip-logs-list--page {
   padding: 10px;
+}
+
+.alerts-list--summary,
+.trip-logs-list--summary {
+  padding: 10px;
+  max-height: 260px;
 }
 
 .driver-row,
@@ -420,6 +490,10 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .home-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
   .live-map-grid {
     grid-template-columns: 1fr;
   }
@@ -484,6 +558,10 @@
   }
 
   .overview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .home-summary-grid {
     grid-template-columns: 1fr;
   }
 

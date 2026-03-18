@@ -2,6 +2,7 @@ import { openDB } from "idb"
 import type { ViolationReason } from "../../../../common/types"
 
 export type LocationPoint = {
+  id?: string
   driverId: string
   ts: number
   lng: number
@@ -33,7 +34,13 @@ export type OutboxItem = {
   payload: ViolationPayload
 }
 
-export const dbPromise = openDB("triketrack-admin", 2, {
+const createPointId = (point: Pick<LocationPoint, "driverId" | "ts" | "lng" | "lat">) => {
+  const lngBucket = Math.round(point.lng * 100000)
+  const latBucket = Math.round(point.lat * 100000)
+  return `${point.driverId}|${point.ts}|${lngBucket}:${latBucket}`
+}
+
+export const dbPromise = openDB("triketrack-admin", 3, {
   upgrade(db, oldVersion) {
     if (oldVersion < 1 && !db.objectStoreNames.contains("points")) {
       db.createObjectStore("points", { keyPath: "ts" })
@@ -41,12 +48,19 @@ export const dbPromise = openDB("triketrack-admin", 2, {
     if (oldVersion < 2 && !db.objectStoreNames.contains("outbox")) {
       db.createObjectStore("outbox", { keyPath: "id" })
     }
+    if (oldVersion < 3 && db.objectStoreNames.contains("points")) {
+      db.deleteObjectStore("points")
+      db.createObjectStore("points", { keyPath: "id" })
+    }
   }
 })
 
 export async function savePoint(p: LocationPoint) {
   const db = await dbPromise
-  await db.put("points", p)
+  await db.put("points", {
+    ...p,
+    id: p.id ?? createPointId(p)
+  })
 }
 
 export async function getRecentPoints(limit = 200) {

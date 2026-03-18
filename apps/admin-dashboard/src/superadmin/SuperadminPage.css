@@ -1,0 +1,257 @@
+.superadmin-page {
+  display: grid;
+  gap: 16px;
+}
+
+.superadmin-hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid #b8c0b8;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #edf7f2 0%, #f8faf9 100%);
+}
+
+.superadmin-hero h2 {
+  margin: 0;
+  font-size: 2rem;
+  color: #102028;
+}
+
+.superadmin-hero p {
+  margin: 6px 0 0;
+  max-width: 760px;
+  color: #4b5563;
+}
+
+.superadmin-refresh {
+  border: 0;
+  border-radius: 999px;
+  background: #0d3f74;
+  color: #ffffff;
+  padding: 10px 16px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.superadmin-refresh:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.superadmin-summary {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.superadmin-stat {
+  background: #f8faf9;
+  border: 1px solid #b8c0b8;
+  border-radius: 12px;
+  padding: 14px;
+}
+
+.superadmin-stat span {
+  display: block;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #5b6572;
+}
+
+.superadmin-stat strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 2rem;
+  color: #0f172a;
+}
+
+.superadmin-banner {
+  border-radius: 12px;
+  border: 1px solid #9cc9b3;
+  background: #ebf8f0;
+  color: #18553f;
+  padding: 12px 14px;
+  font-weight: 600;
+}
+
+.superadmin-banner--error {
+  border-color: #f0b3b3;
+  background: #fff1f1;
+  color: #9f1239;
+}
+
+.superadmin-create-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.superadmin-card,
+.superadmin-table-card {
+  background: #f8faf9;
+  border: 1px solid #b8c0b8;
+  border-radius: 14px;
+  padding: 16px;
+}
+
+.superadmin-card {
+  display: grid;
+  gap: 10px;
+}
+
+.superadmin-card--wide {
+  grid-column: span 2;
+}
+
+.superadmin-card h3,
+.superadmin-table-card h3 {
+  margin: 0;
+  font-size: 1.15rem;
+  color: #102028;
+}
+
+.superadmin-card input,
+.superadmin-card select,
+.superadmin-card textarea,
+.superadmin-table input,
+.superadmin-table select {
+  width: 100%;
+  border: 1px solid #c3d0c6;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #111827;
+  padding: 10px 12px;
+  font: inherit;
+}
+
+.superadmin-card textarea {
+  resize: vertical;
+}
+
+.superadmin-card button,
+.superadmin-table button {
+  border: 0;
+  border-radius: 10px;
+  background: #124f8c;
+  color: #ffffff;
+  padding: 10px 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.superadmin-card button:disabled,
+.superadmin-table button:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.superadmin-table-card {
+  display: grid;
+  gap: 12px;
+}
+
+.superadmin-table-card__header p {
+  margin: 4px 0 0;
+  color: #5d6776;
+}
+
+.superadmin-table {
+  display: grid;
+  gap: 10px;
+}
+
+.superadmin-table__head,
+.superadmin-table__row {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+  align-items: center;
+}
+
+.superadmin-table--toda .superadmin-table__head,
+.superadmin-table--toda .superadmin-table__row {
+  grid-template-columns: 1.3fr 1.1fr 0.9fr 0.7fr 0.7fr 0.7fr;
+}
+
+.superadmin-table--driver .superadmin-table__head,
+.superadmin-table--driver .superadmin-table__row {
+  grid-template-columns: 1.2fr 0.8fr 1fr 1fr 1fr 0.9fr 0.8fr 0.7fr;
+}
+
+.superadmin-table--tricycle .superadmin-table__head,
+.superadmin-table--tricycle .superadmin-table__row {
+  grid-template-columns: 1.2fr 1fr 1fr 0.9fr 0.7fr;
+}
+
+.superadmin-table--route .superadmin-table__head,
+.superadmin-table--route .superadmin-table__row {
+  grid-template-columns: 1.4fr 1fr 1fr 0.9fr 0.7fr;
+}
+
+.superadmin-table__head {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #5b6572;
+  font-weight: 700;
+}
+
+.superadmin-table__row {
+  padding: 12px;
+  border: 1px solid #d7ded6;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.superadmin-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  border-radius: 10px;
+  background: #eef4ee;
+  border: 1px solid #d3ddd3;
+  color: #33504a;
+  font-weight: 700;
+}
+
+@media (max-width: 1100px) {
+  .superadmin-summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .superadmin-create-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .superadmin-card--wide {
+    grid-column: span 1;
+  }
+
+  .superadmin-table__head,
+  .superadmin-table__row,
+  .superadmin-table--toda .superadmin-table__head,
+  .superadmin-table--toda .superadmin-table__row,
+  .superadmin-table--driver .superadmin-table__head,
+  .superadmin-table--driver .superadmin-table__row,
+  .superadmin-table--tricycle .superadmin-table__head,
+  .superadmin-table--tricycle .superadmin-table__row,
+  .superadmin-table--route .superadmin-table__head,
+  .superadmin-table--route .superadmin-table__row {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .superadmin-hero {
+    flex-direction: column;
+  }
+
+  .superadmin-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

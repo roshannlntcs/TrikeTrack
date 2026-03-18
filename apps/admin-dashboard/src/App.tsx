@@ -1,67 +1,154 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
+import type { Session } from "@supabase/supabase-js"
 import AdminLogin from "./auth/AdminLogin"
 import AdminShell from "./layout/AdminShell"
+import { fetchAdminProfile, type AdminProfile } from "./lib/admin-profile"
+import { supabase } from "./lib/supabase"
 
-const ADMIN_SESSION_KEY = "triketrack_admin_signed_in"
-const AUTH_ENDPOINT =
-  import.meta.env.VITE_AUTH_ENDPOINT || "/api/auth/login"
-
-type LoginResponse = {
-  ok?: boolean
-  message?: string
-}
-
-const BACKEND_DOWN_MESSAGE =
-  "Unable to connect to backend. Please start backend on port 4000 and try again."
+const ADMIN_REMEMBERED_EMAIL_KEY = "triketrack_admin_remembered_email"
 
 export default function App() {
-  const [isSignedIn, setIsSignedIn] = useState<boolean>(() => {
-    return window.localStorage.getItem(ADMIN_SESSION_KEY) === "1"
+  const [session, setSession] = useState<Session | null>(null)
+  const [authReady, setAuthReady] = useState(false)
+  const [adminProfile, setAdminProfile] = useState<AdminProfile | null>(null)
+  const [authError, setAuthError] = useState<string | null>(null)
+  const [rememberedEmail, setRememberedEmail] = useState<string>(() => {
+    return window.localStorage.getItem(ADMIN_REMEMBERED_EMAIL_KEY) ?? ""
   })
+  const [defaultRememberMe, setDefaultRememberMe] = useState<boolean>(() => {
+    return (window.localStorage.getItem(ADMIN_REMEMBERED_EMAIL_KEY) ?? "").length > 0
+  })
+
+  useEffect(() => {
+    let active = true
+
+    void supabase.auth.getSession().then(({ data }) => {
+      if (!active) return
+      setSession(data.session)
+      setAuthReady(true)
+    })
+
+    const {
+      data: { subscription }
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (!active) return
+      setSession(nextSession)
+      setAuthReady(true)
+      if (!nextSession) {
+        setAdminProfile(null)
+      }
+    })
+
+    return () => {
+      active = false
+      subscription.unsubscribe()
+    }
+  }, [])
+
+  useEffect(() => {
+    let active = true
+
+    const loadProfile = async () => {
+      if (!session?.access_token) {
+        setAdminProfile(null)
+        return
+      }
+
+      const result = await fetchAdminProfile(session.access_token)
+      if (!active) return
+
+      if (result.error) {
+        setAuthError(result.error)
+        setAdminProfile(null)
+        await supabase.auth.signOut()
+        return
+      }
+
+      setAuthError(null)
+      setAdminProfile(result.profile)
+    }
+
+    void loadProfile()
+
+    return () => {
+      active = false
+    }
+  }, [session])
 
   const handleSignIn = async (
     identifier: string,
-    password: string
+    password: string,
+    rememberMe: boolean
   ): Promise<string | null> => {
     if (!identifier || !password) return "Please enter email and password."
 
     try {
-      const response = await fetch(AUTH_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: identifier, password })
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: identifier,
+        password
       })
 
-      const contentType = response.headers.get("content-type") ?? ""
-      const payload = contentType.includes("application/json")
-        ? ((await response.json().catch(() => ({}))) as LoginResponse)
-        : ({} as LoginResponse)
-
-      if (!response.ok) {
-        if (response.status >= 500) return BACKEND_DOWN_MESSAGE
-        return payload.message || "incorrect email or password, please try again"
+      if (error) {
+        if (error.message.toLowerCase().includes("invalid login credentials")) {
+          return "incorrect email or password, please try again"
+        }
+        return error.message
       }
 
-      if (payload.ok !== true) {
-        return payload.message || "incorrect email or password, please try again"
+      if (!data.session?.access_token) {
+        return "Login did not return a valid session."
       }
 
-      window.localStorage.setItem(ADMIN_SESSION_KEY, "1")
-      setIsSignedIn(true)
+      const profileResult = await fetchAdminProfile(data.session.access_token)
+      if (profileResult.error) {
+        await supabase.auth.signOut()
+        return profileResult.error
+      }
+
+      if (rememberMe) {
+        window.localStorage.setItem(ADMIN_REMEMBERED_EMAIL_KEY, identifier)
+        setRememberedEmail(identifier)
+        setDefaultRememberMe(true)
+      } else {
+        window.localStorage.removeItem(ADMIN_REMEMBERED_EMAIL_KEY)
+        setRememberedEmail("")
+        setDefaultRememberMe(false)
+      }
+
+      setAuthError(null)
+      setAdminProfile(profileResult.profile)
       return null
-    } catch {
-      return BACKEND_DOWN_MESSAGE
+    } catch (error) {
+      return String(error)
     }
   }
 
   const handleLogout = () => {
-    window.localStorage.removeItem(ADMIN_SESSION_KEY)
-    setIsSignedIn(false)
+    setAuthError(null)
+    setAdminProfile(null)
+    void supabase.auth.signOut()
   }
 
-  if (!isSignedIn) {
-    return <AdminLogin onSignIn={handleSignIn} />
+  if (!authReady) {
+    return null
   }
 
-  return <AdminShell onLogout={handleLogout} />
+  if (!session || !adminProfile) {
+    return (
+      <AdminLogin
+        onSignIn={handleSignIn}
+        initialIdentifier={rememberedEmail}
+        initialRememberMe={defaultRememberMe}
+        initialErrorMessage={authError}
+      />
+    )
+  }
+
+  return (
+    <AdminShell
+      onLogout={handleLogout}
+      adminProfile={adminProfile}
+      accessToken={session.access_token}
+    />
+  )
 }

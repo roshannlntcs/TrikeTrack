@@ -4,6 +4,8 @@ import { VitePWA } from "vite-plugin-pwa"
 import fs from "node:fs"
 import path from "node:path"
 
+const API_PROXY_TARGET = process.env.VITE_PROXY_TARGET || "http://127.0.0.1:4000"
+
 const mockLocationsPlugin = (): Plugin => ({
   name: "mock-tricycle-locations",
   configureServer(server) {
@@ -58,11 +60,19 @@ export default defineConfig({
   server: {
     proxy: {
       "/api/auth": {
-        target: "http://127.0.0.1:4000",
+        target: API_PROXY_TARGET,
+        changeOrigin: true
+      },
+      "/api/admin": {
+        target: API_PROXY_TARGET,
         changeOrigin: true
       },
       "/api/violations": {
-        target: "http://127.0.0.1:4000",
+        target: API_PROXY_TARGET,
+        changeOrigin: true
+      },
+      "/api/trip-points": {
+        target: API_PROXY_TARGET,
         changeOrigin: true
       }
     }

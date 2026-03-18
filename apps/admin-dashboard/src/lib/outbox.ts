@@ -49,7 +49,7 @@ export async function syncOutbox(
           lng: item.payload.lng,
           lat: item.payload.lat,
           reason: item.payload.reason ?? "OUTSIDE_ROUTE_CORRIDOR",
-          routeId: item.payload.routeId ?? "obrero-agdao",
+          routeId: item.payload.routeId ?? "umasa-brgy-18b-geofence",
           speed: item.payload.speed,
           heading: item.payload.heading,
           accuracy: item.payload.accuracy

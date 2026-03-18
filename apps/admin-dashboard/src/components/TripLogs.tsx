@@ -97,7 +97,7 @@ export default function TripLogs({
         <div style={{ display: "grid", gap: "6px" }}>
           {points.map((point) => (
             <div
-              key={`${point.driverId}-${point.ts}`}
+              key={point.id ?? `${point.driverId}-${point.ts}`}
               style={{
                 display: "grid",
                 gridTemplateColumns: "120px 1fr 1fr 1fr",

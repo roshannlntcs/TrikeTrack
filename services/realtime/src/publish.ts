@@ -2,7 +2,7 @@ import WebSocket from "ws"
 import type { DriverLocationEvent } from "../../../common/types"
 
 const WS_URL = process.env.WS_URL ?? "ws://localhost:4001/ws"
-const DRIVER_ID = process.env.DRIVER_ID ?? "DRIVER-001"
+const DRIVER_ID = process.env.DRIVER_ID ?? "D-001"
 const INTERVAL_MS = Number(process.env.INTERVAL_MS ?? 1000)
 
 // Approximate Obrero -> Agdao route points for local simulation

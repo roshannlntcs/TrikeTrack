@@ -17,7 +17,7 @@ Example payload:
 ```json
 {
   "type": "driver_location",
-  "driverId": "DRIVER-001",
+  "driverId": "D-001",
   "ts": 1739952000000,
   "lng": 125.6154,
   "lat": 7.08633

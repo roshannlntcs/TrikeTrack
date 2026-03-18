@@ -1,14 +1,20 @@
 import { useEffect, useRef, useState } from "react"
 import maplibregl from "maplibre-gl"
 import * as turf from "@turf/turf"
-import type { GeoJSON as RouteGeoJSON } from "../types/geojson"
+import type { GeoJSON as MapGeoJSON } from "../types/geojson"
 import type { DriverLocationEvent } from "../../../../common/types"
-import routeRaw from "../data/route.geojson?raw"
+import geofenceRaw from "../data/geofence.geojson?raw"
 import { enqueueViolation, getOutboxCount, savePoint } from "../lib/db"
 import { syncOutbox } from "../lib/outbox"
 import TripLogs from "./TripLogs"
 
 const MAP_STYLE_URL = "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json"
+const OBRERO_CENTER: [number, number] = [125.6128, 7.0848]
+const DAVAO_CITY_BOUNDS: [[number, number], [number, number]] = [
+  [125.48, 6.96],
+  [125.71, 7.18]
+]
+const DEFAULT_CITY_ZOOM = 11
 
 export default function MapView() {
   const el = useRef<HTMLDivElement | null>(null)
@@ -25,8 +31,7 @@ export default function MapView() {
   useEffect(() => {
     if (!el.current) return
 
-    const route = JSON.parse(routeRaw) as RouteGeoJSON
-    const GEOFENCE_RADIUS_METERS = 1200
+    const geofence = JSON.parse(geofenceRaw) as MapGeoJSON
     const OUTBOX_SYNC_MS = 5000
     const VIOLATION_SYNC_ENDPOINT =
       import.meta.env.VITE_VIOLATIONS_ENDPOINT || "/api/violations/batch"
@@ -34,10 +39,18 @@ export default function MapView() {
     const map = new maplibregl.Map({
       container: el.current,
       style: MAP_STYLE_URL,
-      center: [125.4553, 7.1907],
-      zoom: 13,
+      center: OBRERO_CENTER,
+      zoom: DEFAULT_CITY_ZOOM,
+      minZoom: 10,
       maxZoom: 19
     })
+    map.addControl(
+      new maplibregl.NavigationControl({
+        showCompass: false,
+        visualizePitch: false
+      }),
+      "top-right"
+    )
 
     map.on("error", (e) => {
       console.error("MapLibre error:", (e as any)?.error || e)
@@ -126,60 +139,42 @@ export default function MapView() {
     map.on("load", () => {
       console.log("MAP LOADED")
 
-      const routeFeature = (route as any).features?.[0]
-      if (!routeFeature) {
-        console.error("route.geojson has no features[0]. Add a LineString feature.")
+      const geofencePolygon = (geofence as any).features?.find(
+        (feature: any) => feature.geometry?.type === "Polygon"
+      )
+      if (!geofencePolygon) {
+        console.error("geofence.geojson is missing a Polygon feature.")
         return
       }
 
-      const coords = routeFeature.geometry?.coordinates as number[][]
-      if (!Array.isArray(coords) || coords.length < 2) {
-        console.error("route.geojson LineString must have at least 2 coordinates.")
+      const polygonRing = geofencePolygon.geometry?.coordinates?.[0] as number[][]
+      if (!Array.isArray(polygonRing) || polygonRing.length < 4) {
+        console.error("geofence.geojson Polygon ring must have at least 4 coordinates.")
         return
       }
 
-      // Fit view to the route so the world map isn't shown
-      const routeBounds = new maplibregl.LngLatBounds()
-      for (const [lng, lat] of coords) {
-        routeBounds.extend([lng, lat])
-      }
-      map.fitBounds(routeBounds, {
-        padding: { top: 40, right: 40, bottom: 40, left: 40 },
-        maxZoom: 17,
+      map.setMaxBounds(DAVAO_CITY_BOUNDS)
+      map.easeTo({
+        center: OBRERO_CENTER,
+        zoom: DEFAULT_CITY_ZOOM,
         duration: 0
       })
 
-      // Limit panning to a corridor around the route
-      const panBounds = turf.bbox(
-        turf.buffer(routeFeature, 800, { units: "meters" }) as any
-      )
-      map.setMaxBounds([
-        [panBounds[0], panBounds[1]],
-        [panBounds[2], panBounds[3]]
-      ])
+      const geofencePolyline =
+        (geofence as any).features?.find(
+          (feature: any) => feature.geometry?.type === "LineString"
+        ) ?? turf.polygonToLine(geofencePolygon as any)
 
-      // Route line
-      map.addSource("route", { type: "geojson", data: route as any })
-      map.addLayer({
-        id: "route-line",
-        type: "line",
-        source: "route",
-        paint: {
-          "line-color": "#ff2d2d",
-          "line-width": 6,
-          "line-opacity": 0.9
-        }
-      })
+      const geofencePoints = {
+        type: "FeatureCollection",
+        features: ((geofence as any).features ?? []).filter(
+          (feature: any) => feature.geometry?.type === "Point"
+        )
+      }
 
-      // Area geofence (Obrero-Agdao) - circular boundary
-      const geofenceCenter = turf.center(routeFeature)
-      const geofenceCircle = turf.circle(geofenceCenter, GEOFENCE_RADIUS_METERS, {
-        units: "meters",
-        steps: 72
-      })
       map.addSource("area-geofence", {
         type: "geojson",
-        data: geofenceCircle as any
+        data: geofencePolygon as any
       })
       map.addLayer({
         id: "area-geofence-fill",
@@ -201,23 +196,43 @@ export default function MapView() {
         }
       })
 
-      // Corridor buffer (route geofence)
-      const corridor = turf.buffer(routeFeature, 30, { units: "meters" })
-      map.addSource("corridor", { type: "geojson", data: corridor as any })
+      map.addSource("geofence-boundary", {
+        type: "geojson",
+        data: geofencePolyline as any
+      })
       map.addLayer({
-        id: "corridor-fill",
-        type: "fill",
-        source: "corridor",
+        id: "geofence-boundary-line",
+        type: "line",
+        source: "geofence-boundary",
         paint: {
-          "fill-color": "#00ff00",
-          "fill-opacity": 0.2
+          "line-color": "#2563eb",
+          "line-width": 4,
+          "line-opacity": 0.95
         }
       })
+
+      if (geofencePoints.features.length > 0) {
+        map.addSource("geofence-points", {
+          type: "geojson",
+          data: geofencePoints as any
+        })
+        map.addLayer({
+          id: "geofence-points-layer",
+          type: "circle",
+          source: "geofence-points",
+          paint: {
+            "circle-color": "#ef4444",
+            "circle-radius": 6,
+            "circle-stroke-width": 2,
+            "circle-stroke-color": "#ffffff"
+          }
+        })
+      }
 
       const updateMarker = async (event: DriverLocationEvent) => {
         const inside = turf.booleanPointInPolygon(
           turf.point([event.lng, event.lat]),
-          corridor as any
+          geofencePolygon as any
         )
         const color = inside ? "#2563eb" : "#ef4444"
 
@@ -238,7 +253,7 @@ export default function MapView() {
         }
 
         if (!inside) {
-          console.warn("VIOLATION: outside route corridor", {
+          console.warn("VIOLATION: outside geofence boundary", {
             id: event.driverId,
             lng: event.lng,
             lat: event.lat
@@ -248,7 +263,7 @@ export default function MapView() {
             ts: event.ts,
             lng: event.lng,
             lat: event.lat,
-            routeId: "obrero-agdao",
+            routeId: "umasa-brgy-18b-geofence",
             reason: "OUTSIDE_ROUTE_CORRIDOR",
             speed: event.speed,
             heading: event.heading,
@@ -376,7 +391,7 @@ export default function MapView() {
   return (
     <div style={{ padding: "16px", display: "grid", gap: "12px" }}>
       <div style={{ fontSize: "18px", fontWeight: 600 }}>
-        Obrero to Agdao TODA Route
+        UMASA TODA Geofence Boundary
       </div>
       <div
         ref={el}
