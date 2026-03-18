@@ -213,6 +213,8 @@ export default function AdminShell({
   const [liveMapCanvasHeight, setLiveMapCanvasHeight] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState<string>("")
   const visibleDriverIdentifiersRef = useRef<Set<string>>(new Set())
+  const dashboardDriversRef = useRef<DashboardDriverRecord[]>([])
+  const refreshLiveLocationsRef = useRef<(() => void) | null>(null)
   const trimmedSearchQuery = searchQuery.trim()
   const normalizedSearchQuery = trimmedSearchQuery.toLowerCase()
   const hasSearchQuery = normalizedSearchQuery.length > 0
@@ -261,12 +263,14 @@ export default function AdminShell({
   }, [accessToken])
 
   useEffect(() => {
+    dashboardDriversRef.current = dashboardData?.drivers ?? []
     const identifiers = new Set<string>()
     for (const driver of dashboardData?.drivers ?? []) {
       identifiers.add(String(driver.driverId))
       identifiers.add(driver.driverCode.trim().toUpperCase())
     }
     visibleDriverIdentifiersRef.current = identifiers
+    refreshLiveLocationsRef.current?.()
   }, [dashboardData?.drivers])
 
   useEffect(() => {
@@ -337,14 +341,126 @@ export default function AdminShell({
       }
     }
 
-    const createMarkerElement = (color: string) => {
+    const getDriverRecord = (driverIdentifier: string) => {
+      const normalizedIdentifier = driverIdentifier.trim().toUpperCase()
+      return dashboardDriversRef.current.find((driver) => {
+        const normalizedCode = driver.driverCode.trim().toUpperCase()
+        return (
+          normalizedCode === normalizedIdentifier ||
+          String(driver.driverId) === driverIdentifier
+        )
+      })
+    }
+
+    const getDriverLabel = (driverIdentifier: string) => {
+      const driver = getDriverRecord(driverIdentifier)
+      if (!driver) return driverIdentifier
+      return `${driver.firstName} ${driver.lastName}`
+    }
+
+    const getDriverInitials = (driverIdentifier: string) => {
+      const driver = getDriverRecord(driverIdentifier)
+      if (driver) {
+        return `${driver.firstName.charAt(0)}${driver.lastName.charAt(0)}`
+          .toUpperCase()
+          .slice(0, 2)
+      }
+      return driverIdentifier.replace(/[^A-Z0-9]/gi, "").slice(0, 2).toUpperCase() || "D"
+    }
+
+    const getDriverAvatarUrl = (driverIdentifier: string) => {
+      const avatarUrl = getDriverRecord(driverIdentifier)?.avatarUrl?.trim()
+      return avatarUrl ? avatarUrl : null
+    }
+
+    const renderMarkerFrameContent = (
+      markerEl: HTMLDivElement,
+      driverIdentifier: string
+    ) => {
+      const frameEl = markerEl.querySelector("[data-marker-frame]") as HTMLDivElement | null
+      if (!frameEl) return
+
+      frameEl.replaceChildren()
+      const avatarUrl = getDriverAvatarUrl(driverIdentifier)
+      if (avatarUrl) {
+        const imageEl = document.createElement("img")
+        imageEl.src = avatarUrl
+        imageEl.alt = getDriverLabel(driverIdentifier)
+        imageEl.style.width = "100%"
+        imageEl.style.height = "100%"
+        imageEl.style.objectFit = "cover"
+        imageEl.style.borderRadius = "999px"
+        imageEl.style.display = "block"
+        imageEl.onerror = () => {
+          frameEl.replaceChildren()
+          frameEl.textContent = getDriverInitials(driverIdentifier)
+        }
+        frameEl.appendChild(imageEl)
+        return
+      }
+
+      frameEl.textContent = getDriverInitials(driverIdentifier)
+    }
+
+    const applyMarkerTone = (markerEl: HTMLDivElement, inside: boolean) => {
+      const frameEl = markerEl.querySelector("[data-marker-frame]") as HTMLDivElement | null
+      const badgeEl = markerEl.querySelector("[data-marker-badge]") as HTMLDivElement | null
+      if (frameEl) {
+        frameEl.style.borderColor = inside ? "#22c55e" : "#ef4444"
+        frameEl.style.boxShadow = inside
+          ? "0 12px 28px rgba(34,197,94,0.28)"
+          : "0 12px 28px rgba(239,68,68,0.28)"
+      }
+      if (badgeEl) {
+        badgeEl.style.background = inside ? "#22c55e" : "#ef4444"
+      }
+    }
+
+    const createMarkerElement = (driverIdentifier: string, inside: boolean) => {
       const markerEl = document.createElement("div")
-      markerEl.style.width = "14px"
-      markerEl.style.height = "14px"
-      markerEl.style.borderRadius = "50%"
-      markerEl.style.background = color
-      markerEl.style.border = "2px solid #ffffff"
-      markerEl.style.boxShadow = "0 2px 6px rgba(0,0,0,0.35)"
+      markerEl.style.width = "42px"
+      markerEl.style.height = "42px"
+      markerEl.style.position = "relative"
+      markerEl.style.display = "flex"
+      markerEl.style.alignItems = "center"
+      markerEl.style.justifyContent = "center"
+      markerEl.style.cursor = "pointer"
+
+      const frameEl = document.createElement("div")
+      frameEl.setAttribute("data-marker-frame", "true")
+      frameEl.style.width = "36px"
+      frameEl.style.height = "36px"
+      frameEl.style.borderRadius = "999px"
+      frameEl.style.border = "3px solid #22c55e"
+      frameEl.style.background =
+        "linear-gradient(135deg, rgba(15,23,42,0.96), rgba(30,41,59,0.92))"
+      frameEl.style.color = "#f8fafc"
+      frameEl.style.display = "flex"
+      frameEl.style.alignItems = "center"
+      frameEl.style.justifyContent = "center"
+      frameEl.style.fontSize = "12px"
+      frameEl.style.fontWeight = "700"
+      frameEl.style.fontFamily =
+        "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+      frameEl.style.boxSizing = "border-box"
+
+      const badgeEl = document.createElement("div")
+      badgeEl.setAttribute("data-marker-badge", "true")
+      badgeEl.style.position = "absolute"
+      badgeEl.style.right = "4px"
+      badgeEl.style.bottom = "3px"
+      badgeEl.style.width = "11px"
+      badgeEl.style.height = "11px"
+      badgeEl.style.borderRadius = "999px"
+      badgeEl.style.border = "2px solid #ffffff"
+      badgeEl.style.background = "#22c55e"
+      badgeEl.style.boxSizing = "border-box"
+
+      markerEl.appendChild(frameEl)
+      markerEl.appendChild(badgeEl)
+      markerEl.title = getDriverLabel(driverIdentifier)
+      renderMarkerFrameContent(markerEl, driverIdentifier)
+      applyMarkerTone(markerEl, inside)
       return markerEl
     }
 
@@ -528,17 +644,24 @@ export default function AdminShell({
       }
 
       const updateMarker = (event: DriverLocationEvent, inside: boolean) => {
-        const color = inside ? "#2563eb" : "#ef4444"
         const existing = markers.get(event.driverId)
         if (existing) {
           existing.setLngLat([event.lng, event.lat])
-          existing.getElement().style.background = color
+          const markerEl = existing.getElement() as HTMLDivElement
+          markerEl.title = getDriverLabel(event.driverId)
+          renderMarkerFrameContent(markerEl, event.driverId)
+          applyMarkerTone(markerEl, inside)
           return
         }
-        const markerEl = createMarkerElement(color)
+        const driverLabel = getDriverLabel(event.driverId)
+        const markerEl = createMarkerElement(event.driverId, inside)
         const marker = new maplibregl.Marker({ element: markerEl })
           .setLngLat([event.lng, event.lat])
-          .setPopup(new maplibregl.Popup({ offset: 12 }).setText(event.driverId))
+          .setPopup(
+            new maplibregl.Popup({ offset: 12 }).setHTML(
+              `<strong>${driverLabel}</strong><br />${event.driverId}`
+            )
+          )
           .addTo(map)
         markers.set(event.driverId, marker)
       }
@@ -660,6 +783,10 @@ export default function AdminShell({
         if (active) setSyncStatus("connected")
       }
 
+      refreshLiveLocationsRef.current = () => {
+        void loadLiveDriverLocations()
+      }
+
       const connectRealtime = () => {
         if (!active) return
         if (liveLocationChannel) {
@@ -729,6 +856,9 @@ export default function AdminShell({
 
     return () => {
       active = false
+      if (refreshLiveLocationsRef.current) {
+        refreshLiveLocationsRef.current = null
+      }
       if (liveLocationChannel) {
         void supabase.removeChannel(liveLocationChannel)
       }

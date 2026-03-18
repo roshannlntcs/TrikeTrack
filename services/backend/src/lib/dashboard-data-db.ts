@@ -15,6 +15,7 @@ export type DashboardDriverRecord = {
   firstName: string
   lastName: string
   contactNo?: string
+  avatarUrl?: string
   status: "active" | "inactive" | "suspended"
   createdAt: string
 }
@@ -90,6 +91,7 @@ type DashboardDriverRow = {
   first_name: string
   last_name: string
   contact_no: string | null
+  avatar_url: string | null
   status: DashboardDriverRecord["status"]
   created_at: Date
 }
@@ -181,6 +183,7 @@ const mapDriver = (row: DashboardDriverRow): DashboardDriverRecord => ({
   firstName: row.first_name,
   lastName: row.last_name,
   contactNo: row.contact_no ?? undefined,
+  avatarUrl: row.avatar_url ?? undefined,
   status: row.status,
   createdAt: row.created_at.toISOString()
 })
@@ -255,6 +258,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
           d.first_name,
           d.last_name,
           d.contact_no,
+          d.avatar_url,
           d.status,
           d.created_at
         FROM public.drivers d

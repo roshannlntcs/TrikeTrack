@@ -99,6 +99,7 @@ create table public.drivers (
   first_name text not null,
   last_name text not null,
   contact_no text,
+  avatar_url text,
   password_hash text,
   status entity_status not null default 'active',
   created_at timestamptz not null default now()

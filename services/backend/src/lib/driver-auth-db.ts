@@ -13,6 +13,7 @@ export type DriverAppProfile = {
   tricycleId?: number
   tricycleNo?: string
   qrId?: number
+  avatarUrl?: string
   status: "active" | "inactive" | "suspended"
 }
 
@@ -27,6 +28,7 @@ type DriverAuthRow = {
   tricycle_id: number | null
   plate_no: string | null
   qr_id: number | null
+  avatar_url: string | null
   password_hash: string | null
   status: DriverAppProfile["status"]
 }
@@ -42,6 +44,7 @@ const mapDriverAppProfile = (row: DriverAuthRow): DriverAppProfile => ({
   tricycleId: row.tricycle_id === null ? undefined : Number(row.tricycle_id),
   tricycleNo: row.plate_no ?? undefined,
   qrId: row.qr_id === null ? undefined : Number(row.qr_id),
+  avatarUrl: row.avatar_url ?? undefined,
   status: row.status
 })
 
@@ -62,6 +65,7 @@ const getDriverAuthRow = async (driverIdentifier: string) => {
         d.tricycle_id,
         tr.plate_no,
         d.qr_id,
+        d.avatar_url,
         d.password_hash,
         d.status
       FROM public.drivers d

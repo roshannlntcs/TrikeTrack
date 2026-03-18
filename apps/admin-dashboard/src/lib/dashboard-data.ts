@@ -12,6 +12,7 @@ export type DashboardDriverRecord = {
   firstName: string
   lastName: string
   contactNo?: string
+  avatarUrl?: string
   status: "active" | "inactive" | "suspended"
   createdAt: string
 }
