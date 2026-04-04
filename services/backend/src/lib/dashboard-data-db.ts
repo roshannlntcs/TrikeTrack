@@ -1,5 +1,5 @@
 import type { AdminProfile } from "./admin-auth-db"
-import { ensureDatabaseReady, query } from "./database"
+import { ensureDatabaseReady, hasColumn, query } from "./database"
 
 export type DashboardDriverRecord = {
   driverId: number
@@ -240,6 +240,9 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
   const tricycleScope = buildScopeClause(profile, "tr.toda_id", "b.barangay_id")
   const violationScope = buildScopeClause(profile, "t.toda_id", "b.barangay_id")
   const tripScope = buildScopeClause(profile, "r.toda_id", "b.barangay_id")
+  const driverAvatarSelect = (await hasColumn("public", "drivers", "avatar_url"))
+    ? "d.avatar_url"
+    : "NULL::text AS avatar_url"
 
   const [driversResult, tricyclesResult, violationsResult, tripsResult] = await Promise.all([
     query<DashboardDriverRow>(
@@ -258,7 +261,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
           d.first_name,
           d.last_name,
           d.contact_no,
-          d.avatar_url,
+          ${driverAvatarSelect},
           d.status,
           d.created_at
         FROM public.drivers d
@@ -320,7 +323,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
         LEFT JOIN public.barangays b
           ON b.barangay_id = t.barangay_id
         ${violationScope.clause}
-        ORDER BY v.detected_at DESC
+        ORDER BY v.detected_at DESC, v.violation_id DESC
         LIMIT 50
       `,
       violationScope.params
@@ -356,8 +359,10 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
           ON td.toda_id = r.toda_id
         JOIN public.barangays b
           ON b.barangay_id = td.barangay_id
-        ${tripScope.clause}
-        ORDER BY tp.trip_start DESC
+        ${tripScope.clause ? `${tripScope.clause}
+        AND` : "WHERE"} tp.trip_status = 'completed'
+        AND tp.trip_end IS NOT NULL
+        ORDER BY tp.trip_end DESC, tp.trip_id DESC
         LIMIT 50
       `,
       tripScope.params

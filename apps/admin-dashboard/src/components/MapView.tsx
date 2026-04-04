@@ -15,6 +15,7 @@ const DAVAO_CITY_BOUNDS: [[number, number], [number, number]] = [
   [125.71, 7.18]
 ]
 const DEFAULT_CITY_ZOOM = 11
+const DRIVER_OFFLINE_MS = 15000
 
 export default function MapView() {
   const el = useRef<HTMLDivElement | null>(null)
@@ -62,7 +63,9 @@ export default function MapView() {
     let onlineHandler: (() => void) | null = null
     let outboxTimer: number | undefined
     let outboxOnlineHandler: (() => void) | null = null
+    let stalePresenceTimer: number | undefined
     const markers = new Map<string, maplibregl.Marker>()
+    const lastSeenByDriver = new Map<string, number>()
 
     const refreshOutboxCount = async () => {
       try {
@@ -102,6 +105,19 @@ export default function MapView() {
       markerEl.style.border = "2px solid #ffffff"
       markerEl.style.boxShadow = "0 2px 6px rgba(0,0,0,0.35)"
       return markerEl
+    }
+
+    const pruneStaleMarkers = () => {
+      const now = Date.now()
+      for (const [driverId, lastSeenTs] of lastSeenByDriver.entries()) {
+        if (now - lastSeenTs <= DRIVER_OFFLINE_MS) continue
+        const marker = markers.get(driverId)
+        if (marker) {
+          marker.remove()
+          markers.delete(driverId)
+        }
+        lastSeenByDriver.delete(driverId)
+      }
     }
 
     const toDriverLocationEvent = (
@@ -230,6 +246,7 @@ export default function MapView() {
       }
 
       const updateMarker = async (event: DriverLocationEvent) => {
+        lastSeenByDriver.set(event.driverId, event.ts)
         const inside = turf.booleanPointInPolygon(
           turf.point([event.lng, event.lat]),
           geofencePolygon as any
@@ -367,6 +384,7 @@ export default function MapView() {
     }
     window.addEventListener("online", outboxOnlineHandler)
     window.addEventListener("offline", outboxOnlineHandler)
+    stalePresenceTimer = window.setInterval(pruneStaleMarkers, 3000)
 
     return () => {
       active = false
@@ -380,6 +398,7 @@ export default function MapView() {
         window.removeEventListener("offline", onlineHandler)
       }
       if (outboxTimer) window.clearInterval(outboxTimer)
+      if (stalePresenceTimer) window.clearInterval(stalePresenceTimer)
       if (outboxOnlineHandler) {
         window.removeEventListener("online", outboxOnlineHandler)
         window.removeEventListener("offline", outboxOnlineHandler)

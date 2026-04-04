@@ -1,4 +1,4 @@
-import { query } from "./database"
+import { ensureDatabaseReady, hasColumn, query } from "./database"
 import { resolveDriverIdFromIdentifier } from "./driver-identifier-db"
 import { hashPassword, verifyPassword } from "./password-hash"
 
@@ -51,6 +51,11 @@ const mapDriverAppProfile = (row: DriverAuthRow): DriverAppProfile => ({
 const getDriverAuthRow = async (driverIdentifier: string) => {
   const driverId = await resolveDriverIdFromIdentifier(driverIdentifier)
   if (!driverId) return null
+  await ensureDatabaseReady()
+
+  const driverAvatarSelect = (await hasColumn("public", "drivers", "avatar_url"))
+    ? "d.avatar_url"
+    : "NULL::text AS avatar_url"
 
   const result = await query<DriverAuthRow>(
     `
@@ -65,7 +70,7 @@ const getDriverAuthRow = async (driverIdentifier: string) => {
         d.tricycle_id,
         tr.plate_no,
         d.qr_id,
-        d.avatar_url,
+        ${driverAvatarSelect},
         d.password_hash,
         d.status
       FROM public.drivers d

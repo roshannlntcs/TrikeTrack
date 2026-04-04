@@ -46,7 +46,7 @@
   align-items: center;
   padding: 18px 20px;
   border-radius: 20px;
-  background: #d4d7db;
+  background: #C6C6C6;
 }
 
 .fleet-toolbar__search,
@@ -86,8 +86,8 @@
 .fleet-toolbar__button {
   min-width: 140px;
   padding: 16px 22px;
-  background: #d0f45d;
-  color: #1a2a16;
+  background: #7ed7b1;
+  color: #123324;
 }
 
 .fleet-toolbar__button:hover,
@@ -96,6 +96,10 @@
 .fleet-action:hover,
 .fleet-modal__close:hover {
   transform: translateY(-1px);
+}
+
+.fleet-toolbar__button:hover {
+  background: #68ca9f;
 }
 
 .fleet-toolbar__button:disabled,
@@ -143,6 +147,20 @@
   color: #2f3e4d;
   background: #ffffff;
   vertical-align: middle;
+}
+
+.fleet-table__row--interactive {
+  cursor: pointer;
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+
+.fleet-table__row--interactive:hover td {
+  background: #f4f8fc;
+}
+
+.fleet-table__row--interactive:focus-visible {
+  outline: 2px solid #69c3a0;
+  outline-offset: -2px;
 }
 
 .fleet-empty {
@@ -216,6 +234,10 @@
   overflow: hidden;
 }
 
+.fleet-modal--details {
+  width: min(860px, 100%);
+}
+
 .fleet-modal__header {
   display: flex;
   justify-content: space-between;
@@ -281,6 +303,167 @@
   color: #ffffff;
 }
 
+.fleet-details {
+  display: grid;
+  gap: 18px;
+  padding: 20px 24px 24px;
+}
+
+.fleet-details__summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.fleet-details__summary > div,
+.fleet-details__item,
+.fleet-trip-card {
+  border: 1px solid #dbe3ea;
+  border-radius: 18px;
+  background: #ffffff;
+  padding: 16px 18px;
+}
+
+.fleet-details__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.fleet-details__item {
+  display: grid;
+  gap: 8px;
+}
+
+.fleet-details__label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #647383;
+}
+
+.fleet-details__section {
+  display: grid;
+  gap: 14px;
+}
+
+.fleet-details__section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.fleet-details__section-header h4 {
+  margin: 0;
+  font-size: 1.02rem;
+  color: #162938;
+}
+
+.fleet-details__section-header p {
+  margin: 4px 0 0;
+  color: #647383;
+  font-size: 0.88rem;
+}
+
+.fleet-details__empty {
+  border: 1px dashed #cbd5df;
+  border-radius: 18px;
+  background: #ffffff;
+  padding: 18px;
+  color: #5d6b79;
+  font-size: 0.92rem;
+}
+
+.fleet-details__empty--error {
+  border-color: #f1b8b8;
+  background: #fff4f4;
+  color: #9c2626;
+}
+
+.fleet-trip-history {
+  display: grid;
+  gap: 12px;
+  max-height: 360px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.fleet-trip-card {
+  display: grid;
+  gap: 14px;
+}
+
+.fleet-trip-card__top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.fleet-trip-card__meta {
+  margin-top: 5px;
+  font-size: 0.84rem;
+  color: #667586;
+}
+
+.fleet-trip-card__stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.fleet-trip-card__stats div {
+  display: grid;
+  gap: 4px;
+}
+
+.fleet-trip-card__stats span {
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #71808f;
+}
+
+.fleet-trip-card__stats strong {
+  font-size: 0.9rem;
+  color: #213242;
+}
+
+.fleet-trip-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 98px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.fleet-trip-status--scheduled {
+  background: #e0ecff;
+  color: #29548a;
+}
+
+.fleet-trip-status--ongoing {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.fleet-trip-status--completed {
+  background: #e5e7eb;
+  color: #374151;
+}
+
+.fleet-trip-status--cancelled {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
 @media (max-width: 960px) {
   .fleet-toolbar {
     grid-template-columns: 1fr;
@@ -288,6 +471,12 @@
 
   .fleet-toolbar__button {
     width: 100%;
+  }
+
+  .fleet-details__summary,
+  .fleet-details__grid,
+  .fleet-trip-card__stats {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -301,7 +490,8 @@
   }
 
   .fleet-modal__header,
-  .fleet-form {
+  .fleet-form,
+  .fleet-details {
     padding-left: 16px;
     padding-right: 16px;
   }
@@ -313,5 +503,14 @@
   .fleet-modal__secondary,
   .fleet-modal__primary {
     width: 100%;
+  }
+
+  .fleet-trip-card__top,
+  .fleet-details__section-header {
+    flex-direction: column;
+  }
+
+  .fleet-trip-status {
+    min-width: 0;
   }
 }

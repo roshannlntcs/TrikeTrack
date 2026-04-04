@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useState } from "react"
 import {
+  fetchDashboardData,
+  type DashboardTripRecord
+} from "../lib/dashboard-data"
+import {
   createMasterDataItem,
   deleteMasterDataItem,
   fetchMasterData,
@@ -9,6 +13,7 @@ import {
   type MasterDataSnapshot,
   type TricycleRecord
 } from "../lib/superadmin-api"
+import DeleteConfirmDialog from "../components/DeleteConfirmDialog"
 import "./TodaManagementPage.css"
 
 type TodaManagementPageProps = {
@@ -34,6 +39,22 @@ type TricycleFormState = {
   permitExpirationDate: string
   status: EntityStatus
 }
+
+type PendingDeleteState =
+  | {
+      entity: "driver"
+      id: number
+      title: string
+      description: string
+      confirmLabel: string
+    }
+  | {
+      entity: "tricycle"
+      id: number
+      title: string
+      description: string
+      confirmLabel: string
+    }
 
 const STATUS_OPTIONS: Array<"all" | EntityStatus> = [
   "all",
@@ -74,6 +95,13 @@ const formatStatusLabel = (value: EntityStatus) => toTitleCase(value)
 
 const formatTricycleCode = (tricycleId: number) => `T${String(tricycleId).padStart(3, "0")}`
 
+const formatDateTime = (value?: string) => (value ? new Date(value).toLocaleString() : "Not set")
+
+const formatCurrency = (value?: number) =>
+  value !== undefined ? `PHP ${value.toFixed(2)}` : "Not set"
+
+const formatTripStatusLabel = (value: DashboardTripRecord["tripStatus"]) => toTitleCase(value)
+
 export default function TodaManagementPage({
   accessToken,
   page,
@@ -87,31 +115,71 @@ export default function TodaManagementPage({
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [busyKey, setBusyKey] = useState<string | null>(null)
+  const [driverTrips, setDriverTrips] = useState<DashboardTripRecord[]>([])
+  const [tripHistoryLoading, setTripHistoryLoading] = useState(true)
+  const [tripHistoryError, setTripHistoryError] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState("")
   const [statusFilter, setStatusFilter] = useState<"all" | EntityStatus>("all")
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [modalMode, setModalMode] = useState<"create" | "edit">("create")
   const [selectedDriver, setSelectedDriver] = useState<DriverRecord | null>(null)
+  const [selectedDriverDetails, setSelectedDriverDetails] = useState<DriverRecord | null>(null)
   const [selectedTricycle, setSelectedTricycle] = useState<TricycleRecord | null>(null)
   const [driverForm, setDriverForm] = useState<DriverFormState>(createInitialDriverForm)
   const [tricycleForm, setTricycleForm] = useState<TricycleFormState>(createInitialTricycleForm)
+  const [pendingDelete, setPendingDelete] = useState<PendingDeleteState | null>(null)
 
   const loadMasterData = async () => {
     setLoading(true)
+    setTripHistoryLoading(true)
     try {
-      const snapshot = await fetchMasterData(accessToken)
+      const [masterSnapshot, dashboardSnapshot] = await Promise.allSettled([
+        fetchMasterData(accessToken),
+        fetchDashboardData(accessToken)
+      ])
+
+      if (masterSnapshot.status === "rejected") {
+        throw masterSnapshot.reason
+      }
+
+      const snapshot = masterSnapshot.value
       setData(snapshot)
       setError(null)
+
+      if (dashboardSnapshot.status === "fulfilled") {
+        setDriverTrips(dashboardSnapshot.value.recentTrips)
+        setTripHistoryError(null)
+      } else {
+        setDriverTrips([])
+        setTripHistoryError(String(dashboardSnapshot.reason))
+      }
     } catch (loadError) {
       setError(String(loadError))
     } finally {
       setLoading(false)
+      setTripHistoryLoading(false)
     }
   }
 
   useEffect(() => {
     void loadMasterData()
   }, [accessToken])
+
+  useEffect(() => {
+    if (!isModalOpen && !selectedDriverDetails) return
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return
+      if (selectedDriverDetails) {
+        setSelectedDriverDetails(null)
+        return
+      }
+      closeModal()
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [isModalOpen, selectedDriverDetails])
 
   const filteredDriverRows = useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase()
@@ -150,6 +218,19 @@ export default function TodaManagementPage({
 
   const tricycleOptions = useMemo(() => data.tricycles, [data.tricycles])
 
+  const selectedDriverTripHistory = useMemo(() => {
+    if (!selectedDriverDetails) return []
+
+    return driverTrips
+      .filter(
+        (trip) =>
+          trip.driverId === selectedDriverDetails.driverId &&
+          trip.tripStatus === "completed" &&
+          Boolean(trip.tripEnd)
+      )
+      .sort((a, b) => new Date(b.tripStart).getTime() - new Date(a.tripStart).getTime())
+  }, [driverTrips, selectedDriverDetails])
+
   const resetFeedback = () => {
     setError(null)
     setNotice(null)
@@ -161,6 +242,14 @@ export default function TodaManagementPage({
     setSelectedTricycle(null)
     setDriverForm(createInitialDriverForm())
     setTricycleForm(createInitialTricycleForm())
+  }
+
+  const closeDeleteDialog = () => {
+    setPendingDelete(null)
+  }
+
+  const closeDriverDetailsModal = () => {
+    setSelectedDriverDetails(null)
   }
 
   const openCreateModal = () => {
@@ -186,6 +275,10 @@ export default function TodaManagementPage({
       status: row.status
     })
     setIsModalOpen(true)
+  }
+
+  const openDriverDetailsModal = (row: DriverRecord) => {
+    setSelectedDriverDetails(row)
   }
 
   const openTricycleEditModal = (row: TricycleRecord) => {
@@ -314,42 +407,41 @@ export default function TodaManagementPage({
     }
   }
 
-  const handleDeleteDriver = async (row: DriverRecord) => {
-    const confirmed = window.confirm(
-      `Delete driver ${row.firstName} ${row.lastName}? This cannot be undone.`
-    )
-    if (!confirmed) return
-
-    setBusyKey(`delete-driver-${row.driverId}`)
-    setError(null)
-    setNotice(null)
-
-    try {
-      await deleteMasterDataItem(accessToken, "driver", row.driverId)
-      await loadMasterData()
-      setNotice(`Deleted driver ${row.firstName} ${row.lastName}.`)
-      onDataChanged?.()
-    } catch (deleteError) {
-      setError(String(deleteError))
-    } finally {
-      setBusyKey(null)
-    }
+  const openDeleteDriverDialog = (row: DriverRecord) => {
+    setPendingDelete({
+      entity: "driver",
+      id: row.driverId,
+      title: `Delete driver ${row.firstName} ${row.lastName}?`,
+      description: "The driver record will be permanently removed from this TODA page.",
+      confirmLabel: "Delete Driver"
+    })
   }
 
-  const handleDeleteTricycle = async (row: TricycleRecord) => {
-    const confirmed = window.confirm(
-      `Delete tricycle ${row.plateNo}? This cannot be undone.`
-    )
-    if (!confirmed) return
+  const openDeleteTricycleDialog = (row: TricycleRecord) => {
+    setPendingDelete({
+      entity: "tricycle",
+      id: row.tricycleId,
+      title: `Delete tricycle ${row.plateNo}?`,
+      description: "The tricycle record will be permanently removed from this TODA page.",
+      confirmLabel: "Delete Tricycle"
+    })
+  }
 
-    setBusyKey(`delete-tricycle-${row.tricycleId}`)
+  const confirmDelete = async () => {
+    if (!pendingDelete) return
+
+    const deleteKey = `delete-${pendingDelete.entity}-${pendingDelete.id}`
+    setBusyKey(deleteKey)
     setError(null)
     setNotice(null)
 
     try {
-      await deleteMasterDataItem(accessToken, "tricycle", row.tricycleId)
+      await deleteMasterDataItem(accessToken, pendingDelete.entity, pendingDelete.id)
       await loadMasterData()
-      setNotice(`Deleted tricycle ${row.plateNo}.`)
+      setNotice(
+        pendingDelete.entity === "driver" ? "Deleted driver." : "Deleted tricycle."
+      )
+      closeDeleteDialog()
       onDataChanged?.()
     } catch (deleteError) {
       setError(String(deleteError))
@@ -439,7 +531,20 @@ export default function TodaManagementPage({
                 </thead>
                 <tbody>
                   {filteredDriverRows.map((row) => (
-                    <tr key={row.driverId}>
+                    <tr
+                      key={row.driverId}
+                      className="fleet-table__row fleet-table__row--interactive"
+                      onClick={() => openDriverDetailsModal(row)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault()
+                          openDriverDetailsModal(row)
+                        }
+                      }}
+                      tabIndex={0}
+                      role="button"
+                      aria-label={`View details for ${row.firstName} ${row.lastName}`}
+                    >
                       <td>{row.driverCode}</td>
                       <td>{row.firstName} {row.lastName}</td>
                       <td>{row.tricycleNo ?? "Unassigned"}</td>
@@ -455,14 +560,20 @@ export default function TodaManagementPage({
                           <button
                             type="button"
                             className="fleet-action fleet-action--edit"
-                            onClick={() => openDriverEditModal(row)}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              openDriverEditModal(row)
+                            }}
                           >
                             Edit
                           </button>
                           <button
                             type="button"
                             className="fleet-action fleet-action--delete"
-                            onClick={() => void handleDeleteDriver(row)}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              openDeleteDriverDialog(row)
+                            }}
                             disabled={busyKey === `delete-driver-${row.driverId}`}
                           >
                             {busyKey === `delete-driver-${row.driverId}` ? "Deleting..." : "Delete"}
@@ -512,7 +623,7 @@ export default function TodaManagementPage({
                         <button
                           type="button"
                           className="fleet-action fleet-action--delete"
-                          onClick={() => void handleDeleteTricycle(row)}
+                          onClick={() => openDeleteTricycleDialog(row)}
                           disabled={busyKey === `delete-tricycle-${row.tricycleId}`}
                         >
                           {busyKey === `delete-tricycle-${row.tricycleId}` ? "Deleting..." : "Delete"}
@@ -526,6 +637,130 @@ export default function TodaManagementPage({
           )}
         </div>
       </section>
+
+      {selectedDriverDetails && (
+        <div className="fleet-modal-backdrop" role="presentation" onClick={closeDriverDetailsModal}>
+          <div
+            className="fleet-modal fleet-modal--details"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="fleet-driver-details-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="fleet-modal__header">
+              <div>
+                <h3 id="fleet-driver-details-title">
+                  {selectedDriverDetails.firstName} {selectedDriverDetails.lastName}
+                </h3>
+                <p>{selectedDriverDetails.driverCode} • {selectedDriverDetails.todaName}</p>
+              </div>
+              <button type="button" className="fleet-modal__close" onClick={closeDriverDetailsModal}>
+                Close
+              </button>
+            </div>
+
+            <div className="fleet-details">
+              <section className="fleet-details__summary">
+                <div>
+                  <span className="fleet-details__label">Driver Status</span>
+                  <span className={`fleet-status fleet-status--${selectedDriverDetails.status}`}>
+                    {formatStatusLabel(selectedDriverDetails.status)}
+                  </span>
+                </div>
+                <div>
+                  <span className="fleet-details__label">Password</span>
+                  <strong>{selectedDriverDetails.passwordSet ? "Set" : "Pending"}</strong>
+                </div>
+                <div>
+                  <span className="fleet-details__label">Recent Trips</span>
+                  <strong>{selectedDriverTripHistory.length}</strong>
+                </div>
+              </section>
+
+              <section className="fleet-details__grid">
+                <div className="fleet-details__item">
+                  <span className="fleet-details__label">Contact Number</span>
+                  <strong>{selectedDriverDetails.contactNo ?? "No contact provided"}</strong>
+                </div>
+                <div className="fleet-details__item">
+                  <span className="fleet-details__label">Assigned Tricycle</span>
+                  <strong>{selectedDriverDetails.tricycleNo ?? "Unassigned"}</strong>
+                </div>
+                <div className="fleet-details__item">
+                  <span className="fleet-details__label">QR ID</span>
+                  <strong>{selectedDriverDetails.qrId ? `#${selectedDriverDetails.qrId}` : "Not assigned"}</strong>
+                </div>
+                <div className="fleet-details__item">
+                  <span className="fleet-details__label">Barangay</span>
+                  <strong>{selectedDriverDetails.barangayName}</strong>
+                </div>
+                <div className="fleet-details__item">
+                  <span className="fleet-details__label">Created</span>
+                  <strong>{formatDateTime(selectedDriverDetails.createdAt)}</strong>
+                </div>
+              </section>
+
+              <section className="fleet-details__section">
+                <div className="fleet-details__section-header">
+                  <div>
+                    <h4>Trip History</h4>
+                    <p>Showing the latest trips currently available in this dashboard.</p>
+                  </div>
+                </div>
+
+                {tripHistoryLoading ? (
+                  <div className="fleet-details__empty">Loading recent trip history...</div>
+                ) : tripHistoryError ? (
+                  <div className="fleet-details__empty fleet-details__empty--error">
+                    Trip history is unavailable right now.
+                  </div>
+                ) : selectedDriverTripHistory.length === 0 ? (
+                  <div className="fleet-details__empty">No recent trip history for this driver yet.</div>
+                ) : (
+                  <div className="fleet-trip-history">
+                    {selectedDriverTripHistory.map((trip) => (
+                      <article key={trip.tripId} className="fleet-trip-card">
+                        <div className="fleet-trip-card__top">
+                          <div>
+                            <strong>{trip.routeName}</strong>
+                            <div className="fleet-trip-card__meta">
+                              Trip #{trip.tripId} • {trip.plateNo} • {trip.todaName}
+                            </div>
+                          </div>
+                          <span className={`fleet-trip-status fleet-trip-status--${trip.tripStatus}`}>
+                            {formatTripStatusLabel(trip.tripStatus)}
+                          </span>
+                        </div>
+
+                        <div className="fleet-trip-card__stats">
+                          <div>
+                            <span>Start</span>
+                            <strong>{formatDateTime(trip.tripStart)}</strong>
+                          </div>
+                          <div>
+                            <span>End</span>
+                            <strong>{formatDateTime(trip.tripEnd)}</strong>
+                          </div>
+                          <div>
+                            <span>Duration</span>
+                            <strong>
+                              {trip.durationMinutes !== undefined ? `${trip.durationMinutes} min` : "Not set"}
+                            </strong>
+                          </div>
+                          <div>
+                            <span>Fare</span>
+                            <strong>{formatCurrency(trip.fareAmount)}</strong>
+                          </div>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+            </div>
+          </div>
+        </div>
+      )}
 
       {isModalOpen && (
         <div className="fleet-modal-backdrop" role="presentation" onClick={closeModal}>
@@ -769,6 +1004,16 @@ export default function TodaManagementPage({
           </div>
         </div>
       )}
+
+      <DeleteConfirmDialog
+        open={pendingDelete !== null}
+        title={pendingDelete?.title ?? ""}
+        description={pendingDelete?.description ?? ""}
+        confirmLabel={pendingDelete?.confirmLabel ?? "Delete"}
+        busy={pendingDelete !== null && busyKey === `delete-${pendingDelete.entity}-${pendingDelete.id}`}
+        onClose={closeDeleteDialog}
+        onConfirm={() => void confirmDelete()}
+      />
     </section>
   )
 }

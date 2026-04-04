@@ -141,7 +141,7 @@ export const updateMasterDataItem = async <TItem>(
 
 export const deleteMasterDataItem = async (
   accessToken: string,
-  entity: Extract<EntityType, "driver" | "tricycle">,
+  entity: EntityType,
   id: number
 ) => {
   await request<MasterDataResponse>(accessToken, {

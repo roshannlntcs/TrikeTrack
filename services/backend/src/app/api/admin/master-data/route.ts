@@ -6,7 +6,10 @@ import {
   createRoute,
   createToda,
   createTricycle,
+  deleteBarangay,
   deleteDriver,
+  deleteRoute,
+  deleteToda,
   deleteTricycle,
   getDriverById,
   getTricycleById,
@@ -379,7 +382,10 @@ const parseUpdateRoute = (payload: Record<string, unknown>): UpdateRouteInput | 
 const toErrorResponse = (error: unknown) => {
   const pgError = error as { code?: string; detail?: string; message?: string } | undefined
   const message = pgError?.detail || pgError?.message || "Master data operation failed."
-  const status = pgError?.code === "23505" ? 409 : 400
+  const status =
+    pgError?.code === "23505" || pgError?.code === "23503"
+      ? 409
+      : 400
   return NextResponse.json({ ok: false, message }, { status })
 }
 
@@ -554,25 +560,32 @@ export async function DELETE(request: Request) {
   const entityPermissionError = ensureEntityPermission(session.profile.role, entity)
   if (entityPermissionError) return entityPermissionError
 
-  if (entity !== "driver" && entity !== "tricycle") {
-    return invalid("Delete is supported for drivers and tricycles only.", 400)
-  }
-
   try {
     if (session.profile.role === "toda_admin") {
-      const scopeError = await ensureTodaScopedUpdate(
-        entity,
-        id,
-        undefined,
-        session.profile.todaId
-      )
+      if (entity !== "driver" && entity !== "tricycle") {
+        return invalid("TODA admin can delete drivers and tricycles only.", 403)
+      }
+
+      const scopeError = await ensureTodaScopedUpdate(entity, id, undefined, session.profile.todaId)
       if (scopeError) return scopeError
     }
 
-    if (entity === "driver") {
-      await deleteDriver(id)
-    } else {
-      await deleteTricycle(id)
+    switch (entity) {
+      case "barangay":
+        await deleteBarangay(id)
+        break
+      case "toda":
+        await deleteToda(id)
+        break
+      case "driver":
+        await deleteDriver(id)
+        break
+      case "tricycle":
+        await deleteTricycle(id)
+        break
+      case "route":
+        await deleteRoute(id)
+        break
     }
 
     return NextResponse.json({ ok: true })

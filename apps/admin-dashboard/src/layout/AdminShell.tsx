@@ -8,12 +8,14 @@ import {
   fetchDashboardData,
   type DashboardDataSnapshot,
   type DashboardDriverRecord,
+  type DashboardTripRecord,
   type DashboardViolationRecord
 } from "../lib/dashboard-data"
 import geofenceRaw from "../data/geofence.geojson?raw"
 import { enqueueViolation, getOutboxCount, savePoint } from "../lib/db"
 import { syncOutbox } from "../lib/outbox"
 import { supabase } from "../lib/supabase"
+import ReportsPage from "../components/ReportsPage"
 import SuperadminPage from "../superadmin/SuperadminPage"
 import TodaManagementPage from "../toda/TodaManagementPage"
 import "./AdminShell.css"
@@ -34,6 +36,7 @@ type NavKey =
   | "drivers"
   | "tricycles"
   | "alerts"
+  | "reports"
   | "trip-logs"
 
 type NavItem = {
@@ -46,6 +49,7 @@ const BASE_NAV_ITEMS: NavItem[] = [
   { key: "live-map", label: "Live Map" },
   { key: "drivers", label: "Drivers" },
   { key: "alerts", label: "Alerts" },
+  { key: "reports", label: "Reports" },
   { key: "trip-logs", label: "Trip Logs" }
 ]
 
@@ -55,6 +59,7 @@ const TODA_NAV_ITEMS: NavItem[] = [
   { key: "drivers", label: "Drivers" },
   { key: "tricycles", label: "Tricycles" },
   { key: "alerts", label: "Alerts" },
+  { key: "reports", label: "Reports" },
   { key: "trip-logs", label: "Trip Logs" }
 ]
 
@@ -74,6 +79,12 @@ const DEFAULT_CITY_ZOOM = 11
 const HOME_ALERT_SUMMARY_LIMIT = 5
 const HOME_TRIP_LOG_SUMMARY_LIMIT = 6
 const ALERT_URGENT_WINDOW_MS = 15 * 60 * 1000
+const NOTIFICATION_TRIP_WINDOW_MS = 24 * 60 * 60 * 1000
+const NOTIFICATION_DRIVER_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+const NOTIFICATION_LIMIT = 12
+
+type NotificationCategoryFilter = "all" | NotificationItem["kind"]
+type NotificationRecencyFilter = "all" | "24h" | "7d" | "30d"
 
 const ALERT_REASON_PRIORITY: Record<string, number> = {
   EMERGENCY: 100,
@@ -109,6 +120,49 @@ const getAlertPriority = (alert: { reason: string }) => {
   }
   return 40
 }
+
+const formatRelativeTimestamp = (ts: number, nowTs: number) => {
+  const diffMs = Math.max(0, nowTs - ts)
+  const diffMinutes = Math.floor(diffMs / 60000)
+  if (diffMinutes < 1) return "Just now"
+  if (diffMinutes < 60) return `${diffMinutes}m ago`
+  const diffHours = Math.floor(diffMinutes / 60)
+  if (diffHours < 24) return `${diffHours}h ago`
+  const diffDays = Math.floor(diffHours / 24)
+  if (diffDays < 7) return `${diffDays}d ago`
+  return new Date(ts).toLocaleDateString()
+}
+
+const sortNotificationsByRecency = (a: NotificationItem, b: NotificationItem) =>
+  b.ts - a.ts || b.priority - a.priority
+
+const getNotificationRecencyCutoff = (
+  recencyFilter: NotificationRecencyFilter,
+  nowTs: number
+) => {
+  if (recencyFilter === "24h") return nowTs - 24 * 60 * 60 * 1000
+  if (recencyFilter === "7d") return nowTs - 7 * 24 * 60 * 60 * 1000
+  if (recencyFilter === "30d") return nowTs - 30 * 24 * 60 * 60 * 1000
+  return null
+}
+
+const getDateFilterStartTs = (value: string) => {
+  if (!value) return null
+  return new Date(`${value}T00:00:00`).getTime()
+}
+
+const getDateFilterEndTs = (value: string) => {
+  if (!value) return null
+  return new Date(`${value}T23:59:59.999`).getTime()
+}
+
+const formatDateTime = (value?: string) => (value ? new Date(value).toLocaleString() : "-")
+
+const formatFareAmount = (value?: number) =>
+  value !== undefined ? `PHP ${value.toFixed(2)}` : "-"
+
+const formatTripStatus = (value: DashboardTripRecord["tripStatus"]) =>
+  value.charAt(0).toUpperCase() + value.slice(1)
 
 type AdminShellProps = {
   onLogout: () => void
@@ -151,6 +205,134 @@ type AlertListItem = {
   lat?: number
   lng?: number
 }
+
+type NotificationItem = {
+  key: string
+  kind: "violation" | "trip" | "driver"
+  page: Extract<NavKey, "alerts" | "trip-logs" | "drivers">
+  title: string
+  body: string
+  ts: number
+  priority: number
+  tone: "danger" | "warn" | "info"
+}
+
+const createViolationNotification = (alert: AlertListItem): NotificationItem => {
+  const driverLabel =
+    alert.driverName ?? (alert.driverId === "N/A" ? "Unassigned driver" : `Driver ${alert.driverId}`)
+  const details = [
+    alert.reason,
+    alert.description,
+    [alert.barangayName, alert.todaName, alert.status].filter(Boolean).join(" | ")
+  ].filter(Boolean)
+
+  return {
+    key: `notification-${alert.key}`,
+    kind: "violation",
+    page: "alerts",
+    title: `${driverLabel} violation alert`,
+    body: details.join(" • "),
+    ts: alert.ts,
+    priority: getAlertPriority(alert) + (alert.status === "open" ? 30 : 0),
+    tone: "danger"
+  }
+}
+
+const createTripNotification = (trip: DashboardTripRecord): NotificationItem => {
+  const ts = new Date(trip.tripEnd ?? trip.tripStart).getTime()
+  const title =
+    trip.tripStatus === "ongoing"
+      ? `Trip in progress for ${trip.driverName}`
+      : trip.tripStatus === "cancelled"
+        ? `Trip cancelled for ${trip.driverName}`
+        : trip.tripStatus === "completed"
+          ? `Trip completed for ${trip.driverName}`
+          : `Trip scheduled for ${trip.driverName}`
+  const priority =
+    trip.tripStatus === "ongoing"
+      ? 75
+      : trip.tripStatus === "cancelled"
+        ? 68
+        : trip.tripStatus === "completed"
+          ? 54
+          : 42
+
+  return {
+    key: `notification-trip-${trip.tripId}-${trip.tripStatus}`,
+    kind: "trip",
+    page: "trip-logs",
+    title,
+    body: `${trip.plateNo} • ${trip.routeName} • ${trip.todaName}`,
+    ts,
+    priority,
+    tone: trip.tripStatus === "cancelled" ? "warn" : "info"
+  }
+}
+
+const createDriverNotification = (
+  driver: DashboardDriverRecord,
+  reason: "suspended" | "inactive" | "password_pending" | "new_driver"
+): NotificationItem => {
+  const ts = new Date(driver.createdAt).getTime()
+  const driverLabel = `${driver.firstName} ${driver.lastName}`
+  const title =
+    reason === "suspended"
+      ? `Driver suspended: ${driverLabel}`
+      : reason === "inactive"
+        ? `Driver inactive: ${driverLabel}`
+        : reason === "password_pending"
+          ? `Driver setup pending: ${driverLabel}`
+          : `New driver added: ${driverLabel}`
+  const priority =
+    reason === "suspended"
+      ? 72
+      : reason === "inactive"
+        ? 58
+        : reason === "password_pending"
+          ? 50
+          : 38
+
+  return {
+    key: `notification-driver-${driver.driverId}-${reason}`,
+    kind: "driver",
+    page: "drivers",
+    title,
+    body: `${driver.driverCode} • ${driver.todaName} • Status ${driver.status}`,
+    ts,
+    priority,
+    tone: reason === "suspended" ? "danger" : "warn"
+  }
+}
+
+const BellIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <path
+      d="M12 4.75a4 4 0 0 0-4 4v1.1c0 1.29-.36 2.56-1.03 3.67L5.8 15.44A1 1 0 0 0 6.65 17h10.7a1 1 0 0 0 .85-1.56l-1.17-1.92A7.06 7.06 0 0 1 16 9.85v-1.1a4 4 0 0 0-4-4Zm0 15.5a2.74 2.74 0 0 0 2.58-1.83h-5.16A2.74 2.74 0 0 0 12 20.25Z"
+      fill="currentColor"
+    />
+  </svg>
+)
+
+const RefreshIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <path
+      d="M20 12a8 8 0 1 1-2.34-5.66"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M20 4v6h-6"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+)
 
 const createPointSignature = (point: Pick<DriverLocationEvent, "ts" | "lng" | "lat">) =>
   `${point.ts}|${point.lng.toFixed(5)}|${point.lat.toFixed(5)}`
@@ -207,14 +389,27 @@ export default function AdminShell({
   const [driversById, setDriversById] = useState<Record<string, DriverStreamState>>(
     {}
   )
+  const driversByIdRef = useRef<Record<string, DriverStreamState>>({})
   const [dashboardData, setDashboardData] = useState<DashboardDataSnapshot | null>(null)
   const [dashboardError, setDashboardError] = useState<string | null>(null)
   const [clockTs, setClockTs] = useState<number>(Date.now())
   const [liveMapCanvasHeight, setLiveMapCanvasHeight] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState<string>("")
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [lastNotificationReadTs, setLastNotificationReadTs] = useState<number>(0)
+  const [isRefreshingNotifications, setIsRefreshingNotifications] = useState(false)
+  const [notificationCategoryFilter, setNotificationCategoryFilter] =
+    useState<NotificationCategoryFilter>("all")
+  const [notificationRecencyFilter, setNotificationRecencyFilter] =
+    useState<NotificationRecencyFilter>("all")
+  const [notificationDateFrom, setNotificationDateFrom] = useState("")
+  const [notificationDateTo, setNotificationDateTo] = useState("")
+  const [profileModalOpen, setProfileModalOpen] = useState(false)
+  const [selectedDriver, setSelectedDriver] = useState<DriverDirectoryRow | null>(null)
   const visibleDriverIdentifiersRef = useRef<Set<string>>(new Set())
   const dashboardDriversRef = useRef<DashboardDriverRecord[]>([])
   const refreshLiveLocationsRef = useRef<(() => void) | null>(null)
+  const notificationPanelRef = useRef<HTMLDivElement | null>(null)
   const trimmedSearchQuery = searchQuery.trim()
   const normalizedSearchQuery = trimmedSearchQuery.toLowerCase()
   const hasSearchQuery = normalizedSearchQuery.length > 0
@@ -227,6 +422,15 @@ export default function AdminShell({
       setDashboardError(null)
     } catch (error) {
       setDashboardError(String(error))
+    }
+  }
+
+  const refreshNotificationsAndAlerts = async () => {
+    setIsRefreshingNotifications(true)
+    try {
+      await refreshDashboardData()
+    } finally {
+      setIsRefreshingNotifications(false)
     }
   }
 
@@ -263,6 +467,10 @@ export default function AdminShell({
   }, [accessToken])
 
   useEffect(() => {
+    driversByIdRef.current = driversById
+  }, [driversById])
+
+  useEffect(() => {
     dashboardDriversRef.current = dashboardData?.drivers ?? []
     const identifiers = new Set<string>()
     for (const driver of dashboardData?.drivers ?? []) {
@@ -272,6 +480,54 @@ export default function AdminShell({
     visibleDriverIdentifiersRef.current = identifiers
     refreshLiveLocationsRef.current?.()
   }, [dashboardData?.drivers])
+
+  useEffect(() => {
+    if (!notificationsOpen) return
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!notificationPanelRef.current?.contains(event.target as Node)) {
+        setNotificationsOpen(false)
+      }
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setNotificationsOpen(false)
+    }
+
+    window.addEventListener("mousedown", handlePointerDown)
+    window.addEventListener("keydown", handleKeyDown)
+
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown)
+      window.removeEventListener("keydown", handleKeyDown)
+    }
+  }, [notificationsOpen])
+
+  useEffect(() => {
+    if (!selectedDriver) return
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSelectedDriver(null)
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [selectedDriver])
+
+  useEffect(() => {
+    if (!profileModalOpen) return
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setProfileModalOpen(false)
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [profileModalOpen])
 
   useEffect(() => {
     if (!mapEl.current) return
@@ -308,6 +564,7 @@ export default function AdminShell({
     let onlineHandler: (() => void) | null = null
     let outboxTimer: number | undefined
     let outboxOnlineHandler: (() => void) | null = null
+    let stalePresenceTimer: number | undefined
 
     const markers = new Map<string, maplibregl.Marker>()
     const violationDedup = new Map<string, number>()
@@ -465,6 +722,8 @@ export default function AdminShell({
     }
 
     const isDriverVisibleToAdmin = (driverIdentifier: string) => {
+      const driver = getDriverRecord(driverIdentifier)
+      if (!driver || driver.status !== "active") return false
       if (adminProfile.role === "superadmin") return true
       const normalized = driverIdentifier.trim().toUpperCase()
       const visible = visibleDriverIdentifiersRef.current
@@ -491,6 +750,18 @@ export default function AdminShell({
       for (const identifier of identifiers) {
         removeDriverMarker(identifier)
         removeDriverState(identifier)
+      }
+    }
+
+    const isFreshLivePoint = (timestamp: number) => Date.now() - timestamp <= DRIVER_OFFLINE_MS
+
+    const pruneStaleDriverPresence = () => {
+      const staleIdentifiers = Object.entries(driversByIdRef.current)
+        .filter(([, liveState]) => !isFreshLivePoint(liveState.lastSeenTs))
+        .map(([driverIdentifier]) => driverIdentifier)
+
+      if (staleIdentifiers.length > 0) {
+        removeDriverLivePresence(staleIdentifiers)
       }
     }
 
@@ -757,11 +1028,26 @@ export default function AdminShell({
         }
 
         const locationEvent = toLocationEventFromRow(row)
+        if (!isFreshLivePoint(locationEvent.ts)) {
+          removeDriverLivePresence(identifiers)
+          return
+        }
+        if (!isDriverVisibleToAdmin(locationEvent.driverId)) {
+          removeDriverLivePresence(identifiers)
+          return
+        }
         await handleLocationEvent(locationEvent, { queueViolation: true, cachePoint: false })
         if (active) setLastUpdateTs(locationEvent.ts)
       }
 
       const loadLiveDriverLocations = async () => {
+        const hiddenIdentifiers = Object.keys(driversByIdRef.current).filter(
+          (driverIdentifier) => !isDriverVisibleToAdmin(driverIdentifier)
+        )
+        if (hiddenIdentifiers.length > 0) {
+          removeDriverLivePresence(hiddenIdentifiers)
+        }
+
         setSyncStatus("connecting")
         const { data, error } = await supabase
           .from("driver_locations")
@@ -847,15 +1133,16 @@ export default function AdminShell({
     outboxTimer = window.setInterval(() => {
       void runOutboxSync()
     }, OUTBOX_SYNC_MS)
-    outboxOnlineHandler = () => {
-      if (!navigator.onLine) setOutboxStatus("offline")
-      void runOutboxSync()
-    }
-    window.addEventListener("online", outboxOnlineHandler)
-    window.addEventListener("offline", outboxOnlineHandler)
+      outboxOnlineHandler = () => {
+        if (!navigator.onLine) setOutboxStatus("offline")
+        void runOutboxSync()
+      }
+      window.addEventListener("online", outboxOnlineHandler)
+      window.addEventListener("offline", outboxOnlineHandler)
+      stalePresenceTimer = window.setInterval(pruneStaleDriverPresence, 3000)
 
-    return () => {
-      active = false
+      return () => {
+        active = false
       if (refreshLiveLocationsRef.current) {
         refreshLiveLocationsRef.current = null
       }
@@ -867,6 +1154,7 @@ export default function AdminShell({
         window.removeEventListener("offline", onlineHandler)
       }
       if (outboxTimer) window.clearInterval(outboxTimer)
+      if (stalePresenceTimer) window.clearInterval(stalePresenceTimer)
       if (outboxOnlineHandler) {
         window.removeEventListener("online", outboxOnlineHandler)
         window.removeEventListener("offline", outboxOnlineHandler)
@@ -969,6 +1257,7 @@ export default function AdminShell({
 
   const activeDriverRows = useMemo(() => {
     return driverDirectoryRows.filter((driver) => {
+      if (driver.status !== "active") return false
       const lastSeenTs = driver.liveState?.lastSeenTs ?? 0
       return lastSeenTs > 0 && clockTs - lastSeenTs <= DRIVER_OFFLINE_MS
     })
@@ -1074,8 +1363,94 @@ export default function AdminShell({
   }, [filteredAlerts, clockTs])
 
   const tripRows = useMemo(() => {
-    return dashboardData?.recentTrips ?? []
+    return (dashboardData?.recentTrips ?? []).filter(
+      (trip) => trip.tripStatus === "completed" && Boolean(trip.tripEnd)
+    )
   }, [dashboardData?.recentTrips])
+
+  const notificationItems = useMemo<NotificationItem[]>(() => {
+    const violationItems = alertRows
+      .filter((alert) => alert.status !== "resolved" && alert.status !== "dismissed")
+      .slice(0, 6)
+      .map(createViolationNotification)
+
+    const tripItems = tripRows
+      .filter((trip) => {
+        const ts = new Date(trip.tripEnd ?? trip.tripStart).getTime()
+        return clockTs - ts <= NOTIFICATION_TRIP_WINDOW_MS
+      })
+      .slice(0, 5)
+      .map(createTripNotification)
+
+    const driverItems = (dashboardData?.drivers ?? [])
+      .flatMap((driver) => {
+        const createdTs = new Date(driver.createdAt).getTime()
+        if (driver.status === "suspended") {
+          return [createDriverNotification(driver, "suspended")]
+        }
+        if (driver.status === "inactive") {
+          return [createDriverNotification(driver, "inactive")]
+        }
+        if (!driver.passwordSet) {
+          return [createDriverNotification(driver, "password_pending")]
+        }
+        if (clockTs - createdTs <= NOTIFICATION_DRIVER_WINDOW_MS) {
+          return [createDriverNotification(driver, "new_driver")]
+        }
+        return []
+      })
+      .sort(sortNotificationsByRecency)
+      .slice(0, 5)
+
+    return [...violationItems, ...tripItems, ...driverItems]
+      .sort(sortNotificationsByRecency)
+      .slice(0, NOTIFICATION_LIMIT)
+  }, [alertRows, tripRows, dashboardData?.drivers, clockTs])
+
+  const filteredNotificationItems = useMemo(() => {
+    const recencyCutoff = getNotificationRecencyCutoff(notificationRecencyFilter, clockTs)
+    const startTs = getDateFilterStartTs(notificationDateFrom)
+    const endTs = getDateFilterEndTs(notificationDateTo)
+
+    return notificationItems.filter((item) => {
+      if (notificationCategoryFilter !== "all" && item.kind !== notificationCategoryFilter) {
+        return false
+      }
+      if (recencyCutoff !== null && item.ts < recencyCutoff) {
+        return false
+      }
+      if (startTs !== null && item.ts < startTs) {
+        return false
+      }
+      if (endTs !== null && item.ts > endTs) {
+        return false
+      }
+      return true
+    })
+  }, [
+    notificationItems,
+    notificationCategoryFilter,
+    notificationRecencyFilter,
+    notificationDateFrom,
+    notificationDateTo,
+    clockTs
+  ])
+
+  const hasNotificationFilters =
+    notificationCategoryFilter !== "all" ||
+    notificationRecencyFilter !== "all" ||
+    notificationDateFrom.length > 0 ||
+    notificationDateTo.length > 0
+
+  const unreadNotificationCount = useMemo(() => {
+    return notificationItems.filter((item) => item.ts > lastNotificationReadTs).length
+  }, [notificationItems, lastNotificationReadTs])
+
+  useEffect(() => {
+    if (!notificationsOpen) return
+    const latestTs = notificationItems[0]?.ts ?? Date.now()
+    setLastNotificationReadTs((current) => Math.max(current, latestTs))
+  }, [notificationsOpen, notificationItems])
 
   const filteredTripRows = useMemo(() => {
     if (!hasSearchQuery) return tripRows
@@ -1098,6 +1473,18 @@ export default function AdminShell({
     }
     return filteredAllDriverRows.slice(0, HOME_TRIP_LOG_SUMMARY_LIMIT)
   }, [filteredAllDriverRows, filteredTripRows])
+
+  const selectedDriverTripRows = useMemo(() => {
+    if (!selectedDriver) return []
+
+    return tripRows
+      .filter((trip) => trip.driverId === selectedDriver.driverId)
+      .sort((a, b) => {
+        const aTs = new Date(a.tripEnd ?? a.tripStart).getTime()
+        const bTs = new Date(b.tripEnd ?? b.tripStart).getTime()
+        return bTs - aTs
+      })
+  }, [selectedDriver, tripRows])
 
   const navItems = useMemo<NavItem[]>(() => {
     if (adminProfile.role === "superadmin") {
@@ -1124,6 +1511,12 @@ export default function AdminShell({
     .slice(0, 2)
     .map((part) => part[0]?.toUpperCase() ?? "")
     .join("") || "AD"
+  const profileDisplayName = adminProfile.email
+    .split("@")[0]
+    .split(/[._-]/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ") || "Admin User"
   const profileScope =
     adminProfile.role === "superadmin"
       ? "System Admin"
@@ -1131,7 +1524,15 @@ export default function AdminShell({
         ? `${adminProfile.role.replace("_", " ")} - ${adminProfile.todaName}`
         : adminProfile.barangayName
           ? `${adminProfile.role.replace("_", " ")} - ${adminProfile.barangayName}`
-          : adminProfile.role.replace("_", " ")
+        : adminProfile.role.replace("_", " ")
+
+  const openDriverModal = (driver: DriverDirectoryRow) => {
+    setSelectedDriver(driver)
+  }
+
+  const closeDriverModal = () => {
+    setSelectedDriver(null)
+  }
 
   return (
     <div className="admin-shell">
@@ -1185,13 +1586,188 @@ export default function AdminShell({
               onChange={(event) => setSearchQuery(event.target.value)}
               aria-label="Search by unit ID"
             />
-            <div className="topbar-profile">
+            <div className="topbar-notifications" ref={notificationPanelRef}>
+              <button
+                type="button"
+                className={`topbar-notification-button ${
+                  notificationsOpen ? "topbar-notification-button--active" : ""
+                }`}
+                aria-haspopup="dialog"
+                aria-expanded={notificationsOpen}
+                aria-label={
+                  unreadNotificationCount > 0
+                    ? `${unreadNotificationCount} unread notifications`
+                    : "Notifications"
+                }
+                onClick={() => setNotificationsOpen((current) => !current)}
+              >
+                <BellIcon />
+                {unreadNotificationCount > 0 && (
+                  <span className="topbar-notification-badge">
+                    {unreadNotificationCount > 9 ? "9+" : unreadNotificationCount}
+                  </span>
+                )}
+              </button>
+
+              {notificationsOpen && (
+                <div className="topbar-notification-menu" role="dialog" aria-label="Notifications">
+                  <div className="topbar-notification-menu__header">
+                    <div>
+                      <div className="topbar-notification-menu__title">Notifications</div>
+                      <div className="topbar-notification-menu__subtitle">
+                        Stored violations, trips, and driver updates shown newest first
+                      </div>
+                    </div>
+                    <div className="topbar-notification-menu__actions">
+                      <button
+                        type="button"
+                        className={`topbar-notification-refresh ${
+                          isRefreshingNotifications
+                            ? "topbar-notification-refresh--spinning"
+                            : ""
+                        }`}
+                        onClick={() => void refreshNotificationsAndAlerts()}
+                        disabled={isRefreshingNotifications}
+                        aria-label="Refresh notifications and alerts"
+                        title="Refresh notifications and alerts"
+                      >
+                        <RefreshIcon />
+                      </button>
+                      <div className="topbar-notification-menu__count">
+                        {hasNotificationFilters
+                          ? `${filteredNotificationItems.length}/${notificationItems.length}`
+                          : notificationItems.length}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="topbar-notification-filters">
+                    <div className="topbar-notification-filter-grid">
+                      <select
+                        className="topbar-notification-filter"
+                        aria-label="Filter notifications by category"
+                        value={notificationCategoryFilter}
+                        onChange={(event) =>
+                          setNotificationCategoryFilter(
+                            event.target.value as NotificationCategoryFilter
+                          )
+                        }
+                      >
+                        <option value="all">All categories</option>
+                        <option value="violation">Alerts</option>
+                        <option value="trip">Trips</option>
+                        <option value="driver">Drivers</option>
+                      </select>
+
+                      <select
+                        className="topbar-notification-filter"
+                        aria-label="Filter notifications by recency"
+                        value={notificationRecencyFilter}
+                        onChange={(event) =>
+                          setNotificationRecencyFilter(
+                            event.target.value as NotificationRecencyFilter
+                          )
+                        }
+                      >
+                        <option value="all">All time</option>
+                        <option value="24h">Last 24 hours</option>
+                        <option value="7d">Last 7 days</option>
+                        <option value="30d">Last 30 days</option>
+                      </select>
+                    </div>
+
+                    <div className="topbar-notification-date-range">
+                      <label className="topbar-notification-date-field">
+                        <span>From</span>
+                        <input
+                          type="date"
+                          value={notificationDateFrom}
+                          max={notificationDateTo || undefined}
+                          onChange={(event) => setNotificationDateFrom(event.target.value)}
+                          aria-label="Filter notifications from date"
+                        />
+                      </label>
+
+                      <label className="topbar-notification-date-field">
+                        <span>To</span>
+                        <input
+                          type="date"
+                          value={notificationDateTo}
+                          min={notificationDateFrom || undefined}
+                          onChange={(event) => setNotificationDateTo(event.target.value)}
+                          aria-label="Filter notifications to date"
+                        />
+                      </label>
+                    </div>
+
+                    {hasNotificationFilters && (
+                      <button
+                        type="button"
+                        className="topbar-notification-clear"
+                        onClick={() => {
+                          setNotificationCategoryFilter("all")
+                          setNotificationRecencyFilter("all")
+                          setNotificationDateFrom("")
+                          setNotificationDateTo("")
+                        }}
+                      >
+                        Clear filters
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="topbar-notification-list">
+                    {filteredNotificationItems.length === 0 ? (
+                      <div className="topbar-notification-empty">
+                        {notificationItems.length === 0
+                          ? "No important notifications yet."
+                          : "No notifications match the selected filters."}
+                      </div>
+                    ) : (
+                      filteredNotificationItems.map((item) => (
+                        <button
+                          key={item.key}
+                          type="button"
+                          className="topbar-notification-item"
+                          onClick={() => {
+                            setActivePage(item.page)
+                            setNotificationsOpen(false)
+                          }}
+                        >
+                          <span
+                            className={`topbar-notification-item__icon topbar-notification-item__icon--${item.tone}`}
+                            aria-hidden="true"
+                          >
+                            {item.kind === "violation" ? "!" : item.kind === "trip" ? "T" : "D"}
+                          </span>
+                          <span className="topbar-notification-item__content">
+                            <span className="topbar-notification-item__title">{item.title}</span>
+                            <span className="topbar-notification-item__body">{item.body}</span>
+                          </span>
+                          <span className="topbar-notification-item__time">
+                            {formatRelativeTimestamp(item.ts, clockTs)}
+                          </span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              className="topbar-profile topbar-profile--button"
+              onClick={() => setProfileModalOpen(true)}
+              aria-haspopup="dialog"
+              aria-expanded={profileModalOpen}
+              aria-label="Open admin profile settings"
+            >
               <div className="profile-avatar">{profileInitials}</div>
               <div>
                 <div className="profile-name">{adminProfile.email}</div>
                 <div className="profile-meta">{profileScope}</div>
               </div>
-            </div>
+            </button>
           </div>
         </header>
 
@@ -1413,7 +1989,19 @@ export default function AdminShell({
                           ((driver.liveState?.lastSeenTs ?? 0) > 0) &&
                           clockTs - (driver.liveState?.lastSeenTs ?? 0) <= DRIVER_OFFLINE_MS
                         return (
-                          <div className="driver-row" key={driver.driverId}>
+                          <div
+                            className="driver-row driver-row--interactive"
+                            key={driver.driverId}
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => openDriverModal(driver)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault()
+                                openDriverModal(driver)
+                              }
+                            }}
+                          >
                             <div className="driver-row__top">
                               <strong>{driver.firstName} {driver.lastName}</strong>
                               <span
@@ -1481,7 +2069,19 @@ export default function AdminShell({
                         ((driver.liveState?.lastSeenTs ?? 0) > 0) &&
                         clockTs - (driver.liveState?.lastSeenTs ?? 0) <= DRIVER_OFFLINE_MS
                       return (
-                        <div className="driver-row" key={driver.driverId}>
+                        <div
+                          className="driver-row driver-row--interactive"
+                          key={driver.driverId}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => openDriverModal(driver)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault()
+                              openDriverModal(driver)
+                            }
+                          }}
+                        >
                           <div className="driver-row__top">
                             <strong>{driver.firstName} {driver.lastName}</strong>
                             <span
@@ -1519,6 +2119,233 @@ export default function AdminShell({
                 </div>
               </section>
             )
+          )}
+
+          {selectedDriver && (
+            <div
+              className="driver-modal-backdrop"
+              role="presentation"
+              onClick={closeDriverModal}
+            >
+              <div
+                className="driver-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="driver-modal-title"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="driver-modal__header">
+                  <div>
+                    <h3 id="driver-modal-title">
+                      {selectedDriver.firstName} {selectedDriver.lastName}
+                    </h3>
+                    <p>
+                      {selectedDriver.driverCode} | {selectedDriver.barangayName} | {selectedDriver.todaName}
+                    </p>
+                  </div>
+                  <button type="button" className="driver-modal__close" onClick={closeDriverModal}>
+                    Close
+                  </button>
+                </div>
+
+                <div className="driver-modal__body">
+                  <section className="driver-modal__summary">
+                    <div className="driver-modal__card">
+                      <span className="driver-modal__label">Status</span>
+                      <strong>{selectedDriver.status}</strong>
+                    </div>
+                    <div className="driver-modal__card">
+                      <span className="driver-modal__label">Assigned Tricycle</span>
+                      <strong>{selectedDriver.tricycleNo ? `Tricycle ${selectedDriver.tricycleNo}` : "No tricycle assigned"}</strong>
+                    </div>
+                    <div className="driver-modal__card">
+                      <span className="driver-modal__label">Password</span>
+                      <strong>{selectedDriver.passwordSet ? "Set" : "Pending"}</strong>
+                    </div>
+                  </section>
+
+                  <section className="driver-modal__details">
+                    <div className="driver-modal__card">
+                      <span className="driver-modal__label">Contact</span>
+                      <strong>{selectedDriver.contactNo ?? "No contact provided"}</strong>
+                    </div>
+                    <div className="driver-modal__card">
+                      <span className="driver-modal__label">QR</span>
+                      <strong>{selectedDriver.qrId ? `#${selectedDriver.qrId}` : "Not assigned"}</strong>
+                    </div>
+                    <div className="driver-modal__card">
+                      <span className="driver-modal__label">Last Seen</span>
+                      <strong>
+                        {selectedDriver.liveState
+                          ? formatLastSeen(selectedDriver.liveState.lastSeenTs, clockTs)
+                          : "No live point yet"}
+                      </strong>
+                    </div>
+                    <div className="driver-modal__card">
+                      <span className="driver-modal__label">Current Point</span>
+                      <strong>
+                        {selectedDriver.liveState
+                          ? formatPoint(selectedDriver.liveState.latestPoint)
+                          : "Waiting for live GPS point"}
+                      </strong>
+                    </div>
+                    <div className="driver-modal__card">
+                      <span className="driver-modal__label">Created</span>
+                      <strong>{formatDateTime(selectedDriver.createdAt)}</strong>
+                    </div>
+                  </section>
+
+                  <section className="driver-modal__history">
+                    <div className="driver-modal__section-head">
+                      <h4>Trip History</h4>
+                      <p>Showing recent trips available in the dashboard.</p>
+                    </div>
+
+                    {selectedDriverTripRows.length === 0 ? (
+                      <div className="driver-modal__empty">
+                        No trip history found for this driver yet.
+                      </div>
+                    ) : (
+                      <div className="driver-trip-list">
+                        {selectedDriverTripRows.map((trip) => (
+                          <article key={trip.tripId} className="driver-trip-card">
+                            <div className="driver-trip-card__top">
+                              <div>
+                                <strong>{trip.routeName}</strong>
+                                <div className="driver-trip-card__meta">
+                                  Trip #{trip.tripId} | {trip.plateNo} | {trip.todaName}
+                                </div>
+                              </div>
+                              <span className={`driver-trip-card__status driver-trip-card__status--${trip.tripStatus}`}>
+                                {formatTripStatus(trip.tripStatus)}
+                              </span>
+                            </div>
+                            <div className="driver-trip-card__grid">
+                              <div>
+                                <span>Start</span>
+                                <strong>{formatDateTime(trip.tripStart)}</strong>
+                              </div>
+                              <div>
+                                <span>End</span>
+                                <strong>{formatDateTime(trip.tripEnd)}</strong>
+                              </div>
+                              <div>
+                                <span>Duration</span>
+                                <strong>{trip.durationMinutes !== undefined ? `${trip.durationMinutes} min` : "-"}</strong>
+                              </div>
+                              <div>
+                                <span>Fare</span>
+                                <strong>{formatFareAmount(trip.fareAmount)}</strong>
+                              </div>
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {profileModalOpen && (
+            <div
+              className="profile-settings-backdrop"
+              role="presentation"
+              onClick={() => setProfileModalOpen(false)}
+            >
+              <div
+                className="profile-settings-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="profile-settings-title"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="profile-settings-modal__header">
+                  <div className="profile-settings-modal__identity">
+                    <div className="profile-settings-modal__avatar">{profileInitials}</div>
+                    <div>
+                      <h3 id="profile-settings-title">Admin Profile Settings</h3>
+                      <p>{profileDisplayName}</p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="profile-settings-modal__close"
+                    onClick={() => setProfileModalOpen(false)}
+                  >
+                    Close
+                  </button>
+                </div>
+
+                <form className="profile-settings-modal__form">
+                  <label className="profile-settings-modal__field">
+                    <span>Email Address</span>
+                    <input type="email" value={adminProfile.email} readOnly />
+                  </label>
+
+                  <label className="profile-settings-modal__field">
+                    <span>Role</span>
+                    <input type="text" value={profileScope} readOnly />
+                  </label>
+
+                  <label className="profile-settings-modal__field">
+                    <span>Status</span>
+                    <input
+                      type="text"
+                      value={adminProfile.status.charAt(0).toUpperCase() + adminProfile.status.slice(1)}
+                      readOnly
+                    />
+                  </label>
+
+                  <label className="profile-settings-modal__field">
+                    <span>Barangay</span>
+                    <input type="text" value={adminProfile.barangayName ?? "All barangays"} readOnly />
+                  </label>
+
+                  <label className="profile-settings-modal__field">
+                    <span>TODA</span>
+                    <input type="text" value={adminProfile.todaName ?? "All TODAs"} readOnly />
+                  </label>
+
+                  <label className="profile-settings-modal__field">
+                    <span>City</span>
+                    <input type="text" value={adminProfile.city ?? "Not assigned"} readOnly />
+                  </label>
+
+                  <label className="profile-settings-modal__field">
+                    <span>Admin ID</span>
+                    <input type="text" value={`ADM-${String(adminProfile.adminId).padStart(3, "0")}`} readOnly />
+                  </label>
+
+                  <label className="profile-settings-modal__field profile-settings-modal__field--wide">
+                    <span>Account Note</span>
+                    <textarea
+                      rows={3}
+                      value="Profile updates are currently managed through the centralized admin account records."
+                      readOnly
+                    />
+                  </label>
+                </form>
+
+                <div className="profile-settings-modal__footer">
+                  <button
+                    type="button"
+                    className="profile-settings-modal__secondary"
+                    onClick={() => setProfileModalOpen(false)}
+                  >
+                    Done
+                  </button>
+                  <button
+                    type="button"
+                    className="profile-settings-modal__danger"
+                    onClick={onLogout}
+                  >
+                    Log out
+                  </button>
+                </div>
+              </div>
+            </div>
           )}
 
           {activePage === "tricycles" && adminProfile.role === "toda_admin" && (
@@ -1576,6 +2403,13 @@ export default function AdminShell({
                 )}
               </div>
             </section>
+          )}
+
+          {activePage === "reports" && (
+            <ReportsPage
+              accessToken={accessToken}
+              onDataChanged={() => void refreshDashboardData()}
+            />
           )}
 
           {activePage === "trip-logs" && (

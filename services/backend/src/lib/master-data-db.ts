@@ -610,6 +610,52 @@ export const updateBarangay = async (barangayId: number, input: UpdateBarangayIn
   return getBarangayById(barangayId)
 }
 
+export const deleteBarangay = async (barangayId: number) => {
+  await ensureDatabaseReady()
+
+  const [{ rows: todaRows }, { rows: adminRows }] = await Promise.all([
+    query<{ count: string }>(
+      `
+        SELECT COUNT(*)::text AS count
+        FROM public.todas
+        WHERE barangay_id = $1
+      `,
+      [barangayId]
+    ),
+    query<{ count: string }>(
+      `
+        SELECT COUNT(*)::text AS count
+        FROM public.admin_accounts
+        WHERE barangay_id = $1
+      `,
+      [barangayId]
+    )
+  ])
+
+  const todaCount = Number(todaRows[0]?.count ?? "0")
+  const adminCount = Number(adminRows[0]?.count ?? "0")
+
+  if (todaCount > 0) {
+    throw new Error(
+      `Cannot delete barangay while ${todaCount} TODA${todaCount === 1 ? " is" : "s are"} still assigned to it.`
+    )
+  }
+
+  if (adminCount > 0) {
+    throw new Error(
+      `Cannot delete barangay while ${adminCount} admin account${adminCount === 1 ? " is" : "s are"} still assigned to it.`
+    )
+  }
+
+  await query(
+    `
+      DELETE FROM public.barangays
+      WHERE barangay_id = $1
+    `,
+    [barangayId]
+  )
+}
+
 export const createToda = async (input: CreateTodaInput) => {
   await ensureDatabaseReady()
 
@@ -640,6 +686,87 @@ export const updateToda = async (todaId: number, input: UpdateTodaInput) => {
   )
 
   return getTodaById(todaId)
+}
+
+export const deleteToda = async (todaId: number) => {
+  await ensureDatabaseReady()
+
+  const [
+    { rows: driverRows },
+    { rows: tricycleRows },
+    { rows: routeRows },
+    { rows: adminRows }
+  ] = await Promise.all([
+    query<{ count: string }>(
+      `
+        SELECT COUNT(*)::text AS count
+        FROM public.drivers
+        WHERE toda_id = $1
+      `,
+      [todaId]
+    ),
+    query<{ count: string }>(
+      `
+        SELECT COUNT(*)::text AS count
+        FROM public.tricycles
+        WHERE toda_id = $1
+      `,
+      [todaId]
+    ),
+    query<{ count: string }>(
+      `
+        SELECT COUNT(*)::text AS count
+        FROM public.routes
+        WHERE toda_id = $1
+      `,
+      [todaId]
+    ),
+    query<{ count: string }>(
+      `
+        SELECT COUNT(*)::text AS count
+        FROM public.admin_accounts
+        WHERE toda_id = $1
+      `,
+      [todaId]
+    )
+  ])
+
+  const driverCount = Number(driverRows[0]?.count ?? "0")
+  const tricycleCount = Number(tricycleRows[0]?.count ?? "0")
+  const routeCount = Number(routeRows[0]?.count ?? "0")
+  const adminCount = Number(adminRows[0]?.count ?? "0")
+
+  if (driverCount > 0) {
+    throw new Error(
+      `Cannot delete TODA while ${driverCount} driver${driverCount === 1 ? " is" : "s are"} still assigned to it.`
+    )
+  }
+
+  if (tricycleCount > 0) {
+    throw new Error(
+      `Cannot delete TODA while ${tricycleCount} tricycle${tricycleCount === 1 ? " is" : "s are"} still assigned to it.`
+    )
+  }
+
+  if (routeCount > 0) {
+    throw new Error(
+      `Cannot delete TODA while ${routeCount} route${routeCount === 1 ? " is" : "s are"} still assigned to it.`
+    )
+  }
+
+  if (adminCount > 0) {
+    throw new Error(
+      `Cannot delete TODA while ${adminCount} admin account${adminCount === 1 ? " is" : "s are"} still assigned to it.`
+    )
+  }
+
+  await query(
+    `
+      DELETE FROM public.todas
+      WHERE toda_id = $1
+    `,
+    [todaId]
+  )
 }
 
 export const createDriver = async (input: CreateDriverInput) => {
@@ -816,10 +943,10 @@ export const updateRoute = async (routeId: number, input: UpdateRouteInput) => {
           origin = COALESCE($3, origin),
           destination = COALESCE($4, destination),
           geofence_geojson = CASE
-            WHEN $5::jsonb is null THEN geofence_geojson
-            ELSE $5
+            WHEN $5 THEN $6::jsonb
+            ELSE geofence_geojson
           END,
-          status = COALESCE($6, status)
+          status = COALESCE($7, status)
       WHERE route_id = $1
     `,
     [
@@ -827,10 +954,42 @@ export const updateRoute = async (routeId: number, input: UpdateRouteInput) => {
       input.todaId ?? null,
       input.origin ?? null,
       input.destination ?? null,
-      input.geofenceGeojson === undefined ? null : JSON.stringify(input.geofenceGeojson),
+      hasOwn(input, "geofenceGeojson"),
+      input.geofenceGeojson === undefined || input.geofenceGeojson === null
+        ? null
+        : JSON.stringify(input.geofenceGeojson),
       input.status ?? null
     ]
   )
 
   return getRouteById(routeId)
+}
+
+export const deleteRoute = async (routeId: number) => {
+  await ensureDatabaseReady()
+
+  const { rows } = await query<{ count: string }>(
+    `
+      SELECT COUNT(*)::text AS count
+      FROM public.trips
+      WHERE route_id = $1
+    `,
+    [routeId]
+  )
+
+  const tripCount = Number(rows[0]?.count ?? "0")
+
+  if (tripCount > 0) {
+    throw new Error(
+      `Cannot delete route while ${tripCount} trip${tripCount === 1 ? " is" : "s are"} still linked to it.`
+    )
+  }
+
+  await query(
+    `
+      DELETE FROM public.routes
+      WHERE route_id = $1
+    `,
+    [routeId]
+  )
 }

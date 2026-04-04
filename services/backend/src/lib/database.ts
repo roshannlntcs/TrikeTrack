@@ -13,6 +13,8 @@ declare global {
   var __triketrackPgPool: Pool | undefined
   // eslint-disable-next-line no-var
   var __triketrackDatabaseReady: Promise<void> | undefined
+  // eslint-disable-next-line no-var
+  var __triketrackColumnExistsCache: Map<string, Promise<boolean>> | undefined
 }
 
 const createPool = () =>
@@ -57,8 +59,12 @@ const REQUIRED_TABLES = [
   "public.admin_accounts",
   "public.drivers",
   "public.tricycles",
+  "public.qr_codes",
+  "public.report_types",
   "public.routes",
   "public.trips",
+  "public.passenger_scans",
+  "public.reports",
   "public.trip_points",
   "public.violations",
   "public.violation_types"
@@ -82,6 +88,41 @@ export const ensureDatabaseReady = () => {
   }
 
   return globalThis.__triketrackDatabaseReady
+}
+
+export const hasColumn = (
+  schemaName: string,
+  tableName: string,
+  columnName: string
+) => {
+  if (!globalThis.__triketrackColumnExistsCache) {
+    globalThis.__triketrackColumnExistsCache = new Map()
+  }
+
+  const cacheKey = `${schemaName}.${tableName}.${columnName}`
+  const cachedResult = globalThis.__triketrackColumnExistsCache.get(cacheKey)
+  if (cachedResult) return cachedResult
+
+  const pendingResult = query<{ exists: boolean }>(
+    `
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = $1
+          AND table_name = $2
+          AND column_name = $3
+      ) AS exists
+    `,
+    [schemaName, tableName, columnName]
+  )
+    .then((result) => result.rows[0]?.exists === true)
+    .catch((error) => {
+      globalThis.__triketrackColumnExistsCache?.delete(cacheKey)
+      throw error
+    })
+
+  globalThis.__triketrackColumnExistsCache.set(cacheKey, pendingResult)
+  return pendingResult
 }
 
 export const checkDatabaseHealth = async () => {

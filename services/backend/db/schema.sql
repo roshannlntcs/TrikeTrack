@@ -119,7 +119,7 @@ create table public.routes (
   route_id bigint generated always as identity primary key,
   toda_id bigint not null references public.todas(toda_id) on delete restrict,
   origin text not null,
-  destination text not null,
+  destination text not null,a
   geofence_geojson jsonb,
   status entity_status not null default 'active',
   created_at timestamptz not null default now(),
