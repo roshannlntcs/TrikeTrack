@@ -890,6 +890,37 @@
   gap: 8px;
 }
 
+.driver-row__top--profile {
+  align-items: center;
+}
+
+.driver-row__identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.driver-row__avatar {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: 999px;
+  object-fit: cover;
+  display: block;
+  border: 1px solid #d9e1e8;
+  background: #ffffff;
+}
+
+.driver-row__avatar--fallback {
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #102030 0%, #21364f 100%);
+  color: #f8fafc;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
 .driver-row__meta,
 .alert-row__meta,
 .trip-driver__meta {
@@ -909,6 +940,124 @@
 .status-badge.online {
   background: #dcfce7;
   color: #166534;
+}
+
+.emergency-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.4);
+  backdrop-filter: blur(4px);
+}
+
+.emergency-modal {
+  width: min(100%, 460px);
+  display: grid;
+  gap: 14px;
+  padding: 24px 22px;
+  border-radius: 20px;
+  border: 1px solid #f0c8c8;
+  background: #ffffff;
+  box-shadow: 0 28px 64px rgba(15, 23, 42, 0.24);
+  animation: emergency-modal-enter 180ms ease-out;
+}
+
+.emergency-modal__badge {
+  justify-self: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: #ffe7e7;
+  color: #a22c2c;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.emergency-modal h2 {
+  margin: 0;
+  text-align: center;
+  color: #182433;
+}
+
+.emergency-modal__message {
+  margin: 0;
+  text-align: center;
+  color: #566579;
+  line-height: 1.55;
+}
+
+.emergency-modal__details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.emergency-modal__details div {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+.emergency-modal__details span,
+.emergency-modal__meta {
+  color: #607082;
+  font-size: 0.84rem;
+}
+
+.emergency-modal__details strong {
+  color: #182433;
+}
+
+.emergency-modal__meta {
+  text-align: center;
+}
+
+.emergency-modal__error {
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(201, 58, 76, 0.24);
+  background: #fff1f2;
+  color: #a61b32;
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.emergency-modal__actions {
+  display: grid;
+}
+
+.emergency-modal__button {
+  min-height: 48px;
+  border: 0;
+  border-radius: 14px;
+  background: #c53d3d;
+  color: #ffffff;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.emergency-modal__button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+@keyframes emergency-modal-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .status-badge.offline {
@@ -1228,7 +1377,8 @@
 
   .driver-modal__summary,
   .driver-modal__details,
-  .driver-trip-card__grid {
+  .driver-trip-card__grid,
+  .emergency-modal__details {
     grid-template-columns: 1fr;
   }
 }
@@ -1250,6 +1400,10 @@
   }
 
   .driver-modal-backdrop {
+    padding: 12px;
+  }
+
+  .emergency-modal-backdrop {
     padding: 12px;
   }
 

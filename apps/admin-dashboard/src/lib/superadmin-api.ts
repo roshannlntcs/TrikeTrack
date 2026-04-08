@@ -30,6 +30,10 @@ export type DriverRecord = {
   tricycleId?: number
   tricycleNo?: string
   qrId?: number
+  qrToken?: string
+  qrStatus?: "active" | "inactive" | "revoked" | "expired"
+  qrIssuedAt?: string
+  reportPath?: string
   passwordSet: boolean
   firstName: string
   lastName: string

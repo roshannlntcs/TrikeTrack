@@ -125,6 +125,15 @@ export const hasColumn = (
   return pendingResult
 }
 
+export const hasTable = async (schemaName: string, tableName: string) => {
+  const result = await query<{ regclass: string | null }>(
+    "SELECT to_regclass($1) AS regclass",
+    [`${schemaName}.${tableName}`]
+  )
+
+  return result.rows[0]?.regclass !== null
+}
+
 export const checkDatabaseHealth = async () => {
   await ensureDatabaseReady()
   const result = await query<{ ok: number }>("SELECT 1 AS ok")

@@ -2,18 +2,23 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import maplibregl from "maplibre-gl"
 import * as turf from "@turf/turf"
 import type { GeoJSON as MapGeoJSON } from "../types/geojson"
-import type { DriverLocationEvent, ViolationEvent } from "../../../../common/types"
+import type { DriverLocationEvent } from "../lib/shared-types"
 import type { AdminProfile } from "../lib/admin-profile"
 import {
   fetchDashboardData,
   type DashboardDataSnapshot,
   type DashboardDriverRecord,
+  type DashboardEmergencyRecord,
+  type DashboardOperationalDriverRecord,
   type DashboardTripRecord,
-  type DashboardViolationRecord
+  type DashboardViolationRecord,
+  markDashboardNotificationsRead
 } from "../lib/dashboard-data"
+import {
+  connectAdminEmergencyStream,
+  updateEmergencyAlertStatus
+} from "../lib/emergencies"
 import geofenceRaw from "../data/geofence.geojson?raw"
-import { enqueueViolation, getOutboxCount, savePoint } from "../lib/db"
-import { syncOutbox } from "../lib/outbox"
 import { supabase } from "../lib/supabase"
 import ReportsPage from "../components/ReportsPage"
 import SuperadminPage from "../superadmin/SuperadminPage"
@@ -63,25 +68,19 @@ const TODA_NAV_ITEMS: NavItem[] = [
   { key: "trip-logs", label: "Trip Logs" }
 ]
 
-const ROUTE_ID = "umasa-brgy-18b-geofence"
-const DRIVER_OFFLINE_MS = 15000
-const VIOLATION_DEDUP_MS = 60000
 const RECENT_POINTS_PER_DRIVER = 8
-const MAX_ALERTS = 40
-const OUTBOX_SYNC_MS = 5000
 const MAP_STYLE_URL = "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json"
 const OBRERO_CENTER: [number, number] = [125.6128, 7.0848]
-const DAVAO_CITY_BOUNDS: [[number, number], [number, number]] = [
-  [125.48, 6.96],
-  [125.71, 7.18]
-]
 const DEFAULT_CITY_ZOOM = 11
+const WORLD_MIN_ZOOM = 1
+const GEOFENCE_FIT_PADDING = 28
+const GEOFENCE_FOCUS_MAX_ZOOM = 13.5
 const HOME_ALERT_SUMMARY_LIMIT = 5
 const HOME_TRIP_LOG_SUMMARY_LIMIT = 6
-const ALERT_URGENT_WINDOW_MS = 15 * 60 * 1000
 const NOTIFICATION_TRIP_WINDOW_MS = 24 * 60 * 60 * 1000
 const NOTIFICATION_DRIVER_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 const NOTIFICATION_LIMIT = 12
+const DRIVER_PRESENCE_STALE_MS = 2 * 60 * 1000
 
 type NotificationCategoryFilter = "all" | NotificationItem["kind"]
 type NotificationRecencyFilter = "all" | "24h" | "7d" | "30d"
@@ -103,15 +102,8 @@ const formatLastSeen = (lastSeenTs: number, nowTs: number) => {
   return `${diffHours}h ago`
 }
 
-const formatDriverCode = (driverId: number) => `D-${String(driverId).padStart(3, "0")}`
-
 const formatPoint = (point: DriverLocationEvent) =>
   `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`
-
-const formatAlertReason = (reason: ViolationEvent["reason"]) => {
-  if (reason === "OUTSIDE_ROUTE_CORRIDOR") return "OUTSIDE_GEOFENCE_BOUNDARY"
-  return reason
-}
 
 const getAlertPriority = (alert: { reason: string }) => {
   const normalizedReason = alert.reason.toUpperCase()
@@ -131,6 +123,19 @@ const formatRelativeTimestamp = (ts: number, nowTs: number) => {
   const diffDays = Math.floor(diffHours / 24)
   if (diffDays < 7) return `${diffDays}d ago`
   return new Date(ts).toLocaleDateString()
+}
+
+const isFreshPresence = (lastSeenTs: number, nowTs: number) =>
+  nowTs - lastSeenTs <= DRIVER_PRESENCE_STALE_MS
+
+const getGeofenceBounds = (
+  geofenceFeature: MapGeoJSON["features"][number]
+): [[number, number], [number, number]] => {
+  const [minLng, minLat, maxLng, maxLat] = turf.bbox(geofenceFeature)
+  return [
+    [minLng, minLat],
+    [maxLng, maxLat]
+  ]
 }
 
 const sortNotificationsByRecency = (a: NotificationItem, b: NotificationItem) =>
@@ -158,9 +163,6 @@ const getDateFilterEndTs = (value: string) => {
 
 const formatDateTime = (value?: string) => (value ? new Date(value).toLocaleString() : "-")
 
-const formatFareAmount = (value?: number) =>
-  value !== undefined ? `PHP ${value.toFixed(2)}` : "-"
-
 const formatTripStatus = (value: DashboardTripRecord["tripStatus"]) =>
   value.charAt(0).toUpperCase() + value.slice(1)
 
@@ -183,21 +185,62 @@ type LiveDriverLocationRow = {
   updated_at: string
 }
 
-type HandleLocationOptions = {
-  queueViolation?: boolean
-  cachePoint?: boolean
-}
-
 type DriverDirectoryRow = DashboardDriverRecord & {
   liveState?: DriverStreamState
+  operationalState?: DashboardOperationalDriverRecord
+}
+
+const isDriverOnlineNow = (
+  driver: DriverDirectoryRow,
+  nowTs: number,
+  livePresenceHydrated: boolean
+) => {
+  if (driver.status !== "active") return false
+
+  if (livePresenceHydrated) {
+    return Boolean(driver.liveState && isFreshPresence(driver.liveState.lastSeenTs, nowTs))
+  }
+
+  return Boolean(driver.liveState) || driver.operationalState?.isOnline === true
+}
+
+const getDriverPresenceMeta = (
+  driver: DriverDirectoryRow,
+  nowTs: number,
+  livePresenceHydrated: boolean
+) => {
+  if (driver.status === "suspended") {
+    return { label: "Suspended", className: "status-badge offline" }
+  }
+  if (driver.status === "inactive") {
+    return { label: "Inactive", className: "status-badge offline" }
+  }
+  if (
+    driver.operationalState?.operationalStatus === "on_trip" &&
+    isDriverOnlineNow(driver, nowTs, livePresenceHydrated)
+  ) {
+    return { label: "On Trip", className: "status-badge online" }
+  }
+  if (isDriverOnlineNow(driver, nowTs, livePresenceHydrated)) {
+    return { label: "Online", className: "status-badge online" }
+  }
+
+  return {
+    label: "Offline",
+    className: "status-badge offline"
+  }
 }
 
 type AlertListItem = {
   key: string
+  source: "violation" | "emergency"
+  emergencyId?: number
   driverId: string
   driverName?: string
   todaName?: string
   barangayName?: string
+  plateNo?: string
+  routeName?: string
   ts: number
   reason: string
   description?: string
@@ -208,13 +251,14 @@ type AlertListItem = {
 
 type NotificationItem = {
   key: string
-  kind: "violation" | "trip" | "driver"
+  kind: "violation" | "trip" | "driver" | "emergency"
   page: Extract<NavKey, "alerts" | "trip-logs" | "drivers">
   title: string
   body: string
   ts: number
   priority: number
   tone: "danger" | "warn" | "info"
+  isRead: boolean
 }
 
 const createViolationNotification = (alert: AlertListItem): NotificationItem => {
@@ -234,7 +278,8 @@ const createViolationNotification = (alert: AlertListItem): NotificationItem => 
     body: details.join(" • "),
     ts: alert.ts,
     priority: getAlertPriority(alert) + (alert.status === "open" ? 30 : 0),
-    tone: "danger"
+    tone: "danger",
+    isRead: false
   }
 }
 
@@ -265,7 +310,8 @@ const createTripNotification = (trip: DashboardTripRecord): NotificationItem => 
     body: `${trip.plateNo} • ${trip.routeName} • ${trip.todaName}`,
     ts,
     priority,
-    tone: trip.tripStatus === "cancelled" ? "warn" : "info"
+    tone: trip.tripStatus === "cancelled" ? "warn" : "info",
+    isRead: false
   }
 }
 
@@ -300,7 +346,8 @@ const createDriverNotification = (
     body: `${driver.driverCode} • ${driver.todaName} • Status ${driver.status}`,
     ts,
     priority,
-    tone: reason === "suspended" ? "danger" : "warn"
+    tone: reason === "suspended" ? "danger" : "warn",
+    isRead: false
   }
 }
 
@@ -337,28 +384,57 @@ const RefreshIcon = () => (
 const createPointSignature = (point: Pick<DriverLocationEvent, "ts" | "lng" | "lat">) =>
   `${point.ts}|${point.lng.toFixed(5)}|${point.lat.toFixed(5)}`
 
-const createLiveAlertListItem = (alert: ViolationEvent): AlertListItem => ({
-  key: `live-${alert.driverId}-${alert.ts}`,
-  driverId: alert.driverId,
-  ts: alert.ts,
-  reason: formatAlertReason(alert.reason),
-  description: `Geofence deviation at ${alert.lat.toFixed(5)}, ${alert.lng.toFixed(5)}`,
-  lat: alert.lat,
-  lng: alert.lng,
-  status: "open"
+const createStoredAlertListItem = (alert: DashboardViolationRecord): AlertListItem => ({
+  key: `stored-${alert.alertSource}-${alert.violationId}`,
+  source: "violation",
+  driverId: String(alert.driverId ?? "N/A"),
+  driverName: alert.driverName ?? alert.driverCode,
+  todaName: alert.todaName,
+  barangayName: alert.barangayName,
+  plateNo: alert.plateNo,
+  routeName: alert.routeName,
+  ts: new Date(alert.detectedAt).getTime(),
+  reason: alert.violationTypeLabel,
+  description: alert.locationLabel
+    ? [alert.locationLabel, alert.description].filter(Boolean).join(" | ")
+    : alert.description,
+  status: alert.status,
+  lat: alert.latitude,
+  lng: alert.longitude
 })
 
-const createStoredAlertListItem = (alert: DashboardViolationRecord): AlertListItem => ({
-  key: `stored-${alert.violationId}`,
-  driverId: String(alert.driverId ?? "N/A"),
+const createStoredEmergencyAlertListItem = (
+  alert: DashboardEmergencyRecord
+): AlertListItem => ({
+  key: `emergency-${alert.emergencyId}`,
+  source: "emergency",
+  emergencyId: alert.emergencyId,
+  driverId: String(alert.driverId),
   driverName: alert.driverName,
   todaName: alert.todaName,
   barangayName: alert.barangayName,
-  ts: new Date(alert.detectedAt).getTime(),
-  reason: alert.violationTypeLabel,
-  description: alert.description,
-  status: alert.status
+  plateNo: alert.plateNo,
+  routeName: alert.routeName,
+  ts: new Date(alert.updatedAt).getTime(),
+  reason: "Passenger Emergency",
+  description: [
+    "Passenger triggered the emergency action from the QR web form.",
+    alert.locationLabel,
+    alert.routeName
+  ]
+    .filter(Boolean)
+    .join(" | "),
+  status: alert.status,
+  lat: alert.latitude,
+  lng: alert.longitude
 })
+
+void NOTIFICATION_TRIP_WINDOW_MS
+void NOTIFICATION_DRIVER_WINDOW_MS
+void NOTIFICATION_LIMIT
+void createViolationNotification
+void createTripNotification
+void createDriverNotification
 
 export default function AdminShell({
   onLogout,
@@ -381,11 +457,6 @@ export default function AdminShell({
   >("connecting")
   const [lastUpdateTs, setLastUpdateTs] = useState<number | null>(null)
   const [online, setOnline] = useState<boolean>(navigator.onLine)
-  const [outboxCount, setOutboxCount] = useState<number>(0)
-  const [outboxStatus, setOutboxStatus] = useState<
-    "idle" | "syncing" | "error" | "offline"
-  >("idle")
-  const [alerts, setAlerts] = useState<ViolationEvent[]>([])
   const [driversById, setDriversById] = useState<Record<string, DriverStreamState>>(
     {}
   )
@@ -396,7 +467,6 @@ export default function AdminShell({
   const [liveMapCanvasHeight, setLiveMapCanvasHeight] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState<string>("")
   const [notificationsOpen, setNotificationsOpen] = useState(false)
-  const [lastNotificationReadTs, setLastNotificationReadTs] = useState<number>(0)
   const [isRefreshingNotifications, setIsRefreshingNotifications] = useState(false)
   const [notificationCategoryFilter, setNotificationCategoryFilter] =
     useState<NotificationCategoryFilter>("all")
@@ -405,7 +475,12 @@ export default function AdminShell({
   const [notificationDateFrom, setNotificationDateFrom] = useState("")
   const [notificationDateTo, setNotificationDateTo] = useState("")
   const [profileModalOpen, setProfileModalOpen] = useState(false)
-  const [selectedDriver, setSelectedDriver] = useState<DriverDirectoryRow | null>(null)
+  const [selectedDriverId, setSelectedDriverId] = useState<number | null>(null)
+  const [livePresenceHydrated, setLivePresenceHydrated] = useState(false)
+  const [activeEmergencyModal, setActiveEmergencyModal] =
+    useState<DashboardEmergencyRecord | null>(null)
+  const [emergencyQueue, setEmergencyQueue] = useState<DashboardEmergencyRecord[]>([])
+  const [emergencyActionBusyId, setEmergencyActionBusyId] = useState<number | null>(null)
   const visibleDriverIdentifiersRef = useRef<Set<string>>(new Set())
   const dashboardDriversRef = useRef<DashboardDriverRecord[]>([])
   const refreshLiveLocationsRef = useRef<(() => void) | null>(null)
@@ -441,9 +516,8 @@ export default function AdminShell({
 
   useEffect(() => {
     let active = true
-    let timer: number | undefined
 
-    const load = async () => {
+    void (async () => {
       try {
         const snapshot = await fetchDashboardData(accessToken)
         if (!active) return
@@ -453,16 +527,10 @@ export default function AdminShell({
         if (!active) return
         setDashboardError(String(error))
       }
-    }
-
-    void load()
-    timer = window.setInterval(() => {
-      void load()
-    }, 15000)
+    })()
 
     return () => {
       active = false
-      if (timer) window.clearInterval(timer)
     }
   }, [accessToken])
 
@@ -504,17 +572,17 @@ export default function AdminShell({
   }, [notificationsOpen])
 
   useEffect(() => {
-    if (!selectedDriver) return
+    if (selectedDriverId === null) return
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setSelectedDriver(null)
+        setSelectedDriverId(null)
       }
     }
 
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [selectedDriver])
+  }, [selectedDriverId])
 
   useEffect(() => {
     if (!profileModalOpen) return
@@ -532,17 +600,17 @@ export default function AdminShell({
   useEffect(() => {
     if (!mapEl.current) return
 
+    setLivePresenceHydrated(false)
     const geofence = JSON.parse(geofenceRaw) as MapGeoJSON
-    const VIOLATION_SYNC_ENDPOINT =
-      import.meta.env.VITE_VIOLATIONS_ENDPOINT || "/api/violations/batch"
 
     const map = new maplibregl.Map({
       container: mapEl.current,
       style: MAP_STYLE_URL,
       center: OBRERO_CENTER,
       zoom: DEFAULT_CITY_ZOOM,
-      minZoom: 10,
-      maxZoom: 19
+      minZoom: WORLD_MIN_ZOOM,
+      maxZoom: 19,
+      renderWorldCopies: true
     })
     mapRef.current = map
     map.addControl(
@@ -560,42 +628,24 @@ export default function AdminShell({
     let liveLocationChannel:
       | ReturnType<typeof supabase.channel>
       | null = null
+    let dashboardEventChannel:
+      | ReturnType<typeof supabase.channel>
+      | null = null
     let active = true
     let onlineHandler: (() => void) | null = null
-    let outboxTimer: number | undefined
-    let outboxOnlineHandler: (() => void) | null = null
+    let dashboardRefreshTimer: number | undefined
     let stalePresenceTimer: number | undefined
 
     const markers = new Map<string, maplibregl.Marker>()
-    const violationDedup = new Map<string, number>()
 
-    const refreshOutboxCount = async () => {
-      try {
-        const count = await getOutboxCount()
-        if (active) setOutboxCount(count)
-      } catch (error) {
-        console.warn("Outbox count failed:", error)
+    const scheduleDashboardRefresh = () => {
+      if (dashboardRefreshTimer) {
+        window.clearTimeout(dashboardRefreshTimer)
       }
-    }
-
-    const runOutboxSync = async () => {
-      if (!active) return
-      if (!navigator.onLine) {
-        setOutboxStatus("offline")
-        await refreshOutboxCount()
-        return
-      }
-
-      setOutboxStatus("syncing")
-      const result = await syncOutbox(VIOLATION_SYNC_ENDPOINT)
-      await refreshOutboxCount()
-
-      if (!active) return
-      if (result.failed > 0) {
-        setOutboxStatus("error")
-      } else {
-        setOutboxStatus("idle")
-      }
+      dashboardRefreshTimer = window.setTimeout(() => {
+        dashboardRefreshTimer = undefined
+        void refreshDashboardData()
+      }, 250)
     }
 
     const getDriverRecord = (driverIdentifier: string) => {
@@ -628,6 +678,62 @@ export default function AdminShell({
     const getDriverAvatarUrl = (driverIdentifier: string) => {
       const avatarUrl = getDriverRecord(driverIdentifier)?.avatarUrl?.trim()
       return avatarUrl ? avatarUrl : null
+    }
+
+    const createDriverPopupContent = (driverIdentifier: string) => {
+      const wrapper = document.createElement("div")
+      wrapper.style.display = "grid"
+      wrapper.style.gridTemplateColumns = "40px 1fr"
+      wrapper.style.gap = "10px"
+      wrapper.style.alignItems = "center"
+      wrapper.style.minWidth = "190px"
+
+      const avatarFrame = document.createElement("div")
+      avatarFrame.style.width = "40px"
+      avatarFrame.style.height = "40px"
+      avatarFrame.style.borderRadius = "999px"
+      avatarFrame.style.overflow = "hidden"
+      avatarFrame.style.display = "grid"
+      avatarFrame.style.placeItems = "center"
+      avatarFrame.style.background = "#0f172a"
+      avatarFrame.style.color = "#f8fafc"
+      avatarFrame.style.fontSize = "13px"
+      avatarFrame.style.fontWeight = "700"
+
+      const avatarUrl = getDriverAvatarUrl(driverIdentifier)
+      if (avatarUrl) {
+        const imageEl = document.createElement("img")
+        imageEl.src = avatarUrl
+        imageEl.alt = getDriverLabel(driverIdentifier)
+        imageEl.style.width = "100%"
+        imageEl.style.height = "100%"
+        imageEl.style.objectFit = "cover"
+        imageEl.onerror = () => {
+          avatarFrame.replaceChildren()
+          avatarFrame.textContent = getDriverInitials(driverIdentifier)
+        }
+        avatarFrame.appendChild(imageEl)
+      } else {
+        avatarFrame.textContent = getDriverInitials(driverIdentifier)
+      }
+
+      const content = document.createElement("div")
+      content.style.display = "grid"
+      content.style.gap = "3px"
+
+      const nameEl = document.createElement("strong")
+      nameEl.textContent = getDriverLabel(driverIdentifier)
+
+      const codeEl = document.createElement("div")
+      codeEl.textContent = driverIdentifier
+      codeEl.style.fontSize = "12px"
+      codeEl.style.color = "#475569"
+
+      content.appendChild(nameEl)
+      content.appendChild(codeEl)
+      wrapper.appendChild(avatarFrame)
+      wrapper.appendChild(content)
+      return wrapper
     }
 
     const renderMarkerFrameContent = (
@@ -753,18 +859,6 @@ export default function AdminShell({
       }
     }
 
-    const isFreshLivePoint = (timestamp: number) => Date.now() - timestamp <= DRIVER_OFFLINE_MS
-
-    const pruneStaleDriverPresence = () => {
-      const staleIdentifiers = Object.entries(driversByIdRef.current)
-        .filter(([, liveState]) => !isFreshLivePoint(liveState.lastSeenTs))
-        .map(([driverIdentifier]) => driverIdentifier)
-
-      if (staleIdentifiers.length > 0) {
-        removeDriverLivePresence(staleIdentifiers)
-      }
-    }
-
     const upsertDriverState = (event: DriverLocationEvent, isViolation: boolean) => {
       setDriversById((previous) => {
         const existing = previous[event.driverId]
@@ -815,12 +909,12 @@ export default function AdminShell({
         )
       }
 
-      geofenceBoundsRef.current = DAVAO_CITY_BOUNDS
-      map.setMaxBounds(DAVAO_CITY_BOUNDS)
-      map.easeTo({
-        center: OBRERO_CENTER,
-        zoom: DEFAULT_CITY_ZOOM,
-        duration: 0
+      const geofenceBounds = getGeofenceBounds(geofencePolygon)
+      geofenceBoundsRef.current = geofenceBounds
+      map.fitBounds(geofenceBounds, {
+        padding: GEOFENCE_FIT_PADDING,
+        duration: 0,
+        maxZoom: GEOFENCE_FOCUS_MAX_ZOOM
       })
 
       map.addSource("area-geofence", {
@@ -922,89 +1016,29 @@ export default function AdminShell({
           markerEl.title = getDriverLabel(event.driverId)
           renderMarkerFrameContent(markerEl, event.driverId)
           applyMarkerTone(markerEl, inside)
+          existing.getPopup()?.setDOMContent(createDriverPopupContent(event.driverId))
           return
         }
-        const driverLabel = getDriverLabel(event.driverId)
         const markerEl = createMarkerElement(event.driverId, inside)
         const marker = new maplibregl.Marker({ element: markerEl })
           .setLngLat([event.lng, event.lat])
           .setPopup(
-            new maplibregl.Popup({ offset: 12 }).setHTML(
-              `<strong>${driverLabel}</strong><br />${event.driverId}`
+            new maplibregl.Popup({ offset: 12 }).setDOMContent(
+              createDriverPopupContent(event.driverId)
             )
           )
           .addTo(map)
         markers.set(event.driverId, marker)
       }
 
-      const enqueueViolationEvent = async (event: DriverLocationEvent) => {
-        const dedupKey = `${event.driverId}:OUTSIDE_ROUTE_CORRIDOR:${ROUTE_ID}`
-        const lastTs = violationDedup.get(dedupKey) ?? 0
-        if (event.ts - lastTs < VIOLATION_DEDUP_MS) return
-
-        violationDedup.set(dedupKey, event.ts)
-        const violationEvent: ViolationEvent = {
-          type: "violation",
-          driverId: event.driverId,
-          ts: event.ts,
-          lng: event.lng,
-          lat: event.lat,
-          reason: "OUTSIDE_ROUTE_CORRIDOR",
-          routeId: ROUTE_ID,
-          speed: event.speed,
-          heading: event.heading,
-          accuracy: event.accuracy
-        }
-
-        setAlerts((previous) => [violationEvent, ...previous].slice(0, MAX_ALERTS))
-
-        await enqueueViolation({
-          driverId: violationEvent.driverId,
-          ts: violationEvent.ts,
-          lng: violationEvent.lng,
-          lat: violationEvent.lat,
-          routeId: violationEvent.routeId,
-          reason: violationEvent.reason,
-          speed: violationEvent.speed,
-          heading: violationEvent.heading,
-          accuracy: violationEvent.accuracy
-        })
-        await refreshOutboxCount()
-      }
-
-      const handleLocationEvent = async (
-        event: DriverLocationEvent,
-        options: HandleLocationOptions = {}
-      ) => {
+      const handleLocationEvent = (event: DriverLocationEvent) => {
         if (!isDriverVisibleToAdmin(event.driverId)) return
-        const shouldQueueViolation = options.queueViolation ?? true
-        const shouldCachePoint = options.cachePoint ?? true
         const inside = turf.booleanPointInPolygon(
           turf.point([event.lng, event.lat]),
           geofencePolygon as any
         )
-        const isViolation = !inside
-
         updateMarker(event, inside)
-        upsertDriverState(event, isViolation)
-
-        if (isViolation && shouldQueueViolation) {
-          await enqueueViolationEvent(event)
-        }
-
-        if (shouldCachePoint) {
-          await savePoint({
-            driverId: event.driverId,
-            ts: event.ts,
-            lng: event.lng,
-            lat: event.lat,
-            speed: event.speed,
-            heading: event.heading,
-            accuracy: event.accuracy,
-            tripId: event.tripId,
-            violation: isViolation
-          })
-        }
+        upsertDriverState(event, !inside)
       }
 
       const toLocationEventFromRow = (
@@ -1020,23 +1054,24 @@ export default function AdminShell({
         accuracy: row.accuracy ?? undefined
       })
 
+      const isLiveLocationRowOnline = (row: LiveDriverLocationRow) => {
+        const lastSeenTs = new Date(row.recorded_at ?? row.updated_at).getTime()
+        return row.is_online && isFreshPresence(lastSeenTs, Date.now())
+      }
+
       const applyLocationRow = async (row: LiveDriverLocationRow) => {
         const identifiers = [row.driver_code.trim().toUpperCase(), String(row.driver_id)]
-        if (!row.is_online) {
+        if (!isLiveLocationRowOnline(row)) {
           removeDriverLivePresence(identifiers)
           return
         }
 
         const locationEvent = toLocationEventFromRow(row)
-        if (!isFreshLivePoint(locationEvent.ts)) {
-          removeDriverLivePresence(identifiers)
-          return
-        }
         if (!isDriverVisibleToAdmin(locationEvent.driverId)) {
           removeDriverLivePresence(identifiers)
           return
         }
-        await handleLocationEvent(locationEvent, { queueViolation: true, cachePoint: false })
+        handleLocationEvent(locationEvent)
         if (active) setLastUpdateTs(locationEvent.ts)
       }
 
@@ -1055,6 +1090,7 @@ export default function AdminShell({
             "driver_id,driver_code,latitude,longitude,speed,heading,accuracy,is_online,recorded_at,updated_at"
           )
           .eq("is_online", true)
+          .gte("updated_at", new Date(Date.now() - DRIVER_PRESENCE_STALE_MS).toISOString())
 
         if (error) {
           console.warn("Live driver location hydration failed:", error.message)
@@ -1062,11 +1098,24 @@ export default function AdminShell({
           return
         }
 
+        const onlineIdentifiers = new Set<string>()
         for (const row of (data ?? []) as LiveDriverLocationRow[]) {
+          onlineIdentifiers.add(row.driver_code.trim().toUpperCase())
+          onlineIdentifiers.add(String(row.driver_id))
           await applyLocationRow(row)
         }
 
-        if (active) setSyncStatus("connected")
+        const staleIdentifiers = Object.keys(driversByIdRef.current).filter(
+          (driverIdentifier) => !onlineIdentifiers.has(driverIdentifier)
+        )
+        if (staleIdentifiers.length > 0) {
+          removeDriverLivePresence(staleIdentifiers)
+        }
+
+        if (active) {
+          setLivePresenceHydrated(true)
+          setSyncStatus("connected")
+        }
       }
 
       refreshLiveLocationsRef.current = () => {
@@ -1078,6 +1127,10 @@ export default function AdminShell({
         if (liveLocationChannel) {
           void supabase.removeChannel(liveLocationChannel)
           liveLocationChannel = null
+        }
+        if (dashboardEventChannel) {
+          void supabase.removeChannel(dashboardEventChannel)
+          dashboardEventChannel = null
         }
 
         setSyncStatus("connecting")
@@ -1092,8 +1145,21 @@ export default function AdminShell({
             },
             (payload) => {
               if (!active) return
-              const row = (payload.new || payload.old) as LiveDriverLocationRow | undefined
+              const previousRow = payload.old as LiveDriverLocationRow | undefined
+              const nextRow = payload.new as LiveDriverLocationRow | undefined
+              const row = (nextRow || previousRow) as LiveDriverLocationRow | undefined
               if (!row) return
+              if (payload.eventType === "DELETE") {
+                removeDriverLivePresence([
+                  row.driver_code.trim().toUpperCase(),
+                  String(row.driver_id)
+                ])
+                scheduleDashboardRefresh()
+                return
+              }
+              if ((nextRow?.is_online ?? null) !== (previousRow?.is_online ?? null)) {
+                scheduleDashboardRefresh()
+              }
               void applyLocationRow(row)
             }
           )
@@ -1107,6 +1173,58 @@ export default function AdminShell({
               setSyncStatus("disconnected")
             }
           })
+
+        dashboardEventChannel = supabase
+          .channel(`dashboard-events-${adminProfile.adminId}`)
+          .on(
+            "postgres_changes",
+            {
+              event: "*",
+              schema: "public",
+              table: "trips"
+            },
+            () => {
+              if (!active) return
+              scheduleDashboardRefresh()
+            }
+          )
+          .on(
+            "postgres_changes",
+            {
+              event: "*",
+              schema: "public",
+              table: "mobile_violations"
+            },
+            () => {
+              if (!active) return
+              scheduleDashboardRefresh()
+            }
+          )
+          .on(
+            "postgres_changes",
+            {
+              event: "*",
+              schema: "public",
+              table: "violations"
+            },
+            () => {
+              if (!active) return
+              scheduleDashboardRefresh()
+            }
+          )
+          .on(
+            "postgres_changes",
+            {
+              event: "*",
+              schema: "public",
+              table: "drivers"
+            },
+            () => {
+              if (!active) return
+              scheduleDashboardRefresh()
+            }
+          )
+          .subscribe()
       }
 
       const handleOnlineState = () => {
@@ -1117,7 +1235,6 @@ export default function AdminShell({
           connectRealtime()
         } else {
           setSyncStatus("disconnected")
-          setOutboxStatus("offline")
         }
       }
 
@@ -1126,20 +1243,17 @@ export default function AdminShell({
       window.addEventListener("offline", handleOnlineState)
       void loadLiveDriverLocations()
       connectRealtime()
-    })
+      stalePresenceTimer = window.setInterval(() => {
+        const nowTs = Date.now()
+        const staleIdentifiers = Object.entries(driversByIdRef.current)
+          .filter(([, driverState]) => !isFreshPresence(driverState.lastSeenTs, nowTs))
+          .map(([driverIdentifier]) => driverIdentifier)
 
-    void refreshOutboxCount()
-    void runOutboxSync()
-    outboxTimer = window.setInterval(() => {
-      void runOutboxSync()
-    }, OUTBOX_SYNC_MS)
-      outboxOnlineHandler = () => {
-        if (!navigator.onLine) setOutboxStatus("offline")
-        void runOutboxSync()
-      }
-      window.addEventListener("online", outboxOnlineHandler)
-      window.addEventListener("offline", outboxOnlineHandler)
-      stalePresenceTimer = window.setInterval(pruneStaleDriverPresence, 3000)
+        if (staleIdentifiers.length > 0) {
+          removeDriverLivePresence(staleIdentifiers)
+        }
+      }, 15000)
+    })
 
       return () => {
         active = false
@@ -1149,15 +1263,18 @@ export default function AdminShell({
       if (liveLocationChannel) {
         void supabase.removeChannel(liveLocationChannel)
       }
+      if (dashboardEventChannel) {
+        void supabase.removeChannel(dashboardEventChannel)
+      }
+      if (dashboardRefreshTimer) {
+        window.clearTimeout(dashboardRefreshTimer)
+      }
+      if (stalePresenceTimer) {
+        window.clearInterval(stalePresenceTimer)
+      }
       if (onlineHandler) {
         window.removeEventListener("online", onlineHandler)
         window.removeEventListener("offline", onlineHandler)
-      }
-      if (outboxTimer) window.clearInterval(outboxTimer)
-      if (stalePresenceTimer) window.clearInterval(stalePresenceTimer)
-      if (outboxOnlineHandler) {
-        window.removeEventListener("online", outboxOnlineHandler)
-        window.removeEventListener("offline", outboxOnlineHandler)
       }
       for (const marker of markers.values()) {
         marker.remove()
@@ -1203,48 +1320,22 @@ export default function AdminShell({
     }
   }, [activePage])
 
-  const liveDriverRows = useMemo(() => {
-    return Object.values(driversById).sort((a, b) => b.lastSeenTs - a.lastSeenTs)
-  }, [driversById])
+  const operationalDriversById = useMemo(() => {
+    return new Map(
+      (dashboardData?.operationalDrivers ?? []).map((driver) => [driver.driverId, driver])
+    )
+  }, [dashboardData?.operationalDrivers])
 
   const driverDirectoryRows = useMemo<DriverDirectoryRow[]>(() => {
     const directory = new Map<string, DriverDirectoryRow>()
-    const knownDriverIdentifiers = new Set<string>()
 
     for (const driver of dashboardData?.drivers ?? []) {
       const numericDriverId = String(driver.driverId)
-      knownDriverIdentifiers.add(numericDriverId)
-      knownDriverIdentifiers.add(driver.driverCode)
       directory.set(numericDriverId, {
         ...driver,
-        liveState: driversById[driver.driverCode] ?? driversById[numericDriverId]
+        liveState: driversById[driver.driverCode] ?? driversById[numericDriverId],
+        operationalState: operationalDriversById.get(driver.driverId)
       })
-    }
-
-    for (const liveDriver of liveDriverRows) {
-      if (!knownDriverIdentifiers.has(liveDriver.driverId)) {
-        directory.set(liveDriver.driverId, {
-          driverId: Number(liveDriver.driverId) || 0,
-          driverCode:
-            Number(liveDriver.driverId) > 0
-              ? formatDriverCode(Number(liveDriver.driverId))
-              : liveDriver.driverId,
-          todaId: 0,
-          todaName: "Unassigned TODA",
-          barangayId: 0,
-          barangayName: "Unassigned Barangay",
-          tricycleId: undefined,
-          tricycleNo: undefined,
-          qrId: undefined,
-          passwordSet: false,
-          firstName: "Live",
-          lastName: `Driver ${liveDriver.driverId}`,
-          contactNo: undefined,
-          status: "active",
-          createdAt: new Date(liveDriver.lastSeenTs).toISOString(),
-          liveState: liveDriver
-        })
-      }
     }
 
     return [...directory.values()].sort((a, b) => {
@@ -1253,31 +1344,45 @@ export default function AdminShell({
       if (aLastSeen !== bLastSeen) return bLastSeen - aLastSeen
       return `${a.lastName} ${a.firstName}`.localeCompare(`${b.lastName} ${b.firstName}`)
     })
-  }, [dashboardData?.drivers, driversById, liveDriverRows])
+  }, [dashboardData?.drivers, driversById, operationalDriversById])
 
   const activeDriverRows = useMemo(() => {
     return driverDirectoryRows.filter((driver) => {
-      if (driver.status !== "active") return false
-      const lastSeenTs = driver.liveState?.lastSeenTs ?? 0
-      return lastSeenTs > 0 && clockTs - lastSeenTs <= DRIVER_OFFLINE_MS
+      return isDriverOnlineNow(driver, clockTs, livePresenceHydrated)
     })
-  }, [driverDirectoryRows, clockTs])
+  }, [driverDirectoryRows, clockTs, livePresenceHydrated])
 
-  const activeDriverCount = useMemo(() => {
-    return activeDriverRows.length
+  const selectedDriver = useMemo(() => {
+    if (selectedDriverId === null) return null
+    return driverDirectoryRows.find((driver) => driver.driverId === selectedDriverId) ?? null
+  }, [driverDirectoryRows, selectedDriverId])
+
+  const activeDriverCount = activeDriverRows.length
+
+  const activeTricycleCount = useMemo(() => {
+    const activeTricycleKeys = new Set<string>()
+
+    for (const driver of activeDriverRows) {
+      if (driver.tricycleId) {
+        activeTricycleKeys.add(`id:${driver.tricycleId}`)
+        continue
+      }
+
+      const normalizedTricycleNo = driver.tricycleNo?.trim().toUpperCase()
+      if (normalizedTricycleNo) {
+        activeTricycleKeys.add(`plate:${normalizedTricycleNo}`)
+        continue
+      }
+
+      activeTricycleKeys.add(`driver:${driver.driverId}`)
+    }
+
+    return activeTricycleKeys.size
   }, [activeDriverRows])
 
   const totalTripsToday = useMemo(() => {
-    const today = new Date()
-    return (dashboardData?.recentTrips ?? []).reduce((total, trip) => {
-      const dt = new Date(trip.tripStart)
-      return total + (dt.getFullYear() === today.getFullYear() &&
-        dt.getMonth() === today.getMonth() &&
-        dt.getDate() === today.getDate()
-        ? 1
-        : 0)
-    }, 0)
-  }, [dashboardData?.recentTrips])
+    return dashboardData?.counts.tripsToday ?? 0
+  }, [dashboardData?.counts.tripsToday])
 
   const filteredAllDriverRows = useMemo(() => {
     if (!hasSearchQuery) return driverDirectoryRows
@@ -1318,21 +1423,12 @@ export default function AdminShell({
   }, [activeDriverRows, hasSearchQuery, normalizedSearchQuery])
 
   const alertRows = useMemo<AlertListItem[]>(() => {
-    const combined = [
-      ...(dashboardData?.recentViolations ?? []).map(createStoredAlertListItem),
-      ...alerts.map(createLiveAlertListItem)
+    return [
+      ...(dashboardData?.recentEmergencies ?? []).map(createStoredEmergencyAlertListItem),
+      ...(dashboardData?.recentViolations ?? []).map(createStoredAlertListItem)
     ]
-
-    const deduped = new Map<string, AlertListItem>()
-    for (const alert of combined) {
-      const key = `${alert.driverId}|${alert.reason}|${alert.ts}`
-      if (!deduped.has(key)) {
-        deduped.set(key, alert)
-      }
-    }
-
-    return [...deduped.values()].sort((a, b) => b.ts - a.ts)
-  }, [dashboardData?.recentViolations, alerts])
+      .sort((a, b) => b.ts - a.ts)
+  }, [dashboardData?.recentEmergencies, dashboardData?.recentViolations])
 
   const filteredAlerts = useMemo(() => {
     if (!hasSearchQuery) return alertRows
@@ -1346,66 +1442,145 @@ export default function AdminShell({
         (alert.driverName?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
         alert.reason.toLowerCase().includes(normalizedSearchQuery) ||
         (alert.description?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
+        (alert.plateNo?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
+        (alert.routeName?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
         point.toLowerCase().includes(normalizedSearchQuery)
       )
     })
   }, [alertRows, hasSearchQuery, normalizedSearchQuery])
 
   const homeAlertSummary = useMemo(() => {
-    const prioritized = [...filteredAlerts].sort((a, b) => {
-      const priorityGap = getAlertPriority(b) - getAlertPriority(a)
-      if (priorityGap !== 0) return priorityGap
-      return b.ts - a.ts
-    })
-    const urgent = prioritized.filter((alert) => clockTs - alert.ts <= ALERT_URGENT_WINDOW_MS)
-    const source = urgent.length > 0 ? urgent : prioritized
-    return source.slice(0, HOME_ALERT_SUMMARY_LIMIT)
-  }, [filteredAlerts, clockTs])
+    return [...filteredAlerts]
+      .sort((a, b) => b.ts - a.ts || String(b.key).localeCompare(String(a.key)))
+      .slice(0, HOME_ALERT_SUMMARY_LIMIT)
+  }, [filteredAlerts])
 
   const tripRows = useMemo(() => {
-    return (dashboardData?.recentTrips ?? []).filter(
-      (trip) => trip.tripStatus === "completed" && Boolean(trip.tripEnd)
-    )
+    return dashboardData?.recentTrips ?? []
   }, [dashboardData?.recentTrips])
 
   const notificationItems = useMemo<NotificationItem[]>(() => {
-    const violationItems = alertRows
-      .filter((alert) => alert.status !== "resolved" && alert.status !== "dismissed")
-      .slice(0, 6)
-      .map(createViolationNotification)
-
-    const tripItems = tripRows
-      .filter((trip) => {
-        const ts = new Date(trip.tripEnd ?? trip.tripStart).getTime()
-        return clockTs - ts <= NOTIFICATION_TRIP_WINDOW_MS
-      })
-      .slice(0, 5)
-      .map(createTripNotification)
-
-    const driverItems = (dashboardData?.drivers ?? [])
-      .flatMap((driver) => {
-        const createdTs = new Date(driver.createdAt).getTime()
-        if (driver.status === "suspended") {
-          return [createDriverNotification(driver, "suspended")]
-        }
-        if (driver.status === "inactive") {
-          return [createDriverNotification(driver, "inactive")]
-        }
-        if (!driver.passwordSet) {
-          return [createDriverNotification(driver, "password_pending")]
-        }
-        if (clockTs - createdTs <= NOTIFICATION_DRIVER_WINDOW_MS) {
-          return [createDriverNotification(driver, "new_driver")]
-        }
-        return []
-      })
+    return (dashboardData?.notifications ?? [])
+      .map((item): NotificationItem => ({
+        key: item.notificationKey,
+        kind: item.kind,
+        page: item.page,
+        title: item.title,
+        body: item.body,
+        ts: new Date(item.timestamp).getTime(),
+        priority: item.priority,
+        tone: item.tone,
+        isRead: item.isRead
+      }))
       .sort(sortNotificationsByRecency)
-      .slice(0, 5)
+  }, [dashboardData?.notifications])
 
-    return [...violationItems, ...tripItems, ...driverItems]
-      .sort(sortNotificationsByRecency)
-      .slice(0, NOTIFICATION_LIMIT)
-  }, [alertRows, tripRows, dashboardData?.drivers, clockTs])
+  useEffect(() => {
+    const pending = (dashboardData?.recentEmergencies ?? []).filter(
+      (item) => item.status === "created" || item.status === "pending_admin"
+    )
+
+    if (pending.length === 0) {
+      if (activeEmergencyModal && activeEmergencyModal.status !== "responding") {
+        setActiveEmergencyModal(null)
+      }
+      setEmergencyQueue([])
+      return
+    }
+
+    const sorted = [...pending].sort(
+      (a, b) =>
+        new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime() ||
+        b.emergencyId - a.emergencyId
+    )
+
+    setEmergencyQueue((current) => {
+      const next = [...current]
+      for (const item of sorted) {
+        if (
+          !next.some((queued) => queued.emergencyId === item.emergencyId) &&
+          activeEmergencyModal?.emergencyId !== item.emergencyId
+        ) {
+          next.push(item)
+        }
+      }
+      return next
+    })
+
+    if (
+      !activeEmergencyModal ||
+      !sorted.some((item) => item.emergencyId === activeEmergencyModal.emergencyId)
+    ) {
+      setActiveEmergencyModal(sorted[0])
+    }
+  }, [dashboardData?.recentEmergencies, activeEmergencyModal])
+
+  useEffect(() => {
+    const closeStream = connectAdminEmergencyStream(accessToken, {
+      onSnapshot: (items) => {
+        const pending = items
+          .filter((item) => item.status === "created" || item.status === "pending_admin")
+          .sort(
+            (a, b) =>
+              new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime() ||
+              b.emergencyId - a.emergencyId
+          )
+
+        setActiveEmergencyModal((current) => current ?? pending[0] ?? null)
+      },
+      onEmergency: (alert) => {
+        if (alert.status === "created" || alert.status === "pending_admin") {
+          setEmergencyQueue((current) => {
+            const withoutCurrent = current.filter((item) => item.emergencyId !== alert.emergencyId)
+            return [...withoutCurrent, alert].sort(
+              (a, b) =>
+                new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime() ||
+                b.emergencyId - a.emergencyId
+            )
+          })
+          setActiveEmergencyModal((current) => current ?? alert)
+        } else {
+          setEmergencyQueue((current) =>
+            current.filter((item) => item.emergencyId !== alert.emergencyId)
+          )
+          setActiveEmergencyModal((current) =>
+            current?.emergencyId === alert.emergencyId ? null : current
+          )
+        }
+
+        void fetchDashboardData(accessToken)
+          .then((snapshot) => {
+            setDashboardData(snapshot)
+            setDashboardError(null)
+          })
+          .catch((error) => {
+            setDashboardError(String(error))
+          })
+      }
+    })
+
+    return () => {
+      closeStream()
+    }
+  }, [accessToken])
+
+  const handleEmergencyResponse = async (alert: DashboardEmergencyRecord) => {
+    setEmergencyActionBusyId(alert.emergencyId)
+    try {
+      await updateEmergencyAlertStatus(accessToken, alert.emergencyId, "responding")
+      await refreshDashboardData()
+      setActiveEmergencyModal((current) =>
+        current?.emergencyId === alert.emergencyId ? null : current
+      )
+      setEmergencyQueue((current) =>
+        current.filter((item) => item.emergencyId !== alert.emergencyId)
+      )
+    } catch (error) {
+      setDashboardError(String(error))
+    } finally {
+      setEmergencyActionBusyId(null)
+    }
+  }
 
   const filteredNotificationItems = useMemo(() => {
     const recencyCutoff = getNotificationRecencyCutoff(notificationRecencyFilter, clockTs)
@@ -1443,14 +1618,47 @@ export default function AdminShell({
     notificationDateTo.length > 0
 
   const unreadNotificationCount = useMemo(() => {
-    return notificationItems.filter((item) => item.ts > lastNotificationReadTs).length
-  }, [notificationItems, lastNotificationReadTs])
+    return notificationItems.filter((item) => !item.isRead).length
+  }, [notificationItems])
 
   useEffect(() => {
     if (!notificationsOpen) return
-    const latestTs = notificationItems[0]?.ts ?? Date.now()
-    setLastNotificationReadTs((current) => Math.max(current, latestTs))
-  }, [notificationsOpen, notificationItems])
+
+    const unreadKeys = notificationItems
+      .filter((item) => !item.isRead)
+      .map((item) => item.key)
+
+    if (unreadKeys.length === 0) return
+
+    const unreadKeySet = new Set(unreadKeys)
+    let cancelled = false
+
+    void markDashboardNotificationsRead(accessToken, unreadKeys)
+      .then(() => {
+        if (cancelled) return
+        setDashboardData((current) =>
+          current
+            ? {
+                ...current,
+                notifications: current.notifications.map((item) =>
+                  unreadKeySet.has(item.notificationKey)
+                    ? { ...item, isRead: true }
+                    : item
+                ),
+                counts: {
+                  ...current.counts,
+                  unreadNotifications: 0
+                }
+              }
+            : current
+        )
+      })
+      .catch(() => {})
+
+    return () => {
+      cancelled = true
+    }
+  }, [accessToken, notificationItems, notificationsOpen])
 
   const filteredTripRows = useMemo(() => {
     if (!hasSearchQuery) return tripRows
@@ -1468,11 +1676,15 @@ export default function AdminShell({
   }, [tripRows, hasSearchQuery, trimmedSearchQuery, normalizedSearchQuery])
 
   const homeTripLogSummary = useMemo(() => {
-    if (filteredTripRows.length > 0) {
-      return filteredTripRows.slice(0, HOME_TRIP_LOG_SUMMARY_LIMIT)
-    }
-    return filteredAllDriverRows.slice(0, HOME_TRIP_LOG_SUMMARY_LIMIT)
-  }, [filteredAllDriverRows, filteredTripRows])
+    return filteredTripRows
+      .filter((trip) => trip.tripStatus === "completed")
+      .sort((a, b) => {
+        const aTs = new Date(a.tripEnd ?? a.tripStart).getTime()
+        const bTs = new Date(b.tripEnd ?? b.tripStart).getTime()
+        return bTs - aTs || b.tripId - a.tripId
+      })
+      .slice(0, HOME_TRIP_LOG_SUMMARY_LIMIT)
+  }, [filteredTripRows])
 
   const selectedDriverTripRows = useMemo(() => {
     if (!selectedDriver) return []
@@ -1527,11 +1739,11 @@ export default function AdminShell({
         : adminProfile.role.replace("_", " ")
 
   const openDriverModal = (driver: DriverDirectoryRow) => {
-    setSelectedDriver(driver)
+    setSelectedDriverId(driver.driverId)
   }
 
   const closeDriverModal = () => {
-    setSelectedDriver(null)
+    setSelectedDriverId(null)
   }
 
   return (
@@ -1655,6 +1867,7 @@ export default function AdminShell({
                       >
                         <option value="all">All categories</option>
                         <option value="violation">Alerts</option>
+                        <option value="emergency">Emergencies</option>
                         <option value="trip">Trips</option>
                         <option value="driver">Drivers</option>
                       </select>
@@ -1800,17 +2013,14 @@ export default function AdminShell({
             <section className="page-stack">
               <div className="overview-grid">
                 <article className="overview-card">
-                  <div className="overview-card__label">Active Tricycles</div>
-                  <div className="overview-card__value">
-                    {activeDriverCount}
-                    <span>/{dashboardData?.counts.tricycles ?? 0}</span>
-                  </div>
+                  <div className="overview-card__label">Active Drivers</div>
+                  <div className="overview-card__value">{activeDriverCount}</div>
                 </article>
 
                 <article className="overview-card">
                   <div className="overview-card__label">Active Alerts</div>
                   <div className="overview-card__value overview-card__value--danger">
-                    {alertRows.length.toString().padStart(2, "0")}
+                    {(dashboardData?.counts.openAlerts ?? alertRows.length).toString().padStart(2, "0")}
                   </div>
                 </article>
 
@@ -1820,8 +2030,8 @@ export default function AdminShell({
                 </article>
 
                 <article className="overview-card">
-                  <div className="overview-card__label">Registered Drivers</div>
-                  <div className="overview-card__value">{dashboardData?.counts.drivers ?? 0}</div>
+                  <div className="overview-card__label">Ongoing Trips</div>
+                  <div className="overview-card__value">{dashboardData?.counts.ongoingTrips ?? 0}</div>
                 </article>
               </div>
 
@@ -1845,7 +2055,7 @@ export default function AdminShell({
                       <div className="muted">
                         {hasSearchQuery
                           ? `No alerts match "${trimmedSearchQuery}".`
-                          : "No geofence boundary alerts yet."}
+                          : "No alerts or emergencies yet."}
                       </div>
                     ) : (
                       homeAlertSummary.map((alert) => (
@@ -1888,42 +2098,18 @@ export default function AdminShell({
                       <div className="muted">
                         {hasSearchQuery
                           ? `No trip logs match "${trimmedSearchQuery}".`
-                          : "Trip stream will appear once messages arrive."}
+                          : "No trip records are available yet."}
                       </div>
                     ) : (
                       homeTripLogSummary.map((item) => {
-                        if ("tripId" in item) {
-                          return (
-                            <div key={`trip-${item.tripId}`} className="trip-driver">
-                              <div className="trip-driver__top">
-                                <strong>{item.driverName}</strong>
-                                <span>{item.tripStatus.toUpperCase()}</span>
-                              </div>
-                              <div className="trip-driver__meta">
-                                Trip #{item.tripId} | {item.plateNo} | {item.routeName}
-                              </div>
-                            </div>
-                          )
-                        }
-
-                        const isDriverOnline =
-                          online &&
-                          ((item.liveState?.lastSeenTs ?? 0) > 0) &&
-                          clockTs - (item.liveState?.lastSeenTs ?? 0) <= DRIVER_OFFLINE_MS
                         return (
-                          <div key={`driver-${item.driverId}`} className="trip-driver">
+                          <div key={`trip-${item.tripId}`} className="trip-driver">
                             <div className="trip-driver__top">
-                              <strong>{item.firstName} {item.lastName}</strong>
-                              <span
-                                className={
-                                  isDriverOnline ? "status-badge online" : "status-badge offline"
-                                }
-                              >
-                                {isDriverOnline ? "Online" : "Offline"}
-                              </span>
+                              <strong>{item.driverName}</strong>
+                              <span>{item.tripStatus.toUpperCase()}</span>
                             </div>
                             <div className="trip-driver__meta">
-                              {item.driverCode} | {item.todaName} | Status {item.status}
+                              Trip #{item.tripId} | {item.plateNo} | {item.routeName}
                             </div>
                           </div>
                         )
@@ -1964,10 +2150,14 @@ export default function AdminShell({
                     <div>{online ? "Online" : "Offline"}</div>
                     <div>Realtime</div>
                     <div>{syncStatus}</div>
-                    <div>Outbox</div>
-                    <div>
-                      {outboxCount} pending ({outboxStatus})
-                    </div>
+                    <div>Active Drivers</div>
+                    <div>{activeDriverCount}</div>
+                    <div>Active Tricycles</div>
+                    <div>{activeTricycleCount}</div>
+                    <div>Ongoing trips</div>
+                    <div>{dashboardData?.counts.ongoingTrips ?? 0}</div>
+                    <div>Open alerts</div>
+                    <div>{dashboardData?.counts.openAlerts ?? alertRows.length}</div>
                     <div>Last data update</div>
                     <div>{lastUpdateTs ? new Date(lastUpdateTs).toLocaleTimeString() : "-"}</div>
                   </div>
@@ -1984,10 +2174,11 @@ export default function AdminShell({
                       </div>
                     ) : (
                       filteredActiveDriverRows.slice(0, 8).map((driver) => {
-                        const isDriverOnline =
-                          online &&
-                          ((driver.liveState?.lastSeenTs ?? 0) > 0) &&
-                          clockTs - (driver.liveState?.lastSeenTs ?? 0) <= DRIVER_OFFLINE_MS
+                        const presence = getDriverPresenceMeta(
+                          driver,
+                          clockTs,
+                          livePresenceHydrated
+                        )
                         return (
                           <div
                             className="driver-row driver-row--interactive"
@@ -2002,17 +2193,27 @@ export default function AdminShell({
                               }
                             }}
                           >
-                            <div className="driver-row__top">
-                              <strong>{driver.firstName} {driver.lastName}</strong>
-                              <span
-                                className={
-                                  isDriverOnline
-                                    ? "status-badge online"
-                                    : "status-badge offline"
-                                }
-                              >
-                                {isDriverOnline ? "Online" : "Offline"}
-                              </span>
+                            <div className="driver-row__top driver-row__top--profile">
+                              <div className="driver-row__identity">
+                                {driver.avatarUrl ? (
+                                  <img
+                                    className="driver-row__avatar"
+                                    src={driver.avatarUrl}
+                                    alt={`${driver.firstName} ${driver.lastName}`}
+                                  />
+                                ) : (
+                                  <div
+                                    className="driver-row__avatar driver-row__avatar--fallback"
+                                    aria-hidden="true"
+                                  >
+                                    {`${driver.firstName.charAt(0)}${driver.lastName.charAt(0)}`
+                                      .toUpperCase()
+                                      .slice(0, 2)}
+                                  </div>
+                                )}
+                                <strong>{driver.firstName} {driver.lastName}</strong>
+                              </div>
+                              <span className={presence.className}>{presence.label}</span>
                             </div>
                             <div className="driver-row__meta">
                               {driver.driverCode} | {driver.todaName}
@@ -2026,7 +2227,9 @@ export default function AdminShell({
                             <div className="driver-row__meta">
                               {driver.liveState
                                 ? `Point ${formatPoint(driver.liveState.latestPoint)}`
-                                : "Waiting for live GPS point"}
+                                : driver.operationalState?.activeRouteName
+                                  ? `Route ${driver.operationalState.activeRouteName}`
+                                  : "Waiting for live GPS point"}
                             </div>
                           </div>
                         )
@@ -2064,10 +2267,11 @@ export default function AdminShell({
                     </div>
                   ) : (
                     filteredAllDriverRows.map((driver) => {
-                      const isDriverOnline =
-                        online &&
-                        ((driver.liveState?.lastSeenTs ?? 0) > 0) &&
-                        clockTs - (driver.liveState?.lastSeenTs ?? 0) <= DRIVER_OFFLINE_MS
+                      const presence = getDriverPresenceMeta(
+                        driver,
+                        clockTs,
+                        livePresenceHydrated
+                      )
                       return (
                         <div
                           className="driver-row driver-row--interactive"
@@ -2084,13 +2288,7 @@ export default function AdminShell({
                         >
                           <div className="driver-row__top">
                             <strong>{driver.firstName} {driver.lastName}</strong>
-                            <span
-                              className={
-                                isDriverOnline ? "status-badge online" : "status-badge offline"
-                              }
-                            >
-                              {isDriverOnline ? "Online" : "Offline"}
-                            </span>
+                            <span className={presence.className}>{presence.label}</span>
                           </div>
                           <div className="driver-row__meta">
                             {driver.driverCode} | {driver.barangayName} | {driver.todaName}
@@ -2104,13 +2302,17 @@ export default function AdminShell({
                           </div>
                           <div className="driver-row__meta">
                             {driver.liveState
-                              ? `Last seen ${formatLastSeen(driver.liveState.lastSeenTs, clockTs)}`
-                              : "No live point yet"}
+                              ? `Live update ${formatLastSeen(driver.liveState.lastSeenTs, clockTs)}`
+                              : driver.operationalState?.lastUpdateAt
+                                ? `Last update ${formatDateTime(driver.operationalState.lastUpdateAt)}`
+                                : "No live point yet"}
                           </div>
                           <div className="driver-row__meta">
                             {driver.liveState
                               ? `Point ${formatPoint(driver.liveState.latestPoint)}`
-                              : `Status ${driver.status}`}
+                              : driver.operationalState?.activeRouteName
+                                ? `Route ${driver.operationalState.activeRouteName}`
+                                : `Status ${driver.status}`}
                           </div>
                         </div>
                       )
@@ -2152,7 +2354,13 @@ export default function AdminShell({
                   <section className="driver-modal__summary">
                     <div className="driver-modal__card">
                       <span className="driver-modal__label">Status</span>
-                      <strong>{selectedDriver.status}</strong>
+                      <strong>
+                        {getDriverPresenceMeta(
+                          selectedDriver,
+                          clockTs,
+                          livePresenceHydrated
+                        ).label}
+                      </strong>
                     </div>
                     <div className="driver-modal__card">
                       <span className="driver-modal__label">Assigned Tricycle</span>
@@ -2174,7 +2382,7 @@ export default function AdminShell({
                       <strong>{selectedDriver.qrId ? `#${selectedDriver.qrId}` : "Not assigned"}</strong>
                     </div>
                     <div className="driver-modal__card">
-                      <span className="driver-modal__label">Last Seen</span>
+                      <span className="driver-modal__label">Last Update</span>
                       <strong>
                         {selectedDriver.liveState
                           ? formatLastSeen(selectedDriver.liveState.lastSeenTs, clockTs)
@@ -2186,7 +2394,9 @@ export default function AdminShell({
                       <strong>
                         {selectedDriver.liveState
                           ? formatPoint(selectedDriver.liveState.latestPoint)
-                          : "Waiting for live GPS point"}
+                          : selectedDriver.operationalState?.activeRouteName
+                            ? `Route ${selectedDriver.operationalState.activeRouteName}`
+                            : "Waiting for live GPS point"}
                       </strong>
                     </div>
                     <div className="driver-modal__card">
@@ -2234,8 +2444,12 @@ export default function AdminShell({
                                 <strong>{trip.durationMinutes !== undefined ? `${trip.durationMinutes} min` : "-"}</strong>
                               </div>
                               <div>
-                                <span>Fare</span>
-                                <strong>{formatFareAmount(trip.fareAmount)}</strong>
+                                <span>Distance</span>
+                                <strong>{trip.distanceKm !== undefined ? `${trip.distanceKm.toFixed(2)} km` : "-"}</strong>
+                              </div>
+                              <div>
+                                <span>Alerts</span>
+                                <strong>{trip.violationCount}</strong>
                               </div>
                             </div>
                           </article>
@@ -2365,45 +2579,50 @@ export default function AdminShell({
                 <p>
                   {hasSearchQuery
                     ? `${filteredAlerts.length} matches for "${trimmedSearchQuery}"`
-                    : `${alertRows.length} total violations flagged`}
+                    : `${alertRows.length} total alerts and emergencies`}
                 </p>
               </div>
               <div className="alerts-list alerts-list--page">
-                {filteredAlerts.length === 0 ? (
-                  <div className="muted">
-                    {hasSearchQuery
-                      ? `No alerts match "${trimmedSearchQuery}".`
-                      : "No geofence boundary alerts yet."}
-                  </div>
-                ) : (
-                  filteredAlerts.map((alert) => (
-                    <div key={alert.key} className="alert-row">
-                      <div className="alert-row__top">
-                        <strong>{alert.driverName ?? `Driver ${alert.driverId}`}</strong>
-                        <span>{new Date(alert.ts).toLocaleString()}</span>
-                      </div>
-                      <div className="alert-row__meta">{alert.reason}</div>
-                      {alert.description && (
-                        <div className="alert-row__meta">{alert.description}</div>
-                      )}
-                      {alert.lat !== undefined && alert.lng !== undefined && (
-                        <div className="alert-row__meta">
-                          {alert.lat.toFixed(5)}, {alert.lng.toFixed(5)}
-                        </div>
-                      )}
-                      {(alert.todaName || alert.barangayName || alert.status) && (
-                        <div className="alert-row__meta">
-                          {[alert.barangayName, alert.todaName, alert.status]
-                            .filter(Boolean)
-                            .join(" | ")}
-                        </div>
-                      )}
+                  {filteredAlerts.length === 0 ? (
+                    <div className="muted">
+                      {hasSearchQuery
+                        ? `No alerts match "${trimmedSearchQuery}".`
+                        : "No alerts or emergencies yet."}
                     </div>
-                  ))
-                )}
-              </div>
-            </section>
-          )}
+                  ) : (
+                    filteredAlerts.map((alert) => (
+                      <div key={alert.key} className="alert-row">
+                        <div className="alert-row__top">
+                          <strong>{alert.driverName ?? `Driver ${alert.driverId}`}</strong>
+                          <span>{new Date(alert.ts).toLocaleString()}</span>
+                        </div>
+                        <div className="alert-row__meta">{alert.reason}</div>
+                        {alert.description && (
+                          <div className="alert-row__meta">{alert.description}</div>
+                        )}
+                        {(alert.plateNo || alert.routeName) && (
+                          <div className="alert-row__meta">
+                            {[alert.plateNo, alert.routeName].filter(Boolean).join(" | ")}
+                          </div>
+                        )}
+                        {alert.lat !== undefined && alert.lng !== undefined && (
+                          <div className="alert-row__meta">
+                            {alert.lat.toFixed(5)}, {alert.lng.toFixed(5)}
+                        </div>
+                      )}
+                        {(alert.todaName || alert.barangayName || alert.status) && (
+                          <div className="alert-row__meta">
+                            {[alert.barangayName, alert.todaName, alert.status]
+                              .filter(Boolean)
+                              .join(" | ")}
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </section>
+            )}
 
           {activePage === "reports" && (
             <ReportsPage
@@ -2456,6 +2675,14 @@ export default function AdminShell({
                           <span>Duration</span>
                           <span>{trip.durationMinutes !== undefined ? `${trip.durationMinutes} min` : "-"}</span>
                         </div>
+                        <div className="trip-point">
+                          <span>Distance</span>
+                          <span>{trip.distanceKm !== undefined ? `${trip.distanceKm.toFixed(2)} km` : "-"}</span>
+                        </div>
+                        <div className="trip-point">
+                          <span>Alerts</span>
+                          <span>{trip.violationCount}</span>
+                        </div>
                       </div>
                     </div>
                   ))
@@ -2464,6 +2691,72 @@ export default function AdminShell({
             </section>
           )}
         </main>
+        {activeEmergencyModal && (
+          <div className="emergency-modal-backdrop" role="presentation">
+            <section
+              className="emergency-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="admin-emergency-modal-title"
+            >
+              <div className="emergency-modal__badge">Passenger Emergency</div>
+              <h2 id="admin-emergency-modal-title">Immediate attention required</h2>
+              <p className="emergency-modal__message">
+                A passenger triggered the emergency action from the QR reporting page.
+              </p>
+              {emergencyQueue.length > 0 && (
+                <p className="emergency-modal__message">
+                  {emergencyQueue.length} more emergency
+                  {emergencyQueue.length === 1 ? " is" : "ies are"} waiting in the queue.
+                </p>
+              )}
+
+              <div className="emergency-modal__details">
+                <div>
+                  <span>Driver</span>
+                  <strong>{activeEmergencyModal.driverName}</strong>
+                </div>
+                <div>
+                  <span>Plate / Unit</span>
+                  <strong>{activeEmergencyModal.plateNo ?? "No tricycle assigned"}</strong>
+                </div>
+                <div>
+                  <span>Time</span>
+                  <strong>{new Date(activeEmergencyModal.createdAt).toLocaleString()}</strong>
+                </div>
+                <div>
+                  <span>Route</span>
+                  <strong>{activeEmergencyModal.routeName ?? "No route context"}</strong>
+                </div>
+              </div>
+
+              <div className="emergency-modal__meta">
+                {[activeEmergencyModal.barangayName, activeEmergencyModal.todaName, activeEmergencyModal.status]
+                  .filter(Boolean)
+                  .join(" | ")}
+              </div>
+
+              {dashboardError && (
+                <div className="emergency-modal__error" role="alert">
+                  {dashboardError.replace(/^Error:\s*/, "")}
+                </div>
+              )}
+
+              <div className="emergency-modal__actions">
+                <button
+                  type="button"
+                  className="emergency-modal__button"
+                  disabled={emergencyActionBusyId === activeEmergencyModal.emergencyId}
+                  onClick={() => void handleEmergencyResponse(activeEmergencyModal)}
+                >
+                  {emergencyActionBusyId === activeEmergencyModal.emergencyId
+                    ? "Confirming..."
+                    : "Confirm Response"}
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
       </div>
     </div>
   )

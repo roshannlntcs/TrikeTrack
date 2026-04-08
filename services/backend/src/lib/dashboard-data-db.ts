@@ -1,5 +1,9 @@
 import type { AdminProfile } from "./admin-auth-db"
 import { ensureDatabaseReady, hasColumn, query } from "./database"
+import {
+  listEmergencyAlertsForAdmin,
+  type EmergencyAlertRecord
+} from "./emergency-alerts-db"
 
 export type DashboardDriverRecord = {
   driverId: number
@@ -33,22 +37,78 @@ export type DashboardTricycleRecord = {
   createdAt: string
 }
 
+export type DashboardOperationalDriverStatus =
+  | "offline"
+  | "online_idle"
+  | "on_trip"
+  | "inactive"
+  | "suspended"
+
+export type DashboardOperationalDriverRecord = {
+  driverId: number
+  driverCode: string
+  driverName: string
+  todaId: number
+  todaName: string
+  barangayId: number
+  barangayName: string
+  tricycleId?: number
+  plateNo?: string
+  accountStatus: DashboardDriverRecord["status"]
+  operationalStatus: DashboardOperationalDriverStatus
+  isOnline: boolean
+  lastUpdateAt?: string
+  latitude?: number
+  longitude?: number
+  speed?: number
+  heading?: number
+  accuracy?: number
+  activeTripId?: number
+  activeTripStartedAt?: string
+  activeRouteId?: number
+  activeRouteName?: string
+  totalAlertCount: number
+  openAlertCount: number
+}
+
+export type DashboardViolationStatus =
+  | "open"
+  | "under_review"
+  | "resolved"
+  | "dismissed"
+
+export type DashboardViolationSeverity = "high" | "medium" | "low"
+
 export type DashboardViolationRecord = {
-  violationId: number
+  violationId: string
+  alertSource: "system_violation" | "driver_violation"
   driverId?: number
+  driverCode?: string
   driverName?: string
   todaName?: string
   barangayName?: string
+  tricycleId?: number
+  plateNo?: string
+  tripId?: number
+  routeId?: number
+  routeName?: string
   violationTypeCode: string
   violationTypeLabel: string
+  severity: DashboardViolationSeverity
   description?: string
+  locationLabel?: string
+  latitude?: number
+  longitude?: number
   detectedAt: string
-  status: "open" | "under_review" | "resolved" | "dismissed"
+  status: DashboardViolationStatus
 }
+
+export type DashboardEmergencyRecord = EmergencyAlertRecord
 
 export type DashboardTripRecord = {
   tripId: number
   driverId: number
+  driverCode: string
   driverName: string
   todaName: string
   barangayName: string
@@ -61,19 +121,43 @@ export type DashboardTripRecord = {
   tripStatus: "scheduled" | "ongoing" | "completed" | "cancelled"
   durationMinutes?: number
   fareAmount?: number
+  distanceKm?: number
+  violationCount: number
   createdAt: string
+}
+
+export type DashboardNotificationRecord = {
+  notificationKey: string
+  kind: "violation" | "trip" | "driver" | "emergency"
+  page: "alerts" | "trip-logs" | "drivers"
+  title: string
+  body: string
+  timestamp: string
+  priority: number
+  tone: "danger" | "warn" | "info"
+  sourceEntityType: "alert" | "trip" | "driver" | "emergency"
+  sourceEntityId: string
+  isRead: boolean
 }
 
 export type DashboardDataSnapshot = {
   drivers: DashboardDriverRecord[]
   tricycles: DashboardTricycleRecord[]
+  operationalDrivers: DashboardOperationalDriverRecord[]
   recentViolations: DashboardViolationRecord[]
+  recentEmergencies: DashboardEmergencyRecord[]
   recentTrips: DashboardTripRecord[]
+  notifications: DashboardNotificationRecord[]
   counts: {
     drivers: number
     tricycles: number
-    openViolations: number
-    trips: number
+    onlineDrivers: number
+    activeTricycles: number
+    ongoingTrips: number
+    tripsToday: number
+    completedTripsToday: number
+    openAlerts: number
+    unreadNotifications: number
   }
 }
 
@@ -109,23 +193,65 @@ type DashboardTricycleRow = {
   created_at: Date
 }
 
+type DashboardOperationalDriverRow = {
+  driver_id: number
+  driver_code: string
+  first_name: string
+  last_name: string
+  toda_id: number
+  toda_name: string
+  barangay_id: number
+  barangay_name: string
+  tricycle_id: number | null
+  plate_no: string | null
+  status: DashboardDriverRecord["status"]
+  latitude: number | null
+  longitude: number | null
+  speed: number | null
+  heading: number | null
+  accuracy: number | null
+  is_online: boolean | null
+  recorded_at: Date | null
+  updated_at: Date | null
+  active_trip_id: number | null
+  active_trip_start: Date | null
+  active_route_id: number | null
+  active_route_origin: string | null
+  active_route_destination: string | null
+  total_alert_count: number
+  open_alert_count: number
+}
+
 type DashboardViolationRow = {
-  violation_id: number
+  violation_id: string
+  alert_source: DashboardViolationRecord["alertSource"]
   driver_id: number | null
+  driver_code: string | null
   first_name: string | null
   last_name: string | null
   toda_name: string | null
   barangay_name: string | null
-  code: string
-  label: string
+  tricycle_id: number | null
+  plate_no: string | null
+  trip_id: number | null
+  route_id: number | null
+  route_origin: string | null
+  route_destination: string | null
+  violation_type_code: string
+  violation_type_label: string
+  severity: DashboardViolationSeverity
   description: string | null
+  location_label: string | null
+  latitude: number | null
+  longitude: number | null
   detected_at: Date
-  status: DashboardViolationRecord["status"]
+  status: DashboardViolationStatus
 }
 
 type DashboardTripRow = {
   trip_id: number
   driver_id: number
+  driver_code: string
   first_name: string
   last_name: string
   toda_name: string
@@ -140,8 +266,20 @@ type DashboardTripRow = {
   trip_status: DashboardTripRecord["tripStatus"]
   duration_minutes: number | null
   fare_amount: string | null
+  distance_km: number | null
+  violation_count: number | null
   created_at: Date
 }
+
+type DashboardAggregateCountsRow = {
+  completed_trips_today: number
+}
+
+const OPERATIONAL_TIMEZONE = "Asia/Manila"
+const ONLINE_DRIVER_HEARTBEAT_WINDOW = "2 minutes"
+const NOTIFICATION_TRIP_WINDOW_MS = 24 * 60 * 60 * 1000
+const NOTIFICATION_DRIVER_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+const NOTIFICATION_LIMIT = 12
 
 const buildScopeClause = (
   profile: AdminProfile,
@@ -168,6 +306,8 @@ const buildScopeClause = (
 
   return { clause: "WHERE 1 = 0", params: [] as unknown[] }
 }
+
+const toIso = (value?: Date | null) => value?.toISOString()
 
 const mapDriver = (row: DashboardDriverRow): DashboardDriverRecord => ({
   driverId: Number(row.driver_id),
@@ -201,16 +341,76 @@ const mapTricycle = (row: DashboardTricycleRow): DashboardTricycleRecord => ({
   createdAt: row.created_at.toISOString()
 })
 
+const mapOperationalDriver = (
+  row: DashboardOperationalDriverRow
+): DashboardOperationalDriverRecord => {
+  const isOnline = row.is_online === true
+  const operationalStatus: DashboardOperationalDriverStatus =
+    row.status === "suspended"
+      ? "suspended"
+      : row.status === "inactive"
+        ? "inactive"
+        : isOnline && row.active_trip_id !== null
+          ? "on_trip"
+          : isOnline
+            ? "online_idle"
+            : "offline"
+
+  return {
+    driverId: Number(row.driver_id),
+    driverCode: row.driver_code,
+    driverName: `${row.first_name} ${row.last_name}`,
+    todaId: Number(row.toda_id),
+    todaName: row.toda_name,
+    barangayId: Number(row.barangay_id),
+    barangayName: row.barangay_name,
+    tricycleId: row.tricycle_id === null ? undefined : Number(row.tricycle_id),
+    plateNo: row.plate_no ?? undefined,
+    accountStatus: row.status,
+    operationalStatus,
+    isOnline,
+    lastUpdateAt: toIso(row.recorded_at ?? row.updated_at),
+    latitude: row.latitude ?? undefined,
+    longitude: row.longitude ?? undefined,
+    speed: row.speed ?? undefined,
+    heading: row.heading ?? undefined,
+    accuracy: row.accuracy ?? undefined,
+    activeTripId: row.active_trip_id === null ? undefined : Number(row.active_trip_id),
+    activeTripStartedAt: toIso(row.active_trip_start),
+    activeRouteId: row.active_route_id === null ? undefined : Number(row.active_route_id),
+    activeRouteName:
+      row.active_route_origin && row.active_route_destination
+        ? `${row.active_route_origin} -> ${row.active_route_destination}`
+        : undefined,
+    totalAlertCount: Number(row.total_alert_count ?? 0),
+    openAlertCount: Number(row.open_alert_count ?? 0)
+  }
+}
+
 const mapViolation = (row: DashboardViolationRow): DashboardViolationRecord => ({
-  violationId: Number(row.violation_id),
+  violationId: row.violation_id,
+  alertSource: row.alert_source,
   driverId: row.driver_id === null ? undefined : Number(row.driver_id),
+  driverCode: row.driver_code ?? undefined,
   driverName:
     row.first_name && row.last_name ? `${row.first_name} ${row.last_name}` : undefined,
   todaName: row.toda_name ?? undefined,
   barangayName: row.barangay_name ?? undefined,
-  violationTypeCode: row.code,
-  violationTypeLabel: row.label,
+  tricycleId: row.tricycle_id === null ? undefined : Number(row.tricycle_id),
+  plateNo: row.plate_no ?? undefined,
+  tripId: row.trip_id === null ? undefined : Number(row.trip_id),
+  routeId: row.route_id === null ? undefined : Number(row.route_id),
+  routeName:
+    row.route_origin && row.route_destination
+      ? `${row.route_origin} -> ${row.route_destination}`
+      : undefined,
+  violationTypeCode: row.violation_type_code,
+  violationTypeLabel: row.violation_type_label,
+  severity: row.severity,
   description: row.description ?? undefined,
+  locationLabel: row.location_label ?? undefined,
+  latitude: row.latitude ?? undefined,
+  longitude: row.longitude ?? undefined,
   detectedAt: row.detected_at.toISOString(),
   status: row.status
 })
@@ -218,6 +418,7 @@ const mapViolation = (row: DashboardViolationRow): DashboardViolationRecord => (
 const mapTrip = (row: DashboardTripRow): DashboardTripRecord => ({
   tripId: Number(row.trip_id),
   driverId: Number(row.driver_id),
+  driverCode: row.driver_code,
   driverName: `${row.first_name} ${row.last_name}`,
   todaName: row.toda_name,
   barangayName: row.barangay_name,
@@ -230,21 +431,300 @@ const mapTrip = (row: DashboardTripRow): DashboardTripRecord => ({
   tripStatus: row.trip_status,
   durationMinutes: row.duration_minutes ?? undefined,
   fareAmount: row.fare_amount === null ? undefined : Number(row.fare_amount),
+  distanceKm: row.distance_km === null ? undefined : Number(row.distance_km),
+  violationCount: Number(row.violation_count ?? 0),
   createdAt: row.created_at.toISOString()
 })
+
+const getNotificationSortValue = (item: { timestamp: string; priority: number }) =>
+  new Date(item.timestamp).getTime() * 1000 + item.priority
+
+const sortNotifications = (
+  a: DashboardNotificationRecord,
+  b: DashboardNotificationRecord
+) => getNotificationSortValue(b) - getNotificationSortValue(a)
+
+const createNotifications = ({
+  alerts,
+  emergencies,
+  trips,
+  drivers
+}: {
+  alerts: DashboardViolationRecord[]
+  emergencies: DashboardEmergencyRecord[]
+  trips: DashboardTripRecord[]
+  drivers: DashboardDriverRecord[]
+}) => {
+  const nowTs = Date.now()
+
+  const emergencyNotifications = emergencies
+    .filter((emergency) => emergency.status !== "resolved")
+    .slice(0, 8)
+    .map<DashboardNotificationRecord>((emergency) => ({
+      notificationKey: `emergency:${emergency.emergencyId}:${emergency.status}`,
+      kind: "emergency",
+      page: "alerts",
+      title: `Emergency alert for ${emergency.driverName}`,
+      body: [
+        emergency.plateNo,
+        emergency.routeName,
+        emergency.locationLabel,
+        [emergency.barangayName, emergency.todaName, emergency.status].filter(Boolean).join(" | ")
+      ]
+        .filter(Boolean)
+        .join(" | "),
+      timestamp: emergency.updatedAt,
+      priority:
+        emergency.status === "pending_admin" || emergency.status === "created"
+          ? 140
+          : emergency.status === "responding"
+            ? 120
+            : emergency.status === "acknowledged"
+              ? 110
+              : 80,
+      tone: "danger",
+      sourceEntityType: "emergency",
+      sourceEntityId: String(emergency.emergencyId),
+      isRead: false
+    }))
+
+  const violationNotifications = alerts
+    .filter((alert) => alert.status !== "resolved" && alert.status !== "dismissed")
+    .slice(0, 6)
+    .map<DashboardNotificationRecord>((alert) => {
+      const driverLabel =
+        alert.driverName ??
+        (alert.driverCode ? `Driver ${alert.driverCode}` : "Unassigned driver")
+      const details = [
+        alert.violationTypeLabel,
+        alert.locationLabel,
+        alert.description,
+        alert.routeName,
+        [alert.barangayName, alert.todaName, alert.status].filter(Boolean).join(" | ")
+      ].filter(Boolean)
+
+      return {
+        notificationKey: `alert:${alert.alertSource}:${alert.violationId}`,
+        kind: "violation",
+        page: "alerts",
+        title: `${driverLabel} alert`,
+        body: details.join(" | "),
+        timestamp: alert.detectedAt,
+        priority:
+          (alert.severity === "high" ? 95 : alert.severity === "medium" ? 70 : 50) +
+          (alert.status === "open" ? 20 : 0),
+        tone: alert.severity === "high" ? "danger" : "warn",
+        sourceEntityType: "alert",
+        sourceEntityId: alert.violationId,
+        isRead: false
+      }
+    })
+
+  const tripNotifications = trips
+    .filter((trip) => {
+      const ts = new Date(trip.tripEnd ?? trip.tripStart).getTime()
+      return nowTs - ts <= NOTIFICATION_TRIP_WINDOW_MS
+    })
+    .slice(0, 6)
+    .map<DashboardNotificationRecord>((trip) => {
+      const title =
+        trip.tripStatus === "ongoing"
+          ? `Trip in progress for ${trip.driverName}`
+          : trip.tripStatus === "cancelled"
+            ? `Trip cancelled for ${trip.driverName}`
+            : trip.tripStatus === "completed"
+              ? `Trip completed for ${trip.driverName}`
+              : `Trip scheduled for ${trip.driverName}`
+
+      return {
+        notificationKey: `trip:${trip.tripId}:${trip.tripStatus}`,
+        kind: "trip",
+        page: "trip-logs",
+        title,
+        body: [
+          trip.driverCode,
+          trip.plateNo,
+          trip.routeName,
+          trip.violationCount > 0 ? `${trip.violationCount} alert(s)` : undefined
+        ]
+          .filter(Boolean)
+          .join(" | "),
+        timestamp: trip.tripEnd ?? trip.tripStart,
+        priority:
+          trip.tripStatus === "ongoing"
+            ? 82
+            : trip.tripStatus === "cancelled"
+              ? 72
+              : trip.tripStatus === "completed"
+                ? 60
+                : 45,
+        tone: trip.tripStatus === "cancelled" ? "warn" : "info",
+        sourceEntityType: "trip",
+        sourceEntityId: String(trip.tripId),
+        isRead: false
+      }
+    })
+
+  const driverNotifications = drivers
+    .flatMap<DashboardNotificationRecord>((driver) => {
+      const createdTs = new Date(driver.createdAt).getTime()
+      const body = `${driver.driverCode} | ${driver.todaName} | Status ${driver.status}`
+
+      if (driver.status === "suspended") {
+        return [
+          {
+            notificationKey: `driver:${driver.driverId}:suspended`,
+            kind: "driver",
+            page: "drivers",
+            title: `Driver suspended: ${driver.firstName} ${driver.lastName}`,
+            body,
+            timestamp: driver.createdAt,
+            priority: 72,
+            tone: "danger",
+            sourceEntityType: "driver",
+            sourceEntityId: String(driver.driverId),
+            isRead: false
+          }
+        ]
+      }
+
+      if (driver.status === "inactive") {
+        return [
+          {
+            notificationKey: `driver:${driver.driverId}:inactive`,
+            kind: "driver",
+            page: "drivers",
+            title: `Driver inactive: ${driver.firstName} ${driver.lastName}`,
+            body,
+            timestamp: driver.createdAt,
+            priority: 58,
+            tone: "warn",
+            sourceEntityType: "driver",
+            sourceEntityId: String(driver.driverId),
+            isRead: false
+          }
+        ]
+      }
+
+      if (!driver.passwordSet) {
+        return [
+          {
+            notificationKey: `driver:${driver.driverId}:password_pending`,
+            kind: "driver",
+            page: "drivers",
+            title: `Driver setup pending: ${driver.firstName} ${driver.lastName}`,
+            body,
+            timestamp: driver.createdAt,
+            priority: 48,
+            tone: "warn",
+            sourceEntityType: "driver",
+            sourceEntityId: String(driver.driverId),
+            isRead: false
+          }
+        ]
+      }
+
+      if (nowTs - createdTs <= NOTIFICATION_DRIVER_WINDOW_MS) {
+        return [
+          {
+            notificationKey: `driver:${driver.driverId}:new_driver`,
+            kind: "driver",
+            page: "drivers",
+            title: `New driver added: ${driver.firstName} ${driver.lastName}`,
+            body,
+            timestamp: driver.createdAt,
+            priority: 38,
+            tone: "info",
+            sourceEntityType: "driver",
+            sourceEntityId: String(driver.driverId),
+            isRead: false
+          }
+        ]
+      }
+
+      return []
+    })
+    .sort(sortNotifications)
+    .slice(0, 5)
+
+  return [
+    ...emergencyNotifications,
+    ...violationNotifications,
+    ...tripNotifications,
+    ...driverNotifications
+  ]
+    .sort(sortNotifications)
+    .slice(0, NOTIFICATION_LIMIT)
+}
+
+const loadReadNotificationKeys = async (adminId: number, notificationKeys: string[]) => {
+  if (notificationKeys.length === 0) {
+    return new Set<string>()
+  }
+
+  const result = await query<{ notification_key: string }>(
+    `
+      SELECT notification_key
+      FROM public.admin_notification_reads
+      WHERE admin_id = $1
+        AND notification_key = ANY($2::text[])
+    `,
+    [adminId, notificationKeys]
+  )
+
+  return new Set(result.rows.map((row) => row.notification_key))
+}
+
+export const markDashboardNotificationsRead = async (
+  adminId: number,
+  notificationKeys: string[]
+) => {
+  await ensureDatabaseReady()
+
+  const uniqueKeys = [...new Set(notificationKeys.map((key) => key.trim()).filter(Boolean))]
+  if (uniqueKeys.length === 0) {
+    return
+  }
+
+  await query(
+    `
+      INSERT INTO public.admin_notification_reads (
+        admin_id,
+        notification_key,
+        read_at
+      )
+      SELECT
+        $1::bigint,
+        notification_key,
+        NOW()
+      FROM UNNEST($2::text[]) AS notification_key
+      ON CONFLICT (admin_id, notification_key) DO UPDATE
+      SET read_at = EXCLUDED.read_at
+    `,
+    [adminId, uniqueKeys]
+  )
+}
 
 export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
   await ensureDatabaseReady()
 
   const driverScope = buildScopeClause(profile, "d.toda_id", "b.barangay_id")
   const tricycleScope = buildScopeClause(profile, "tr.toda_id", "b.barangay_id")
-  const violationScope = buildScopeClause(profile, "t.toda_id", "b.barangay_id")
-  const tripScope = buildScopeClause(profile, "r.toda_id", "b.barangay_id")
+  const tripScope = buildScopeClause(profile, "td.toda_id", "b.barangay_id")
+  const alertScope = buildScopeClause(profile, "td.toda_id", "b.barangay_id")
   const driverAvatarSelect = (await hasColumn("public", "drivers", "avatar_url"))
     ? "d.avatar_url"
     : "NULL::text AS avatar_url"
 
-  const [driversResult, tricyclesResult, violationsResult, tripsResult] = await Promise.all([
+  const [
+    driversResult,
+    tricyclesResult,
+    operationalDriversResult,
+    violationsResult,
+    emergencyAlerts,
+    tripsResult,
+    aggregateCountsResult
+  ] = await Promise.all([
     query<DashboardDriverRow>(
       `
         SELECT
@@ -299,40 +779,210 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
       `,
       tricycleScope.params
     ),
-    query<DashboardViolationRow>(
+    query<DashboardOperationalDriverRow>(
       `
+        WITH active_trips AS (
+          SELECT DISTINCT ON (tp.driver_id)
+            tp.driver_id,
+            tp.trip_id,
+            tp.trip_start,
+            tp.route_id,
+            r.origin,
+            r.destination
+          FROM public.trips tp
+          JOIN public.routes r
+            ON r.route_id = tp.route_id
+          WHERE tp.trip_status = 'ongoing'
+            AND tp.trip_end IS NULL
+          ORDER BY tp.driver_id, tp.trip_start DESC, tp.trip_id DESC
+        ),
+        alert_counts AS (
+          SELECT
+            driver_id,
+            COUNT(*)::int AS total_alert_count,
+            COUNT(*) FILTER (
+              WHERE status NOT IN ('resolved', 'dismissed')
+            )::int AS open_alert_count
+          FROM (
+            SELECT
+              v.driver_id,
+              LOWER(v.status::text) AS status
+            FROM public.violations v
+            WHERE v.driver_id IS NOT NULL
+
+            UNION ALL
+
+            SELECT
+              mv.driver_id,
+              LOWER(mv.status::text) AS status
+            FROM public.mobile_violations mv
+          ) alert_source
+          GROUP BY driver_id
+        )
         SELECT
-          v.violation_id,
           d.driver_id,
+          d.driver_code,
           d.first_name,
           d.last_name,
+          d.toda_id,
           t.toda_name,
+          b.barangay_id,
           b.barangay_name,
-          vt.code,
-          vt.label,
-          v.description,
-          v.detected_at,
-          v.status
-        FROM public.violations v
-        JOIN public.violation_types vt
-          ON vt.violation_type_id = v.violation_type_id
-        LEFT JOIN public.drivers d
-          ON d.driver_id = v.driver_id
-        LEFT JOIN public.todas t
+          d.tricycle_id,
+          tr.plate_no,
+          d.status,
+          dl.latitude,
+          dl.longitude,
+          dl.speed,
+          dl.heading,
+          dl.accuracy,
+          CASE
+            WHEN d.status = 'active'
+              AND dl.is_online = TRUE
+              AND COALESCE(dl.updated_at, dl.recorded_at) >= NOW() - INTERVAL '${ONLINE_DRIVER_HEARTBEAT_WINDOW}'
+            THEN TRUE
+            ELSE FALSE
+          END AS is_online,
+          dl.recorded_at,
+          dl.updated_at,
+          at.trip_id AS active_trip_id,
+          at.trip_start AS active_trip_start,
+          at.route_id AS active_route_id,
+          at.origin AS active_route_origin,
+          at.destination AS active_route_destination,
+          COALESCE(ac.total_alert_count, 0) AS total_alert_count,
+          COALESCE(ac.open_alert_count, 0) AS open_alert_count
+        FROM public.drivers d
+        JOIN public.todas t
           ON t.toda_id = d.toda_id
-        LEFT JOIN public.barangays b
+        JOIN public.barangays b
           ON b.barangay_id = t.barangay_id
-        ${violationScope.clause}
-        ORDER BY v.detected_at DESC, v.violation_id DESC
-        LIMIT 50
+        LEFT JOIN public.tricycles tr
+          ON tr.tricycle_id = d.tricycle_id
+        LEFT JOIN public.driver_locations dl
+          ON dl.driver_id = d.driver_id
+        LEFT JOIN active_trips at
+          ON at.driver_id = d.driver_id
+        LEFT JOIN alert_counts ac
+          ON ac.driver_id = d.driver_id
+        ${driverScope.clause}
+        ORDER BY
+          CASE
+            WHEN d.status = 'active'
+              AND dl.is_online = TRUE
+              AND COALESCE(dl.updated_at, dl.recorded_at) >= NOW() - INTERVAL '${ONLINE_DRIVER_HEARTBEAT_WINDOW}'
+            THEN TRUE
+            ELSE FALSE
+          END DESC,
+          COALESCE(dl.recorded_at, dl.updated_at) DESC NULLS LAST,
+          d.last_name ASC,
+          d.first_name ASC
       `,
-      violationScope.params
+      driverScope.params
     ),
+    query<DashboardViolationRow>(
+      `
+        SELECT *
+        FROM (
+          SELECT
+            CONCAT('system-', v.violation_id)::text AS violation_id,
+            'system_violation'::text AS alert_source,
+            d.driver_id,
+            d.driver_code,
+            d.first_name,
+            d.last_name,
+            td.toda_name,
+            b.barangay_name,
+            COALESCE(v.tricycle_id, d.tricycle_id) AS tricycle_id,
+            tr.plate_no,
+            tp.trip_id,
+            r.route_id,
+            r.origin AS route_origin,
+            r.destination AS route_destination,
+            vt.code AS violation_type_code,
+            vt.label AS violation_type_label,
+            CASE
+              WHEN vt.code = 'geofence_deviation' THEN 'high'
+              ELSE 'medium'
+            END::text AS severity,
+            v.description,
+            NULL::text AS location_label,
+            NULL::double precision AS latitude,
+            NULL::double precision AS longitude,
+            v.detected_at,
+            LOWER(v.status::text)::text AS status
+          FROM public.violations v
+          JOIN public.violation_types vt
+            ON vt.violation_type_id = v.violation_type_id
+          LEFT JOIN public.drivers d
+            ON d.driver_id = v.driver_id
+          LEFT JOIN public.tricycles tr
+            ON tr.tricycle_id = COALESCE(v.tricycle_id, d.tricycle_id)
+          LEFT JOIN public.trips tp
+            ON tp.trip_id = v.trip_id
+          LEFT JOIN public.routes r
+            ON r.route_id = tp.route_id
+          LEFT JOIN public.todas td
+            ON td.toda_id = COALESCE(d.toda_id, r.toda_id)
+          LEFT JOIN public.barangays b
+            ON b.barangay_id = td.barangay_id
+          ${alertScope.clause}
+
+          UNION ALL
+
+          SELECT
+            CONCAT('driver-', mv.id)::text AS violation_id,
+            'driver_violation'::text AS alert_source,
+            d.driver_id,
+            d.driver_code,
+            d.first_name,
+            d.last_name,
+            td.toda_name,
+            b.barangay_name,
+            d.tricycle_id,
+            tr.plate_no,
+            tp.trip_id,
+            r.route_id,
+            r.origin AS route_origin,
+            r.destination AS route_destination,
+            LOWER(mv.type::text) AS violation_type_code,
+            INITCAP(REPLACE(LOWER(mv.type::text), '_', ' ')) AS violation_type_label,
+            LOWER(mv.priority::text)::text AS severity,
+            COALESCE(mv.title, mv.details) AS description,
+            mv.location_label,
+            mv.latitude,
+            mv.longitude,
+            mv.occurred_at AS detected_at,
+            LOWER(mv.status::text)::text AS status
+          FROM public.mobile_violations mv
+          JOIN public.drivers d
+            ON d.driver_id = mv.driver_id
+          LEFT JOIN public.tricycles tr
+            ON tr.tricycle_id = d.tricycle_id
+          LEFT JOIN public.trips tp
+            ON tp.trip_id = mv.trip_id
+          LEFT JOIN public.routes r
+            ON r.route_id = tp.route_id
+          JOIN public.todas td
+            ON td.toda_id = d.toda_id
+          JOIN public.barangays b
+            ON b.barangay_id = td.barangay_id
+          ${alertScope.clause}
+        ) scoped_alerts
+        ORDER BY detected_at DESC, violation_id DESC
+        LIMIT 100
+      `,
+      alertScope.params
+    ),
+    listEmergencyAlertsForAdmin(profile, {
+      limit: 50
+    }),
     query<DashboardTripRow>(
       `
         SELECT
           tp.trip_id,
           d.driver_id,
+          d.driver_code,
           d.first_name,
           d.last_name,
           td.toda_name,
@@ -344,9 +994,11 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
           r.destination,
           tp.trip_start,
           tp.trip_end,
-          tp.trip_status,
+          tp.trip_status::text AS trip_status,
           tp.duration_minutes,
           tp.fare_amount,
+          dist.distance_km,
+          COALESCE(violations.violation_count, 0) AS violation_count,
           tp.created_at
         FROM public.trips tp
         JOIN public.drivers d
@@ -359,11 +1011,79 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
           ON td.toda_id = r.toda_id
         JOIN public.barangays b
           ON b.barangay_id = td.barangay_id
-        ${tripScope.clause ? `${tripScope.clause}
-        AND` : "WHERE"} tp.trip_status = 'completed'
-        AND tp.trip_end IS NOT NULL
-        ORDER BY tp.trip_end DESC, tp.trip_id DESC
-        LIMIT 50
+        LEFT JOIN LATERAL (
+          SELECT
+            CASE
+              WHEN COUNT(*) = 0 THEN NULL
+              ELSE COALESCE(SUM(
+                CASE
+                  WHEN path.prev_lat IS NULL OR path.prev_lng IS NULL THEN 0
+                  ELSE 6371 * ACOS(
+                    GREATEST(
+                      -1,
+                      LEAST(
+                        1,
+                        COS(RADIANS(path.prev_lat))
+                          * COS(RADIANS(path.lat))
+                          * COS(RADIANS(path.lng) - RADIANS(path.prev_lng))
+                          + SIN(RADIANS(path.prev_lat)) * SIN(RADIANS(path.lat))
+                      )
+                    )
+                  )
+                END
+              ), 0)
+            END AS distance_km
+          FROM (
+            SELECT
+              trp.latitude AS lat,
+              trp.longitude AS lng,
+              LAG(trp.latitude) OVER (ORDER BY trp.idx ASC) AS prev_lat,
+              LAG(trp.longitude) OVER (ORDER BY trp.idx ASC) AS prev_lng
+            FROM public.trip_route_points trp
+            WHERE trp.trip_id = tp.trip_id
+          ) path
+        ) dist ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*)::int AS violation_count
+          FROM (
+            SELECT 1
+            FROM public.violations v
+            WHERE v.trip_id = tp.trip_id
+
+            UNION ALL
+
+            SELECT 1
+            FROM public.mobile_violations mv
+            WHERE mv.trip_id = tp.trip_id
+          ) trip_alerts
+        ) violations ON TRUE
+        ${tripScope.clause}
+        ORDER BY COALESCE(tp.trip_end, tp.trip_start) DESC, tp.trip_id DESC
+        LIMIT 100
+      `,
+      tripScope.params
+    ),
+    query<DashboardAggregateCountsRow>(
+      `
+        SELECT
+          COUNT(*)::int AS completed_trips_today
+        FROM public.trips tp
+        JOIN public.routes r
+          ON r.route_id = tp.route_id
+        JOIN public.todas td
+          ON td.toda_id = r.toda_id
+        JOIN public.barangays b
+          ON b.barangay_id = td.barangay_id
+        ${
+          tripScope.clause
+            ? `${tripScope.clause}
+        AND`
+            : "WHERE"
+        }
+          tp.trip_status = 'completed'
+          AND tp.trip_end IS NOT NULL
+          AND (tp.trip_end AT TIME ZONE '${OPERATIONAL_TIMEZONE}')::date =
+            (NOW() AT TIME ZONE '${OPERATIONAL_TIMEZONE}')::date
       `,
       tripScope.params
     )
@@ -371,19 +1091,66 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
 
   const drivers = driversResult.rows.map(mapDriver)
   const tricycles = tricyclesResult.rows.map(mapTricycle)
+  const operationalDrivers = operationalDriversResult.rows.map(mapOperationalDriver)
   const recentViolations = violationsResult.rows.map(mapViolation)
+  const recentEmergencies = emergencyAlerts
   const recentTrips = tripsResult.rows.map(mapTrip)
+  const completedTripsToday = Number(
+    aggregateCountsResult.rows[0]?.completed_trips_today ?? 0
+  )
+
+  const notifications = createNotifications({
+    alerts: recentViolations,
+    emergencies: recentEmergencies,
+    trips: recentTrips,
+    drivers
+  })
+
+  const readKeys = await loadReadNotificationKeys(
+    profile.adminId,
+    notifications.map((item) => item.notificationKey)
+  )
+
+  const notificationsWithReadState = notifications.map((item) => ({
+    ...item,
+    isRead: readKeys.has(item.notificationKey)
+  }))
+
+  const onlineDrivers = operationalDrivers.filter((driver) => driver.isOnline)
+  const activeTricycles = new Set(
+    onlineDrivers.map((driver) =>
+      driver.tricycleId !== undefined ? `tricycle-${driver.tricycleId}` : `driver-${driver.driverId}`
+    )
+  ).size
+  const ongoingTrips = new Set(
+    operationalDrivers
+      .filter((driver) => driver.operationalStatus === "on_trip")
+      .map((driver) => driver.activeTripId)
+      .filter((tripId): tripId is number => typeof tripId === "number")
+  ).size
+  const openAlerts = operationalDrivers.reduce(
+    (total, driver) => total + driver.openAlertCount,
+    0
+  ) + recentEmergencies.filter((item) => item.status !== "resolved").length
 
   return {
     drivers,
     tricycles,
+    operationalDrivers,
     recentViolations,
+    recentEmergencies,
     recentTrips,
+    notifications: notificationsWithReadState,
     counts: {
       drivers: drivers.length,
       tricycles: tricycles.length,
-      openViolations: recentViolations.filter((item) => item.status === "open").length,
-      trips: recentTrips.length
+      onlineDrivers: onlineDrivers.length,
+      activeTricycles,
+      ongoingTrips,
+      tripsToday: completedTripsToday,
+      completedTripsToday,
+      openAlerts,
+      unreadNotifications: notificationsWithReadState.filter((item) => !item.isRead).length
     }
   } satisfies DashboardDataSnapshot
 }

@@ -1,7 +1,10 @@
+import { randomBytes } from "node:crypto"
+import type { PoolClient } from "pg"
 import type { AdminProfile } from "./admin-auth-db"
-import { ensureDatabaseReady, query } from "./database"
+import { ensureDatabaseReady, query, withTransaction } from "./database"
 
 export type EntityStatus = "active" | "inactive" | "suspended"
+export type QrStatus = "active" | "inactive" | "revoked" | "expired"
 
 export type BarangayRecord = {
   barangayId: number
@@ -33,6 +36,10 @@ export type DriverRecord = {
   tricycleId?: number
   tricycleNo?: string
   qrId?: number
+  qrToken?: string
+  qrStatus?: QrStatus
+  qrIssuedAt?: string
+  reportPath?: string
   passwordSet: boolean
   firstName: string
   lastName: string
@@ -95,7 +102,6 @@ export type UpdateTodaInput = Partial<CreateTodaInput> & {
 export type CreateDriverInput = {
   todaId: number
   tricycleId?: number
-  qrId?: number
   firstName: string
   lastName: string
   contactNo?: string
@@ -104,11 +110,11 @@ export type CreateDriverInput = {
 export type UpdateDriverInput = {
   todaId?: number
   tricycleId?: number | null
-  qrId?: number | null
   firstName?: string
   lastName?: string
   contactNo?: string | null
   status?: EntityStatus
+  regenerateQr?: boolean
 }
 
 export type CreateTricycleInput = {
@@ -167,6 +173,9 @@ type DriverRow = {
   tricycle_id: number | null
   plate_no: string | null
   qr_id: number | null
+  qr_token: string | null
+  qr_status: QrStatus | null
+  qr_issued_at: Date | null
   password_hash: string | null
   first_name: string
   last_name: string
@@ -229,6 +238,10 @@ const mapDriver = (row: DriverRow): DriverRecord => ({
   tricycleId: row.tricycle_id === null ? undefined : Number(row.tricycle_id),
   tricycleNo: row.plate_no ?? undefined,
   qrId: row.qr_id === null ? undefined : Number(row.qr_id),
+  qrToken: row.qr_token ?? undefined,
+  qrStatus: row.qr_status ?? undefined,
+  qrIssuedAt: row.qr_issued_at?.toISOString(),
+  reportPath: row.qr_token ? `/report/${row.qr_token}` : undefined,
   passwordSet: Boolean(row.password_hash),
   firstName: row.first_name,
   lastName: row.last_name,
@@ -307,6 +320,9 @@ const D_DRIVER_SELECT = `
     d.tricycle_id,
     tr.plate_no,
     d.qr_id,
+    qr.qr_token,
+    qr.status AS qr_status,
+    qr.issued_at AS qr_issued_at,
     d.password_hash,
     d.first_name,
     d.last_name,
@@ -320,7 +336,168 @@ const D_DRIVER_SELECT = `
     ON b.barangay_id = t.barangay_id
   LEFT JOIN public.tricycles tr
     ON tr.tricycle_id = d.tricycle_id
+  LEFT JOIN public.qr_codes qr
+    ON qr.qr_id = d.qr_id
 `
+
+const DRIVER_QR_TOKEN_BYTES = 24
+
+type DriverQrStateRow = {
+  qr_id: number | null
+  qr_status: QrStatus | null
+}
+
+const generateDriverQrToken = () => randomBytes(DRIVER_QR_TOKEN_BYTES).toString("base64url")
+
+const createDriverQrCode = async (
+  client: PoolClient,
+  driverId: number,
+  tricycleId: number | null
+) => {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      const result = await client.query<{ qr_id: number }>(
+        `
+          INSERT INTO public.qr_codes (
+            driver_id,
+            tricycle_id,
+            qr_token,
+            status
+          )
+          VALUES ($1, $2, $3, 'active')
+          RETURNING qr_id
+        `,
+        [driverId, tricycleId, generateDriverQrToken()]
+      )
+
+      const qrId = result.rows[0]?.qr_id
+      if (!qrId) {
+        throw new Error("Unable to create a QR code for this driver.")
+      }
+
+      return Number(qrId)
+    } catch (error) {
+      const pgError = error as { code?: string }
+      if (pgError.code === "23505" && attempt < 4) {
+        continue
+      }
+      throw error
+    }
+  }
+
+  throw new Error("Unable to create a unique QR code for this driver.")
+}
+
+const ensureDriverQrCode = async (
+  client: PoolClient,
+  driverId: number,
+  tricycleId: number | null
+) => {
+  const stateResult = await client.query<DriverQrStateRow>(
+    `
+      SELECT
+        d.qr_id,
+        qr.status AS qr_status
+      FROM public.drivers d
+      LEFT JOIN public.qr_codes qr
+        ON qr.qr_id = d.qr_id
+      WHERE d.driver_id = $1
+      LIMIT 1
+    `,
+    [driverId]
+  )
+
+  const state = stateResult.rows[0]
+  if (!state) {
+    throw new Error("Driver not found.")
+  }
+
+  let nextQrId = state.qr_id === null || state.qr_status === null ? null : Number(state.qr_id)
+  if (nextQrId === null) {
+    nextQrId = await createDriverQrCode(client, driverId, tricycleId)
+  } else {
+    await client.query(
+      `
+        UPDATE public.qr_codes
+        SET
+          driver_id = $2,
+          tricycle_id = $3,
+          status = 'active',
+          expires_at = NULL
+        WHERE qr_id = $1
+      `,
+      [nextQrId, driverId, tricycleId]
+    )
+  }
+
+  await client.query(
+    `
+      UPDATE public.qr_codes
+      SET
+        driver_id = $1,
+        status = 'revoked',
+        expires_at = COALESCE(expires_at, NOW())
+      WHERE driver_id = $1
+        AND qr_id <> $2
+        AND status = 'active'
+    `,
+    [driverId, nextQrId]
+  )
+
+  await client.query(
+    `
+      UPDATE public.drivers
+      SET qr_id = $2
+      WHERE driver_id = $1
+    `,
+    [driverId, nextQrId]
+  )
+}
+
+const regenerateDriverQrCode = async (
+  client: PoolClient,
+  driverId: number,
+  tricycleId: number | null
+) => {
+  await client.query(
+    `
+      UPDATE public.qr_codes
+      SET
+        status = 'revoked',
+        expires_at = COALESCE(expires_at, NOW())
+      WHERE driver_id = $1
+        AND status = 'active'
+    `,
+    [driverId]
+  )
+
+  const qrId = await createDriverQrCode(client, driverId, tricycleId)
+  await client.query(
+    `
+      UPDATE public.drivers
+      SET qr_id = $2
+      WHERE driver_id = $1
+    `,
+    [driverId, qrId]
+  )
+}
+
+const backfillDriverQrCodes = async (rows: DriverRow[]) => {
+  const missingRows = rows.filter((row) => row.qr_id === null || row.qr_token === null)
+  if (missingRows.length === 0) return false
+
+  await withTransaction(async (client) => {
+    for (const row of missingRows) {
+      await ensureDriverQrCode(
+        client,
+        Number(row.driver_id),
+        row.tricycle_id === null ? null : Number(row.tricycle_id)
+      )
+    }
+  })
+
+  return true
+}
 
 const TR_TRICYCLE_SELECT = `
   SELECT
@@ -436,7 +613,7 @@ const getRouteById = async (routeId: number) => {
 export const listMasterData = async (): Promise<MasterDataSnapshot> => {
   await ensureDatabaseReady()
 
-  const [barangays, todas, drivers, tricycles, routes] = await Promise.all([
+  const [barangays, todas, initialDrivers, tricycles, routes] = await Promise.all([
     query<BarangayRow>(
       `
         ${B_BARANGAY_SELECT}
@@ -471,10 +648,21 @@ export const listMasterData = async (): Promise<MasterDataSnapshot> => {
     )
   ])
 
+  const driverRows = (await backfillDriverQrCodes(initialDrivers.rows))
+    ? (
+        await query<DriverRow>(
+          `
+            ${D_DRIVER_SELECT}
+            ORDER BY b.barangay_name ASC, t.toda_name ASC, d.last_name ASC, d.first_name ASC
+          `
+        )
+      ).rows
+    : initialDrivers.rows
+
   return {
     barangays: barangays.rows.map(mapBarangay),
     todas: todas.rows.map(mapToda),
-    drivers: drivers.rows.map(mapDriver),
+    drivers: driverRows.map(mapDriver),
     tricycles: tricycles.rows.map(mapTricycle),
     routes: routes.rows.map(mapRoute)
   }
@@ -517,7 +705,7 @@ export const listMasterDataForAdmin = async (
   const tricycleScope = buildScopeClause(profile, "tr.toda_id", "b.barangay_id")
   const routeScope = buildScopeClause(profile, "r.toda_id", "b.barangay_id")
 
-  const [barangays, todas, drivers, tricycles, routes] = await Promise.all([
+  const [barangays, todas, initialDrivers, tricycles, routes] = await Promise.all([
     query<BarangayRow>(
       `
         ${B_BARANGAY_SELECT}
@@ -562,10 +750,23 @@ export const listMasterDataForAdmin = async (
     )
   ])
 
+  const driverRows = (await backfillDriverQrCodes(initialDrivers.rows))
+    ? (
+        await query<DriverRow>(
+          `
+            ${D_DRIVER_SELECT}
+            ${driverScope.clause}
+            ORDER BY b.barangay_name ASC, t.toda_name ASC, d.last_name ASC, d.first_name ASC
+          `,
+          driverScope.params
+        )
+      ).rows
+    : initialDrivers.rows
+
   return {
     barangays: barangays.rows.map(mapBarangay),
     todas: todas.rows.map(mapToda),
-    drivers: drivers.rows.map(mapDriver),
+    drivers: driverRows.map(mapDriver),
     tricycles: tricycles.rows.map(mapTricycle),
     routes: routes.rows.map(mapRoute)
   }
@@ -772,65 +973,104 @@ export const deleteToda = async (todaId: number) => {
 export const createDriver = async (input: CreateDriverInput) => {
   await ensureDatabaseReady()
 
-  const result = await query<{ driver_id: number }>(
-    `
-      INSERT INTO public.drivers (
-        toda_id,
-        tricycle_id,
-        qr_id,
-        first_name,
-        last_name,
-        contact_no
-      )
-      VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING driver_id
-    `,
-    [
-      input.todaId,
-      input.tricycleId ?? null,
-      input.qrId ?? null,
-      input.firstName,
-      input.lastName,
-      input.contactNo ?? null
-    ]
-  )
+  const driverId = await withTransaction(async (client) => {
+    const result = await client.query<{ driver_id: number }>(
+      `
+        INSERT INTO public.drivers (
+          toda_id,
+          tricycle_id,
+          first_name,
+          last_name,
+          contact_no
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING driver_id
+      `,
+      [
+        input.todaId,
+        input.tricycleId ?? null,
+        input.firstName,
+        input.lastName,
+        input.contactNo ?? null
+      ]
+    )
 
-  return getDriverById(result.rows[0].driver_id)
+    const nextDriverId = result.rows[0]?.driver_id
+    if (!nextDriverId) {
+      throw new Error("Unable to create driver.")
+    }
+
+    await ensureDriverQrCode(
+      client,
+      Number(nextDriverId),
+      input.tricycleId === undefined ? null : input.tricycleId
+    )
+
+    return Number(nextDriverId)
+  })
+
+  return getDriverById(driverId)
 }
 
 export const updateDriver = async (driverId: number, input: UpdateDriverInput) => {
   await ensureDatabaseReady()
 
-  await query(
-    `
-      UPDATE public.drivers
-      SET toda_id = CASE WHEN $2 THEN $3 ELSE toda_id END,
-          tricycle_id = CASE WHEN $4 THEN $5 ELSE tricycle_id END,
-          qr_id = CASE WHEN $6 THEN $7 ELSE qr_id END,
-          first_name = CASE WHEN $8 THEN $9 ELSE first_name END,
-          last_name = CASE WHEN $10 THEN $11 ELSE last_name END,
-          contact_no = CASE WHEN $12 THEN $13 ELSE contact_no END,
-          status = CASE WHEN $14 THEN $15 ELSE status END
-      WHERE driver_id = $1
-    `,
-    [
+  await withTransaction(async (client) => {
+    await client.query(
+      `
+        UPDATE public.drivers
+        SET toda_id = CASE WHEN $2 THEN $3 ELSE toda_id END,
+            tricycle_id = CASE WHEN $4 THEN $5 ELSE tricycle_id END,
+            first_name = CASE WHEN $6 THEN $7 ELSE first_name END,
+            last_name = CASE WHEN $8 THEN $9 ELSE last_name END,
+            contact_no = CASE WHEN $10 THEN $11 ELSE contact_no END,
+            status = CASE WHEN $12 THEN $13 ELSE status END
+        WHERE driver_id = $1
+      `,
+      [
+        driverId,
+        hasOwn(input, "todaId"),
+        input.todaId ?? null,
+        hasOwn(input, "tricycleId"),
+        input.tricycleId ?? null,
+        hasOwn(input, "firstName"),
+        input.firstName ?? null,
+        hasOwn(input, "lastName"),
+        input.lastName ?? null,
+        hasOwn(input, "contactNo"),
+        input.contactNo ?? null,
+        hasOwn(input, "status"),
+        input.status ?? null
+      ]
+    )
+
+    const tricycleResult = await client.query<{ tricycle_id: number | null }>(
+      `
+        SELECT tricycle_id
+        FROM public.drivers
+        WHERE driver_id = $1
+        LIMIT 1
+      `,
+      [driverId]
+    )
+
+    const tricycleId = tricycleResult.rows[0]?.tricycle_id ?? null
+
+    if (input.regenerateQr) {
+      await regenerateDriverQrCode(
+        client,
+        driverId,
+        tricycleId === null ? null : Number(tricycleId)
+      )
+      return
+    }
+
+    await ensureDriverQrCode(
+      client,
       driverId,
-      hasOwn(input, "todaId"),
-      input.todaId ?? null,
-      hasOwn(input, "tricycleId"),
-      input.tricycleId ?? null,
-      hasOwn(input, "qrId"),
-      input.qrId ?? null,
-      hasOwn(input, "firstName"),
-      input.firstName ?? null,
-      hasOwn(input, "lastName"),
-      input.lastName ?? null,
-      hasOwn(input, "contactNo"),
-      input.contactNo ?? null,
-      hasOwn(input, "status"),
-      input.status ?? null
-    ]
-  )
+      tricycleId === null ? null : Number(tricycleId)
+    )
+  })
 
   return getDriverById(driverId)
 }

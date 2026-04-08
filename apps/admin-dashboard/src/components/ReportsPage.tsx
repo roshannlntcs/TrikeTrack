@@ -28,7 +28,7 @@ const formatReportStatus = (value: ReportStatus) =>
     .join(" ")
 
 const formatTripStatus = (value: AdminReportRecord["tripStatus"]) =>
-  value.charAt(0).toUpperCase() + value.slice(1)
+  value ? value.charAt(0).toUpperCase() + value.slice(1) : "No active trip"
 
 export default function ReportsPage({ accessToken, onDataChanged }: ReportsPageProps) {
   const [reports, setReports] = useState<AdminReportRecord[]>([])
@@ -90,11 +90,13 @@ export default function ReportsPage({ accessToken, onDataChanged }: ReportsPageP
         report.driverName.toLowerCase().includes(normalizedSearchQuery) ||
         report.driverCode.toLowerCase().includes(normalizedSearchQuery) ||
         report.description.toLowerCase().includes(normalizedSearchQuery) ||
-        report.plateNo.toLowerCase().includes(normalizedSearchQuery) ||
-        report.routeName.toLowerCase().includes(normalizedSearchQuery) ||
+        (report.plateNo?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
+        (report.routeName?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
         report.todaName.toLowerCase().includes(normalizedSearchQuery) ||
         report.barangayName.toLowerCase().includes(normalizedSearchQuery) ||
-        report.reportTypeLabel.toLowerCase().includes(normalizedSearchQuery)
+        report.reportTypeLabel.toLowerCase().includes(normalizedSearchQuery) ||
+        (report.passengerName?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
+        (report.passengerContact?.toLowerCase().includes(normalizedSearchQuery) ?? false)
       )
     })
   }, [reports, statusFilter, typeFilter, normalizedSearchQuery])
@@ -222,7 +224,7 @@ export default function ReportsPage({ accessToken, onDataChanged }: ReportsPageP
                         </span>
                       </div>
                       <p>
-                        {report.driverCode} | {report.plateNo} | {report.todaName} |{" "}
+                        {report.driverCode} | {report.plateNo ?? "No tricycle"} | {report.todaName} |{" "}
                         {report.barangayName}
                       </p>
                     </div>
@@ -234,8 +236,8 @@ export default function ReportsPage({ accessToken, onDataChanged }: ReportsPageP
 
                   <div className="reports-card__badges">
                     <span className="reports-chip">{report.reportTypeLabel}</span>
-                    <span className="reports-chip">{formatTripStatus(report.tripStatus)} trip</span>
-                    <span className="reports-chip">Trip #{report.tripId}</span>
+                    <span className="reports-chip">{formatTripStatus(report.tripStatus)}</span>
+                    {report.tripId && <span className="reports-chip">Trip #{report.tripId}</span>}
                     <span className="reports-chip">QR #{report.qrId}</span>
                     {report.violationId && (
                       <span className="reports-chip">
@@ -244,8 +246,40 @@ export default function ReportsPage({ accessToken, onDataChanged }: ReportsPageP
                     )}
                   </div>
 
-                  <div className="reports-card__route">Route: {report.routeName}</div>
+                  <div className="reports-card__route">
+                    Route: {report.routeName ?? "No route attached"}
+                  </div>
+                  {(report.passengerName || report.passengerContact) && (
+                    <div className="reports-card__route">
+                      Passenger: {report.passengerName ?? "Anonymous"}
+                      {report.passengerContact ? ` | ${report.passengerContact}` : ""}
+                    </div>
+                  )}
                   <div className="reports-card__description">{report.description}</div>
+                  {report.mediaUrls && report.mediaUrls.length > 0 && (
+                    <div className="reports-card__media">
+                      <span className="reports-card__mediaLabel">Uploaded proof</span>
+                      <div className="reports-card__mediaGrid">
+                        {report.mediaUrls.map((mediaUrl, index) => (
+                          <a
+                            key={`${report.reportId}-${index}`}
+                            className="reports-card__mediaLink"
+                            href={mediaUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            aria-label={`Open uploaded proof ${index + 1} for report ${report.reportId}`}
+                          >
+                            <img
+                              className="reports-card__mediaImage"
+                              src={mediaUrl}
+                              alt={`Uploaded proof ${index + 1} for report ${report.reportId}`}
+                              loading="lazy"
+                            />
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   <div className="reports-card__actions">
                     <select

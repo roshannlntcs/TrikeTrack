@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react"
+import QRCode from "qrcode"
 import {
   fetchDashboardData,
   type DashboardTripRecord
 } from "../lib/dashboard-data"
+import { fetchAdminReports, type AdminReportRecord } from "../lib/reports"
 import {
   createMasterDataItem,
   deleteMasterDataItem,
@@ -29,7 +31,6 @@ type DriverFormState = {
   lastName: string
   contactNo: string
   tricycleId: string
-  qrId: string
   status: EntityStatus
 }
 
@@ -76,7 +77,6 @@ const createInitialDriverForm = (): DriverFormState => ({
   lastName: "",
   contactNo: "",
   tricycleId: "",
-  qrId: "",
   status: "active"
 })
 
@@ -102,6 +102,105 @@ const formatCurrency = (value?: number) =>
 
 const formatTripStatusLabel = (value: DashboardTripRecord["tripStatus"]) => toTitleCase(value)
 
+const firstConfiguredUrl = (...values: Array<string | undefined>) =>
+  values.map((value) => value?.trim()).find((value) => Boolean(value)) ?? ""
+
+const REPORT_BASE_URL = firstConfiguredUrl(
+  import.meta.env.VITE_PUBLIC_PASSENGER_REPORT_BASE_URL as string | undefined,
+  import.meta.env.VITE_PUBLIC_REPORT_BASE_URL as string | undefined,
+  import.meta.env.VITE_PASSENGER_REPORT_BASE_URL as string | undefined,
+  (import.meta.env.VITE_VERCEL_PROJECT_PRODUCTION_URL as string | undefined)
+    ? `https://${import.meta.env.VITE_VERCEL_PROJECT_PRODUCTION_URL as string}`
+    : undefined,
+  (import.meta.env.VITE_VERCEL_URL as string | undefined)
+    ? `https://${import.meta.env.VITE_VERCEL_URL as string}`
+    : undefined,
+  (import.meta.env.VITE_NETLIFY_URL as string | undefined)
+    ? `https://${import.meta.env.VITE_NETLIFY_URL as string}`
+    : undefined,
+  import.meta.env.VITE_DEPLOY_PRIME_URL as string | undefined
+)
+
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"])
+
+const isLoopbackHostname = (hostname: string) => {
+  const normalized = hostname.trim().toLowerCase()
+  return LOOPBACK_HOSTS.has(normalized)
+}
+
+const isPrivateIpv4Hostname = (hostname: string) => {
+  const match = hostname.trim().match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  if (!match) return false
+
+  const octets = match.slice(1).map((part) => Number(part))
+  if (octets.some((part) => Number.isNaN(part) || part < 0 || part > 255)) {
+    return false
+  }
+
+  const [a, b] = octets
+  return (
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  )
+}
+
+const resolvePassengerReportBaseUrl = () => {
+  if (!REPORT_BASE_URL) {
+    return {
+      url: null,
+      error:
+        "Passenger report URL is not configured. Set VITE_PUBLIC_PASSENGER_REPORT_BASE_URL to a public passenger reporting deployment URL."
+    }
+  }
+
+  try {
+    const parsed = new URL(REPORT_BASE_URL)
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return {
+        url: null,
+        error: "Passenger report URL must use http:// or https://."
+      }
+    }
+
+    if (isLoopbackHostname(parsed.hostname)) {
+      return {
+        url: null,
+        error:
+          "Passenger report URL cannot use localhost or 127.0.0.1. Use a public deployment URL that any phone can reach."
+      }
+    }
+
+    if (isPrivateIpv4Hostname(parsed.hostname)) {
+      return {
+        url: null,
+        error:
+          "Passenger report URL cannot use a private LAN IP. Use a public deployment URL that any phone can reach over the internet."
+      }
+    }
+
+    return {
+      url: parsed.toString().replace(/\/+$/, ""),
+      error: null
+    }
+  } catch {
+    return {
+      url: null,
+      error:
+        "Passenger report URL is invalid. Set VITE_PUBLIC_PASSENGER_REPORT_BASE_URL to a full public URL like https://your-app.vercel.app."
+    }
+  }
+}
+
+const PASSENGER_REPORT_BASE = resolvePassengerReportBaseUrl()
+
+const buildPassengerReportUrl = (reportPath?: string) => {
+  if (!reportPath || !PASSENGER_REPORT_BASE.url) return ""
+  return `${PASSENGER_REPORT_BASE.url}${reportPath}`
+}
+
 export default function TodaManagementPage({
   accessToken,
   page,
@@ -116,8 +215,11 @@ export default function TodaManagementPage({
   const [notice, setNotice] = useState<string | null>(null)
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [driverTrips, setDriverTrips] = useState<DashboardTripRecord[]>([])
+  const [driverReports, setDriverReports] = useState<AdminReportRecord[]>([])
   const [tripHistoryLoading, setTripHistoryLoading] = useState(true)
   const [tripHistoryError, setTripHistoryError] = useState<string | null>(null)
+  const [reportHistoryLoading, setReportHistoryLoading] = useState(true)
+  const [reportHistoryError, setReportHistoryError] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState("")
   const [statusFilter, setStatusFilter] = useState<"all" | EntityStatus>("all")
   const [isModalOpen, setIsModalOpen] = useState(false)
@@ -128,14 +230,17 @@ export default function TodaManagementPage({
   const [driverForm, setDriverForm] = useState<DriverFormState>(createInitialDriverForm)
   const [tricycleForm, setTricycleForm] = useState<TricycleFormState>(createInitialTricycleForm)
   const [pendingDelete, setPendingDelete] = useState<PendingDeleteState | null>(null)
+  const [qrPreviewDataUrl, setQrPreviewDataUrl] = useState<string | null>(null)
 
   const loadMasterData = async () => {
     setLoading(true)
     setTripHistoryLoading(true)
+    setReportHistoryLoading(true)
     try {
-      const [masterSnapshot, dashboardSnapshot] = await Promise.allSettled([
+      const [masterSnapshot, dashboardSnapshot, reportsSnapshot] = await Promise.allSettled([
         fetchMasterData(accessToken),
-        fetchDashboardData(accessToken)
+        fetchDashboardData(accessToken),
+        fetchAdminReports(accessToken)
       ])
 
       if (masterSnapshot.status === "rejected") {
@@ -153,11 +258,20 @@ export default function TodaManagementPage({
         setDriverTrips([])
         setTripHistoryError(String(dashboardSnapshot.reason))
       }
+
+      if (reportsSnapshot.status === "fulfilled") {
+        setDriverReports(reportsSnapshot.value.reports)
+        setReportHistoryError(null)
+      } else {
+        setDriverReports([])
+        setReportHistoryError(String(reportsSnapshot.reason))
+      }
     } catch (loadError) {
       setError(String(loadError))
     } finally {
       setLoading(false)
       setTripHistoryLoading(false)
+      setReportHistoryLoading(false)
     }
   }
 
@@ -231,6 +345,50 @@ export default function TodaManagementPage({
       .sort((a, b) => new Date(b.tripStart).getTime() - new Date(a.tripStart).getTime())
   }, [driverTrips, selectedDriverDetails])
 
+  const selectedDriverReportHistory = useMemo(() => {
+    if (!selectedDriverDetails) return []
+
+    return driverReports
+      .filter((report) => report.driverId === selectedDriverDetails.driverId)
+      .sort((a, b) => new Date(b.reportedAt).getTime() - new Date(a.reportedAt).getTime())
+  }, [driverReports, selectedDriverDetails])
+
+  const selectedDriverReportUrl = useMemo(
+    () => buildPassengerReportUrl(selectedDriverDetails?.reportPath),
+    [selectedDriverDetails?.reportPath]
+  )
+
+  useEffect(() => {
+    let cancelled = false
+
+    if (!selectedDriverDetails?.reportPath || !selectedDriverReportUrl) {
+      setQrPreviewDataUrl(null)
+      return () => {
+        cancelled = true
+      }
+    }
+
+    void QRCode.toDataURL(selectedDriverReportUrl, {
+      width: 320,
+      margin: 1,
+      errorCorrectionLevel: "M"
+    })
+      .then((dataUrl: string) => {
+        if (!cancelled) {
+          setQrPreviewDataUrl(dataUrl)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setQrPreviewDataUrl(null)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [selectedDriverDetails?.reportPath, selectedDriverReportUrl])
+
   const resetFeedback = () => {
     setError(null)
     setNotice(null)
@@ -271,7 +429,6 @@ export default function TodaManagementPage({
       lastName: row.lastName,
       contactNo: row.contactNo ?? "",
       tricycleId: row.tricycleId ? String(row.tricycleId) : "",
-      qrId: row.qrId ? String(row.qrId) : "",
       status: row.status
     })
     setIsModalOpen(true)
@@ -310,7 +467,6 @@ export default function TodaManagementPage({
         const created = await createMasterDataItem<DriverRecord>(accessToken, "driver", {
           todaId: lockedTodaId,
           tricycleId: driverForm.tricycleId ? Number(driverForm.tricycleId) : undefined,
-          qrId: driverForm.qrId ? Number(driverForm.qrId) : undefined,
           firstName: driverForm.firstName,
           lastName: driverForm.lastName,
           contactNo: driverForm.contactNo || undefined
@@ -327,7 +483,6 @@ export default function TodaManagementPage({
         await updateMasterDataItem<DriverRecord>(accessToken, "driver", selectedDriver.driverId, {
           todaId: lockedTodaId,
           tricycleId: driverForm.tricycleId ? Number(driverForm.tricycleId) : null,
-          qrId: driverForm.qrId ? Number(driverForm.qrId) : null,
           firstName: driverForm.firstName,
           lastName: driverForm.lastName,
           contactNo: driverForm.contactNo || null,
@@ -445,6 +600,87 @@ export default function TodaManagementPage({
       onDataChanged?.()
     } catch (deleteError) {
       setError(String(deleteError))
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const handleCopyQrLink = async () => {
+    if (!selectedDriverReportUrl) return
+
+    try {
+      await navigator.clipboard.writeText(selectedDriverReportUrl)
+      setNotice("Passenger report link copied.")
+    } catch (copyError) {
+      setError(String(copyError))
+    }
+  }
+
+  const handleDownloadQr = () => {
+    if (!qrPreviewDataUrl || !selectedDriverDetails) return
+
+    const link = document.createElement("a")
+    link.href = qrPreviewDataUrl
+    link.download = `${selectedDriverDetails.driverCode.toLowerCase()}-report-qr.png`
+    link.click()
+  }
+
+  const handlePrintQr = () => {
+    if (!qrPreviewDataUrl || !selectedDriverDetails || !selectedDriverReportUrl) return
+
+    const printWindow = window.open("", "_blank", "noopener,noreferrer,width=640,height=720")
+    if (!printWindow) {
+      setError("Unable to open the print preview window.")
+      return
+    }
+
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>${selectedDriverDetails.driverCode} Passenger Reporting QR</title>
+          <style>
+            body { font-family: Arial, sans-serif; padding: 32px; text-align: center; color: #17212b; }
+            img { width: 280px; height: 280px; display: block; margin: 0 auto 20px; }
+            h1 { margin-bottom: 8px; }
+            p { margin: 6px 0; word-break: break-word; }
+          </style>
+        </head>
+        <body>
+          <img src="${qrPreviewDataUrl}" alt="Passenger reporting QR code" />
+          <h1>${selectedDriverDetails.firstName} ${selectedDriverDetails.lastName}</h1>
+          <p>${selectedDriverDetails.driverCode}</p>
+          <p>${selectedDriverDetails.tricycleNo ?? "No tricycle assigned"}</p>
+          <p>${selectedDriverReportUrl}</p>
+        </body>
+      </html>
+    `)
+    printWindow.document.close()
+    printWindow.focus()
+    printWindow.print()
+  }
+
+  const handleRegenerateDriverQr = async () => {
+    if (!selectedDriverDetails) return
+
+    const busyAction = `regenerate-driver-qr-${selectedDriverDetails.driverId}`
+    setBusyKey(busyAction)
+    setError(null)
+    setNotice(null)
+
+    try {
+      const updated = await updateMasterDataItem<DriverRecord>(
+        accessToken,
+        "driver",
+        selectedDriverDetails.driverId,
+        { regenerateQr: true }
+      )
+
+      setSelectedDriverDetails(updated)
+      await loadMasterData()
+      onDataChanged?.()
+      setNotice(`Regenerated passenger QR for ${updated.firstName} ${updated.lastName}.`)
+    } catch (regenerateError) {
+      setError(String(regenerateError))
     } finally {
       setBusyKey(null)
     }
@@ -675,6 +911,10 @@ export default function TodaManagementPage({
                   <span className="fleet-details__label">Recent Trips</span>
                   <strong>{selectedDriverTripHistory.length}</strong>
                 </div>
+                <div>
+                  <span className="fleet-details__label">Passenger Reports</span>
+                  <strong>{selectedDriverReportHistory.length}</strong>
+                </div>
               </section>
 
               <section className="fleet-details__grid">
@@ -687,8 +927,8 @@ export default function TodaManagementPage({
                   <strong>{selectedDriverDetails.tricycleNo ?? "Unassigned"}</strong>
                 </div>
                 <div className="fleet-details__item">
-                  <span className="fleet-details__label">QR ID</span>
-                  <strong>{selectedDriverDetails.qrId ? `#${selectedDriverDetails.qrId}` : "Not assigned"}</strong>
+                  <span className="fleet-details__label">QR Status</span>
+                  <strong>{selectedDriverDetails.qrStatus ?? "Pending"}</strong>
                 </div>
                 <div className="fleet-details__item">
                   <span className="fleet-details__label">Barangay</span>
@@ -698,6 +938,96 @@ export default function TodaManagementPage({
                   <span className="fleet-details__label">Created</span>
                   <strong>{formatDateTime(selectedDriverDetails.createdAt)}</strong>
                 </div>
+                <div className="fleet-details__item">
+                  <span className="fleet-details__label">QR Issued</span>
+                  <strong>{formatDateTime(selectedDriverDetails.qrIssuedAt)}</strong>
+                </div>
+              </section>
+
+              <section className="fleet-details__section">
+                <div className="fleet-details__section-header">
+                  <div>
+                    <h4>Passenger Reporting QR</h4>
+                    <p>This QR stays with the driver record and opens the mobile web reporting page.</p>
+                  </div>
+                </div>
+
+                {!selectedDriverDetails.qrId || !selectedDriverDetails.reportPath ? (
+                  <div className="fleet-details__empty">
+                    This driver does not have a passenger reporting QR yet.
+                  </div>
+                ) : PASSENGER_REPORT_BASE.error ? (
+                  <div className="fleet-details__empty fleet-details__empty--error">
+                    {PASSENGER_REPORT_BASE.error}
+                  </div>
+                ) : (
+                  <div className="fleet-qr-panel">
+                    <div className="fleet-qr-panel__preview">
+                      {qrPreviewDataUrl ? (
+                        <img
+                          src={qrPreviewDataUrl}
+                          alt={`Passenger reporting QR for ${selectedDriverDetails.firstName} ${selectedDriverDetails.lastName}`}
+                        />
+                      ) : (
+                        <div className="fleet-details__empty">Generating QR preview...</div>
+                      )}
+                    </div>
+
+                    <div className="fleet-qr-panel__body">
+                      <div className="fleet-details__grid">
+                        <div className="fleet-details__item">
+                          <span className="fleet-details__label">QR ID</span>
+                          <strong>#{selectedDriverDetails.qrId}</strong>
+                        </div>
+                        <div className="fleet-details__item">
+                          <span className="fleet-details__label">Driver Report URL</span>
+                          <strong className="fleet-qr-panel__url">
+                            {selectedDriverReportUrl || "Unavailable"}
+                          </strong>
+                        </div>
+                      </div>
+
+                      <div className="fleet-qr-panel__actions">
+                        <button
+                          type="button"
+                          className="fleet-action fleet-action--edit"
+                          onClick={() => void handleCopyQrLink()}
+                          disabled={!selectedDriverReportUrl}
+                        >
+                          Copy Link
+                        </button>
+                        <button
+                          type="button"
+                          className="fleet-action fleet-action--edit"
+                          onClick={handleDownloadQr}
+                          disabled={!qrPreviewDataUrl}
+                        >
+                          Download QR
+                        </button>
+                        <button
+                          type="button"
+                          className="fleet-action fleet-action--edit"
+                          onClick={handlePrintQr}
+                          disabled={!qrPreviewDataUrl}
+                        >
+                          Print QR
+                        </button>
+                        <button
+                          type="button"
+                          className="fleet-action fleet-action--delete"
+                          onClick={() => void handleRegenerateDriverQr()}
+                          disabled={
+                            busyKey === `regenerate-driver-qr-${selectedDriverDetails.driverId}`
+                          }
+                        >
+                          {busyKey === `regenerate-driver-qr-${selectedDriverDetails.driverId}`
+                            ? "Regenerating..."
+                            : "Regenerate QR"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </section>
 
               <section className="fleet-details__section">
@@ -752,6 +1082,66 @@ export default function TodaManagementPage({
                             <strong>{formatCurrency(trip.fareAmount)}</strong>
                           </div>
                         </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section className="fleet-details__section">
+                <div className="fleet-details__section-header">
+                  <div>
+                    <h4>Passenger Reports</h4>
+                    <p>Recent browser-submitted reports tied to this driver QR.</p>
+                  </div>
+                </div>
+
+                {reportHistoryLoading ? (
+                  <div className="fleet-details__empty">Loading passenger reports...</div>
+                ) : reportHistoryError ? (
+                  <div className="fleet-details__empty fleet-details__empty--error">
+                    Passenger report history is unavailable right now.
+                  </div>
+                ) : selectedDriverReportHistory.length === 0 ? (
+                  <div className="fleet-details__empty">
+                    No passenger reports have been submitted for this driver yet.
+                  </div>
+                ) : (
+                  <div className="fleet-trip-history">
+                    {selectedDriverReportHistory.map((report) => (
+                      <article key={report.reportId} className="fleet-trip-card">
+                        <div className="fleet-trip-card__top">
+                          <div>
+                            <strong>{report.reportTypeLabel}</strong>
+                            <div className="fleet-trip-card__meta">
+                              Report #{report.reportId} • {new Date(report.reportedAt).toLocaleString()}
+                            </div>
+                          </div>
+                          <span className={`fleet-trip-status fleet-trip-status--${report.status}`}>
+                            {report.status.replace("_", " ")}
+                          </span>
+                        </div>
+
+                        <div className="fleet-trip-card__stats">
+                          <div>
+                            <span>Trip</span>
+                            <strong>{report.tripId ? `#${report.tripId}` : "No trip attached"}</strong>
+                          </div>
+                          <div>
+                            <span>Route</span>
+                            <strong>{report.routeName ?? "No route attached"}</strong>
+                          </div>
+                          <div>
+                            <span>Passenger</span>
+                            <strong>{report.passengerName ?? "Anonymous"}</strong>
+                          </div>
+                          <div>
+                            <span>Contact</span>
+                            <strong>{report.passengerContact ?? "Not provided"}</strong>
+                          </div>
+                        </div>
+
+                        <div className="fleet-report-card__description">{report.description}</div>
                       </article>
                     ))}
                   </div>
@@ -846,18 +1236,10 @@ export default function TodaManagementPage({
                 </label>
 
                 <label>
-                  <span>QR ID</span>
-                  <input
-                    value={driverForm.qrId}
-                    onChange={(event) =>
-                      setDriverForm((current) => ({
-                        ...current,
-                        qrId: event.target.value
-                      }))
-                    }
-                    inputMode="numeric"
-                    placeholder="Optional"
-                  />
+                  <span>Passenger Reporting QR</span>
+                  <div className="fleet-form__hint">
+                    A unique passenger reporting QR will be generated automatically for this driver.
+                  </div>
                 </label>
 
                 <label>

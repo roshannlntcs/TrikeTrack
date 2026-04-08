@@ -52,6 +52,14 @@ create type media_type as enum (
   'document'
 );
 
+create type emergency_alert_status as enum (
+  'created',
+  'pending_admin',
+  'acknowledged',
+  'responding',
+  'resolved'
+);
+
 create table public.barangays (
   barangay_id bigint generated always as identity primary key,
   barangay_name text not null,
@@ -119,7 +127,7 @@ create table public.routes (
   route_id bigint generated always as identity primary key,
   toda_id bigint not null references public.todas(toda_id) on delete restrict,
   origin text not null,
-  destination text not null,a
+  destination text not null,
   geofence_geojson jsonb,
   status entity_status not null default 'active',
   created_at timestamptz not null default now(),
@@ -128,7 +136,8 @@ create table public.routes (
 
 create table public.qr_codes (
   qr_id bigint generated always as identity primary key,
-  tricycle_id bigint not null references public.tricycles(tricycle_id) on delete cascade,
+  driver_id bigint,
+  tricycle_id bigint references public.tricycles(tricycle_id) on delete set null,
   qr_token text not null unique,
   status qr_status not null default 'active',
   issued_at timestamptz not null default now(),
@@ -186,7 +195,8 @@ create table public.trip_points (
 
 create table public.passenger_scans (
   scan_id bigint generated always as identity primary key,
-  trip_id bigint not null references public.trips(trip_id) on delete cascade,
+  trip_id bigint references public.trips(trip_id) on delete set null,
+  driver_id bigint not null references public.drivers(driver_id) on delete cascade,
   qr_id bigint not null references public.qr_codes(qr_id) on delete restrict,
   scanned_at timestamptz not null default now(),
   device_info jsonb,
@@ -196,8 +206,13 @@ create table public.passenger_scans (
 create table public.reports (
   report_id bigint generated always as identity primary key,
   scan_id bigint not null references public.passenger_scans(scan_id) on delete cascade,
-  trip_id bigint not null references public.trips(trip_id) on delete cascade,
+  trip_id bigint references public.trips(trip_id) on delete set null,
+  driver_id bigint not null references public.drivers(driver_id) on delete cascade,
+  qr_id bigint not null references public.qr_codes(qr_id) on delete restrict,
   report_type_id bigint not null references public.report_types(report_type_id) on delete restrict,
+  source text not null default 'qr_web_form',
+  passenger_name text,
+  passenger_contact text,
   description text not null,
   reported_at timestamptz not null default now(),
   status report_status not null default 'submitted',
@@ -233,6 +248,54 @@ create table public.violations (
   )
 );
 
+create table public.emergency_alerts (
+  emergency_id bigint generated always as identity primary key,
+  passenger_tracking_key uuid not null unique,
+  qr_id bigint not null references public.qr_codes(qr_id) on delete restrict,
+  qr_token text not null,
+  driver_id bigint not null references public.drivers(driver_id) on delete cascade,
+  tricycle_id bigint references public.tricycles(tricycle_id) on delete set null,
+  trip_id bigint references public.trips(trip_id) on delete set null,
+  route_id bigint references public.routes(route_id) on delete set null,
+  toda_id bigint not null references public.todas(toda_id) on delete restrict,
+  barangay_id bigint not null references public.barangays(barangay_id) on delete restrict,
+  source text not null default 'qr_emergency_button',
+  alert_type text not null default 'emergency',
+  status emergency_alert_status not null default 'pending_admin',
+  latitude double precision,
+  longitude double precision,
+  location_label text,
+  device_info jsonb,
+  acknowledged_by_admin_id bigint references public.admin_accounts(admin_id) on delete set null,
+  acknowledged_at timestamptz,
+  resolved_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table public.admin_notification_reads (
+  admin_id bigint not null references public.admin_accounts(admin_id) on delete cascade,
+  notification_key text not null,
+  read_at timestamptz not null default now(),
+  created_at timestamptz not null default now(),
+  primary key (admin_id, notification_key)
+);
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'qr_codes_driver_id_fkey'
+  ) then
+    alter table public.qr_codes
+      add constraint qr_codes_driver_id_fkey
+      foreign key (driver_id)
+      references public.drivers(driver_id)
+      on delete set null;
+  end if;
+end $$;
+
 create index idx_todas_barangay_id on public.todas(barangay_id);
 
 create index idx_admin_accounts_barangay_id on public.admin_accounts(barangay_id);
@@ -248,9 +311,10 @@ create index idx_tricycles_permit_expiration_date on public.tricycles(permit_exp
 
 create index idx_routes_toda_id on public.routes(toda_id);
 
+create index idx_qr_codes_driver_id on public.qr_codes(driver_id);
 create index idx_qr_codes_tricycle_id on public.qr_codes(tricycle_id);
-create unique index uq_qr_codes_active_per_tricycle
-on public.qr_codes(tricycle_id)
+create unique index uq_qr_codes_active_per_driver
+on public.qr_codes(driver_id)
 where status = 'active';
 
 create index idx_trips_driver_id on public.trips(driver_id);
@@ -264,11 +328,14 @@ create index idx_trip_points_driver_id on public.trip_points(driver_id);
 create index idx_trip_points_recorded_at on public.trip_points(recorded_at desc);
 
 create index idx_passenger_scans_trip_id on public.passenger_scans(trip_id);
+create index idx_passenger_scans_driver_id on public.passenger_scans(driver_id);
 create index idx_passenger_scans_qr_id on public.passenger_scans(qr_id);
 create index idx_passenger_scans_scanned_at on public.passenger_scans(scanned_at);
 
 create index idx_reports_scan_id on public.reports(scan_id);
 create index idx_reports_trip_id on public.reports(trip_id);
+create index idx_reports_driver_id on public.reports(driver_id);
+create index idx_reports_qr_id on public.reports(qr_id);
 create index idx_reports_report_type_id on public.reports(report_type_id);
 create index idx_reports_reported_at on public.reports(reported_at);
 create index idx_reports_status on public.reports(status);
@@ -282,6 +349,14 @@ create index idx_violations_driver_id on public.violations(driver_id);
 create index idx_violations_tricycle_id on public.violations(tricycle_id);
 create index idx_violations_status on public.violations(status);
 create index idx_violations_detected_at on public.violations(detected_at);
+create index idx_emergency_alerts_status on public.emergency_alerts(status);
+create index idx_emergency_alerts_created_at on public.emergency_alerts(created_at desc);
+create index idx_emergency_alerts_driver_id on public.emergency_alerts(driver_id);
+create index idx_emergency_alerts_trip_id on public.emergency_alerts(trip_id);
+create index idx_emergency_alerts_toda_id on public.emergency_alerts(toda_id);
+create index idx_emergency_alerts_barangay_id on public.emergency_alerts(barangay_id);
+create index idx_admin_notification_reads_admin_read_at
+on public.admin_notification_reads(admin_id, read_at desc);
 
 insert into public.report_types (code, label) values
   ('harassment', 'Harassment'),

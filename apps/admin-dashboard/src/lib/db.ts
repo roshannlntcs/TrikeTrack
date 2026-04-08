@@ -1,5 +1,5 @@
 import { openDB } from "idb"
-import type { ViolationReason } from "../../../../common/types"
+import type { ViolationReason } from "./shared-types"
 
 export type LocationPoint = {
   id?: string

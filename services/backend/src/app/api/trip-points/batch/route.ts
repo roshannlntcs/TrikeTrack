@@ -3,7 +3,7 @@ import {
   storeTripPointBatch,
   type TripPointBatchResult
 } from "../../../../lib/trip-points-db"
-import type { TripPointEvent } from "../../../../../../../common/types"
+import type { TripPointEvent } from "../../../../lib/operational-types"
 
 const isFiniteNumber = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value)

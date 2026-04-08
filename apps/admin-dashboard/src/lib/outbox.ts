@@ -4,7 +4,7 @@ import {
   bumpOutboxAttempts,
   type OutboxItem
 } from "./db"
-import type { ViolationEvent } from "../../../../common/types"
+import type { ViolationEvent } from "./shared-types"
 
 export type OutboxSyncResult = {
   sent: number

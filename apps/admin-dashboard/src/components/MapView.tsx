@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import maplibregl from "maplibre-gl"
 import * as turf from "@turf/turf"
 import type { GeoJSON as MapGeoJSON } from "../types/geojson"
-import type { DriverLocationEvent } from "../../../../common/types"
+import type { DriverLocationEvent } from "../lib/shared-types"
 import geofenceRaw from "../data/geofence.geojson?raw"
 import { enqueueViolation, getOutboxCount, savePoint } from "../lib/db"
 import { syncOutbox } from "../lib/outbox"
@@ -10,12 +10,21 @@ import TripLogs from "./TripLogs"
 
 const MAP_STYLE_URL = "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json"
 const OBRERO_CENTER: [number, number] = [125.6128, 7.0848]
-const DAVAO_CITY_BOUNDS: [[number, number], [number, number]] = [
-  [125.48, 6.96],
-  [125.71, 7.18]
-]
 const DEFAULT_CITY_ZOOM = 11
+const WORLD_MIN_ZOOM = 1
+const GEOFENCE_FIT_PADDING = 28
+const GEOFENCE_FOCUS_MAX_ZOOM = 13.5
 const DRIVER_OFFLINE_MS = 15000
+
+const getGeofenceBounds = (
+  geofenceFeature: MapGeoJSON["features"][number]
+): [[number, number], [number, number]] => {
+  const [minLng, minLat, maxLng, maxLat] = turf.bbox(geofenceFeature)
+  return [
+    [minLng, minLat],
+    [maxLng, maxLat]
+  ]
+}
 
 export default function MapView() {
   const el = useRef<HTMLDivElement | null>(null)
@@ -42,8 +51,9 @@ export default function MapView() {
       style: MAP_STYLE_URL,
       center: OBRERO_CENTER,
       zoom: DEFAULT_CITY_ZOOM,
-      minZoom: 10,
-      maxZoom: 19
+      minZoom: WORLD_MIN_ZOOM,
+      maxZoom: 19,
+      renderWorldCopies: true
     })
     map.addControl(
       new maplibregl.NavigationControl({
@@ -169,11 +179,10 @@ export default function MapView() {
         return
       }
 
-      map.setMaxBounds(DAVAO_CITY_BOUNDS)
-      map.easeTo({
-        center: OBRERO_CENTER,
-        zoom: DEFAULT_CITY_ZOOM,
-        duration: 0
+      map.fitBounds(getGeofenceBounds(geofencePolygon), {
+        padding: GEOFENCE_FIT_PADDING,
+        duration: 0,
+        maxZoom: GEOFENCE_FOCUS_MAX_ZOOM
       })
 
       const geofencePolyline =

@@ -14,25 +14,28 @@ export type ReportTypeRecord = {
 export type AdminReportRecord = {
   reportId: number
   scanId: number
-  tripId: number
-  tripStatus: "scheduled" | "ongoing" | "completed" | "cancelled"
+  tripId?: number
+  tripStatus?: "scheduled" | "ongoing" | "completed" | "cancelled"
   reportTypeId: number
   reportTypeCode: string
   reportTypeLabel: string
+  passengerName?: string
+  passengerContact?: string
   description: string
   reportedAt: string
   status: ReportStatus
   driverId: number
   driverCode: string
   driverName: string
-  tricycleId: number
-  plateNo: string
+  tricycleId?: number
+  plateNo?: string
   qrId: number
   todaId: number
   todaName: string
   barangayId: number
   barangayName: string
-  routeName: string
+  routeName?: string
+  mediaUrls?: string[]
   violationId?: number
   violationStatus?: "open" | "under_review" | "resolved" | "dismissed"
 }

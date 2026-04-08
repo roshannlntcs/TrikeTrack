@@ -1,6 +1,10 @@
 import type { PoolClient } from "pg"
 import type { AdminProfile } from "./admin-auth-db"
 import { ensureDatabaseReady, query, withTransaction } from "./database"
+import {
+  deletePassengerReportEvidence,
+  uploadPassengerReportEvidence
+} from "./supabase-storage"
 
 export type ReportStatus =
   | "submitted"
@@ -18,15 +22,16 @@ export type ReportTypeRecord = {
 export type PassengerReportContext = {
   qrId: number
   qrToken: string
-  tricycleId: number
-  plateNo: string
+  driverId: number
+  driverCode: string
+  driverName: string
+  driverAvatarUrl?: string
+  tricycleId?: number
+  plateNo?: string
   todaId: number
   todaName: string
   barangayId: number
   barangayName: string
-  driverId?: number
-  driverCode?: string
-  driverName?: string
   tripId?: number
   tripStatus?: "scheduled" | "ongoing" | "completed" | "cancelled"
   tripStartedAt?: string
@@ -39,25 +44,28 @@ export type PassengerReportContext = {
 export type AdminReportRecord = {
   reportId: number
   scanId: number
-  tripId: number
-  tripStatus: "scheduled" | "ongoing" | "completed" | "cancelled"
+  tripId?: number
+  tripStatus?: "scheduled" | "ongoing" | "completed" | "cancelled"
   reportTypeId: number
   reportTypeCode: string
   reportTypeLabel: string
+  passengerName?: string
+  passengerContact?: string
   description: string
   reportedAt: string
   status: ReportStatus
   driverId: number
   driverCode: string
   driverName: string
-  tricycleId: number
-  plateNo: string
+  tricycleId?: number
+  plateNo?: string
   qrId: number
   todaId: number
   todaName: string
   barangayId: number
   barangayName: string
-  routeName: string
+  routeName?: string
+  mediaUrls?: string[]
   violationId?: number
   violationStatus?: "open" | "under_review" | "resolved" | "dismissed"
 }
@@ -66,7 +74,14 @@ export type CreatePassengerReportInput = {
   qrToken: string
   reportTypeCode: string
   description: string
+  passengerName?: string
+  passengerContact?: string
   deviceInfo?: Record<string, unknown>
+  evidenceImage?: {
+    dataUrl: string
+    mimeType: string
+    fileName?: string
+  }
 }
 
 type ReportTypeRow = {
@@ -78,16 +93,17 @@ type ReportTypeRow = {
 type PassengerReportContextRow = {
   qr_id: number
   qr_token: string
-  tricycle_id: number
-  plate_no: string
+  driver_id: number
+  driver_code: string
+  first_name: string
+  last_name: string
+  avatar_url: string | null
+  tricycle_id: number | null
+  plate_no: string | null
   toda_id: number
   toda_name: string
   barangay_id: number
   barangay_name: string
-  driver_id: number | null
-  driver_code: string | null
-  first_name: string | null
-  last_name: string | null
   trip_id: number | null
   trip_status: "scheduled" | "ongoing" | "completed" | "cancelled" | null
   trip_start: Date | null
@@ -98,11 +114,13 @@ type PassengerReportContextRow = {
 type AdminReportRow = {
   report_id: number
   scan_id: number
-  trip_id: number
-  trip_status: "scheduled" | "ongoing" | "completed" | "cancelled"
+  trip_id: number | null
+  trip_status: "scheduled" | "ongoing" | "completed" | "cancelled" | null
   report_type_id: number
   report_type_code: string
   report_type_label: string
+  passenger_name: string | null
+  passenger_contact: string | null
   description: string
   reported_at: Date
   report_status: ReportStatus
@@ -110,14 +128,15 @@ type AdminReportRow = {
   driver_code: string
   first_name: string
   last_name: string
-  tricycle_id: number
-  plate_no: string
+  tricycle_id: number | null
+  plate_no: string | null
   qr_id: number
   toda_id: number
   toda_name: string
   barangay_id: number
   barangay_name: string
-  route_name: string
+  route_name: string | null
+  media_urls: string[] | null
   violation_id: number | null
   violation_status: "open" | "under_review" | "resolved" | "dismissed" | null
 }
@@ -130,9 +149,9 @@ type ReportViolationSourceRow = {
   report_type_code: string
   description: string
   reported_at: Date
-  trip_id: number
+  trip_id: number | null
   driver_id: number
-  tricycle_id: number
+  tricycle_id: number | null
 }
 
 type ScopeClause = {
@@ -152,26 +171,29 @@ const PASSENGER_CONTEXT_SQL = `
   SELECT
     qr.qr_id,
     qr.qr_token,
+    d.driver_id,
+    d.driver_code,
+    d.first_name,
+    d.last_name,
+    d.avatar_url,
     tr.tricycle_id,
     tr.plate_no,
     td.toda_id,
     td.toda_name,
     b.barangay_id,
     b.barangay_name,
-    latest.driver_id,
-    latest.driver_code,
-    latest.first_name,
-    latest.last_name,
-    latest.trip_id,
-    latest.trip_status,
-    latest.trip_start,
-    latest.trip_end,
-    latest.route_name
+    recent_trip.trip_id,
+    recent_trip.trip_status,
+    recent_trip.trip_start,
+    recent_trip.trip_end,
+    recent_trip.route_name
   FROM public.qr_codes qr
-  JOIN public.tricycles tr
-    ON tr.tricycle_id = qr.tricycle_id
+  JOIN public.drivers d
+    ON d.driver_id = qr.driver_id
+  LEFT JOIN public.tricycles tr
+    ON tr.tricycle_id = COALESCE(qr.tricycle_id, d.tricycle_id)
   JOIN public.todas td
-    ON td.toda_id = tr.toda_id
+    ON td.toda_id = d.toda_id
   JOIN public.barangays b
     ON b.barangay_id = td.barangay_id
   LEFT JOIN LATERAL (
@@ -180,24 +202,18 @@ const PASSENGER_CONTEXT_SQL = `
       tp.trip_status,
       tp.trip_start,
       tp.trip_end,
-      d.driver_id,
-      d.driver_code,
-      d.first_name,
-      d.last_name,
       r.origin || ' -> ' || r.destination AS route_name
     FROM public.trips tp
-    JOIN public.drivers d
-      ON d.driver_id = tp.driver_id
-    JOIN public.routes r
+    LEFT JOIN public.routes r
       ON r.route_id = tp.route_id
-    WHERE tp.tricycle_id = tr.tricycle_id
+    WHERE tp.driver_id = d.driver_id
       AND (tp.trip_status = 'ongoing' OR tp.trip_end >= NOW() - INTERVAL '24 hours')
     ORDER BY
       CASE WHEN tp.trip_status = 'ongoing' THEN 0 ELSE 1 END,
       COALESCE(tp.trip_end, tp.trip_start) DESC,
       tp.trip_id DESC
     LIMIT 1
-  ) latest
+  ) recent_trip
     ON TRUE
   WHERE qr.qr_token = $1
     AND qr.status = 'active'
@@ -240,56 +256,53 @@ const mapReportType = (row: ReportTypeRow): ReportTypeRecord => ({
 const mapPassengerReportContext = (
   row: PassengerReportContextRow
 ): PassengerReportContext => {
-  const hasTrip = row.trip_id !== null
-  const driverName =
-    row.first_name && row.last_name ? `${row.first_name} ${row.last_name}` : undefined
-
   return {
     qrId: Number(row.qr_id),
     qrToken: row.qr_token,
-    tricycleId: Number(row.tricycle_id),
-    plateNo: row.plate_no,
+    driverId: Number(row.driver_id),
+    driverCode: row.driver_code,
+    driverName: `${row.first_name} ${row.last_name}`,
+    driverAvatarUrl: row.avatar_url ?? undefined,
+    tricycleId: row.tricycle_id === null ? undefined : Number(row.tricycle_id),
+    plateNo: row.plate_no ?? undefined,
     todaId: Number(row.toda_id),
     todaName: row.toda_name,
     barangayId: Number(row.barangay_id),
     barangayName: row.barangay_name,
-    driverId: row.driver_id === null ? undefined : Number(row.driver_id),
-    driverCode: row.driver_code ?? undefined,
-    driverName,
     tripId: row.trip_id === null ? undefined : Number(row.trip_id),
     tripStatus: row.trip_status ?? undefined,
     tripStartedAt: row.trip_start?.toISOString(),
     tripEndedAt: row.trip_end?.toISOString(),
     routeName: row.route_name ?? undefined,
-    reportingAvailable: hasTrip,
-    availabilityMessage: hasTrip
-      ? undefined
-      : "No ongoing or recent trip is currently linked to this QR code."
+    reportingAvailable: true
   }
 }
 
 const mapAdminReport = (row: AdminReportRow): AdminReportRecord => ({
   reportId: Number(row.report_id),
   scanId: Number(row.scan_id),
-  tripId: Number(row.trip_id),
-  tripStatus: row.trip_status,
+  tripId: row.trip_id === null ? undefined : Number(row.trip_id),
+  tripStatus: row.trip_status ?? undefined,
   reportTypeId: Number(row.report_type_id),
   reportTypeCode: row.report_type_code,
   reportTypeLabel: row.report_type_label,
+  passengerName: row.passenger_name ?? undefined,
+  passengerContact: row.passenger_contact ?? undefined,
   description: row.description,
   reportedAt: row.reported_at.toISOString(),
   status: row.report_status,
   driverId: Number(row.driver_id),
   driverCode: row.driver_code,
   driverName: `${row.first_name} ${row.last_name}`,
-  tricycleId: Number(row.tricycle_id),
-  plateNo: row.plate_no,
+  tricycleId: row.tricycle_id === null ? undefined : Number(row.tricycle_id),
+  plateNo: row.plate_no ?? undefined,
   qrId: Number(row.qr_id),
   todaId: Number(row.toda_id),
   todaName: row.toda_name,
   barangayId: Number(row.barangay_id),
   barangayName: row.barangay_name,
-  routeName: row.route_name,
+  routeName: row.route_name ?? undefined,
+  mediaUrls: row.media_urls ?? undefined,
   violationId: row.violation_id === null ? undefined : Number(row.violation_id),
   violationStatus: row.violation_status ?? undefined
 })
@@ -323,6 +336,8 @@ const queryAdminReports = async (
         rt.report_type_id,
         rt.code AS report_type_code,
         rt.label AS report_type_label,
+        r.passenger_name,
+        r.passenger_contact,
         r.description,
         r.reported_at,
         r.status AS report_status,
@@ -338,27 +353,35 @@ const queryAdminReports = async (
         b.barangay_id,
         b.barangay_name,
         ro.origin || ' -> ' || ro.destination AS route_name,
+        media.media_urls,
         v.violation_id,
         v.status AS violation_status
       FROM public.reports r
       JOIN public.report_types rt
         ON rt.report_type_id = r.report_type_id
-      JOIN public.trips tp
+      LEFT JOIN public.trips tp
         ON tp.trip_id = r.trip_id
       JOIN public.drivers d
-        ON d.driver_id = tp.driver_id
-      JOIN public.tricycles tr
-        ON tr.tricycle_id = tp.tricycle_id
-      JOIN public.routes ro
+        ON d.driver_id = r.driver_id
+      JOIN public.qr_codes qr
+        ON qr.qr_id = r.qr_id
+      LEFT JOIN public.tricycles tr
+        ON tr.tricycle_id = COALESCE(tp.tricycle_id, qr.tricycle_id, d.tricycle_id)
+      LEFT JOIN public.routes ro
         ON ro.route_id = tp.route_id
+      LEFT JOIN LATERAL (
+        SELECT ARRAY_AGG(rm.file_url ORDER BY rm.media_id ASC) AS media_urls
+        FROM public.report_media rm
+        WHERE rm.report_id = r.report_id
+          AND rm.media_type = 'image'
+      ) media
+        ON TRUE
       JOIN public.todas td
         ON td.toda_id = d.toda_id
       JOIN public.barangays b
         ON b.barangay_id = td.barangay_id
       JOIN public.passenger_scans ps
         ON ps.scan_id = r.scan_id
-      JOIN public.qr_codes qr
-        ON qr.qr_id = ps.qr_id
       LEFT JOIN public.violations v
         ON v.report_id = r.report_id
       ${scope.clause ? `${scope.clause}\n        AND` : "WHERE"} 1 = 1
@@ -386,6 +409,8 @@ const queryAdminReportByIdForTransaction = async (
         rt.report_type_id,
         rt.code AS report_type_code,
         rt.label AS report_type_label,
+        r.passenger_name,
+        r.passenger_contact,
         r.description,
         r.reported_at,
         r.status AS report_status,
@@ -401,27 +426,35 @@ const queryAdminReportByIdForTransaction = async (
         b.barangay_id,
         b.barangay_name,
         ro.origin || ' -> ' || ro.destination AS route_name,
+        media.media_urls,
         v.violation_id,
         v.status AS violation_status
       FROM public.reports r
       JOIN public.report_types rt
         ON rt.report_type_id = r.report_type_id
-      JOIN public.trips tp
+      LEFT JOIN public.trips tp
         ON tp.trip_id = r.trip_id
       JOIN public.drivers d
-        ON d.driver_id = tp.driver_id
-      JOIN public.tricycles tr
-        ON tr.tricycle_id = tp.tricycle_id
-      JOIN public.routes ro
+        ON d.driver_id = r.driver_id
+      JOIN public.qr_codes qr
+        ON qr.qr_id = r.qr_id
+      LEFT JOIN public.tricycles tr
+        ON tr.tricycle_id = COALESCE(tp.tricycle_id, qr.tricycle_id, d.tricycle_id)
+      LEFT JOIN public.routes ro
         ON ro.route_id = tp.route_id
+      LEFT JOIN LATERAL (
+        SELECT ARRAY_AGG(rm.file_url ORDER BY rm.media_id ASC) AS media_urls
+        FROM public.report_media rm
+        WHERE rm.report_id = r.report_id
+          AND rm.media_type = 'image'
+      ) media
+        ON TRUE
       JOIN public.todas td
         ON td.toda_id = d.toda_id
       JOIN public.barangays b
         ON b.barangay_id = td.barangay_id
       JOIN public.passenger_scans ps
         ON ps.scan_id = r.scan_id
-      JOIN public.qr_codes qr
-        ON qr.qr_id = ps.qr_id
       LEFT JOIN public.violations v
         ON v.report_id = r.report_id
       WHERE r.report_id = $1
@@ -459,14 +492,20 @@ const syncViolationForReportStatus = async (
           rt.code AS report_type_code,
           r.description,
           r.reported_at,
-          r.trip_id,
-          tp.driver_id,
-          tp.tricycle_id
+          r.driver_id,
+          COALESCE(r.trip_id, ps.trip_id) AS trip_id,
+          COALESCE(tp.tricycle_id, qr.tricycle_id, d.tricycle_id) AS tricycle_id
         FROM public.reports r
         JOIN public.report_types rt
           ON rt.report_type_id = r.report_type_id
-        JOIN public.trips tp
+        LEFT JOIN public.trips tp
           ON tp.trip_id = r.trip_id
+        JOIN public.passenger_scans ps
+          ON ps.scan_id = r.scan_id
+        JOIN public.qr_codes qr
+          ON qr.qr_id = r.qr_id
+        JOIN public.drivers d
+          ON d.driver_id = r.driver_id
         WHERE r.report_id = $1
         LIMIT 1
       `,
@@ -596,79 +635,122 @@ export const getPassengerReportContextByQrToken = async (qrToken: string) => {
 export const createPassengerReport = async (input: CreatePassengerReportInput) => {
   await ensureDatabaseReady()
 
-  return withTransaction(async (client) => {
-    const contextRow = await queryPassengerReportContext(input.qrToken, client)
-    if (!contextRow) {
-      throw new Error("This QR code is invalid, inactive, or expired.")
-    }
+  let uploadedEvidencePath: string | null = null
 
-    const context = mapPassengerReportContext(contextRow)
-    if (!context.reportingAvailable || !context.tripId) {
-      throw new Error(
-        context.availabilityMessage ??
-          "This QR code does not have an ongoing or recent trip available for reporting."
+  try {
+    return await withTransaction(async (client) => {
+      const contextRow = await queryPassengerReportContext(input.qrToken, client)
+      if (!contextRow) {
+        throw new Error("This QR code is invalid, inactive, or expired.")
+      }
+
+      const context = mapPassengerReportContext(contextRow)
+
+      const reportTypeResult = await client.query<ReportTypeLookupRow>(
+        `
+          SELECT report_type_id
+          FROM public.report_types
+          WHERE code = $1
+          LIMIT 1
+        `,
+        [input.reportTypeCode]
       )
-    }
 
-    const reportTypeResult = await client.query<ReportTypeLookupRow>(
-      `
-        SELECT report_type_id
-        FROM public.report_types
-        WHERE code = $1
-        LIMIT 1
-      `,
-      [input.reportTypeCode]
-    )
+      const reportTypeId = reportTypeResult.rows[0]?.report_type_id
+      if (!reportTypeId) {
+        throw new Error("Selected report category is invalid.")
+      }
 
-    const reportTypeId = reportTypeResult.rows[0]?.report_type_id
-    if (!reportTypeId) {
-      throw new Error("Selected report category is invalid.")
-    }
+      const scanResult = await client.query<{ scan_id: number }>(
+        `
+          INSERT INTO public.passenger_scans (
+            trip_id,
+            driver_id,
+            qr_id,
+            device_info
+          )
+          VALUES ($1, $2, $3, $4)
+          RETURNING scan_id
+        `,
+        [context.tripId ?? null, context.driverId, context.qrId, input.deviceInfo ?? {}]
+      )
 
-    const scanResult = await client.query<{ scan_id: number }>(
-      `
-        INSERT INTO public.passenger_scans (
-          trip_id,
-          qr_id,
-          device_info
+      const scanId = scanResult.rows[0]?.scan_id
+      if (!scanId) {
+        throw new Error("Unable to save passenger scan context.")
+      }
+
+      const reportResult = await client.query<{ report_id: number }>(
+        `
+          INSERT INTO public.reports (
+            scan_id,
+            trip_id,
+            driver_id,
+            qr_id,
+            report_type_id,
+            source,
+            passenger_name,
+            passenger_contact,
+            description
+          )
+          VALUES ($1, $2, $3, $4, $5, 'qr_web_form', $6, $7, $8)
+          RETURNING report_id
+        `,
+        [
+          scanId,
+          context.tripId ?? null,
+          context.driverId,
+          context.qrId,
+          reportTypeId,
+          input.passengerName ?? null,
+          input.passengerContact ?? null,
+          input.description
+        ]
+      )
+
+      const reportId = reportResult.rows[0]?.report_id
+      if (!reportId) {
+        throw new Error("Unable to save passenger report.")
+      }
+
+      if (input.evidenceImage) {
+        const uploadedEvidence = await uploadPassengerReportEvidence({
+          reportId,
+          driverId: context.driverId,
+          mimeType: input.evidenceImage.mimeType,
+          dataUrl: input.evidenceImage.dataUrl,
+          fileName: input.evidenceImage.fileName
+        })
+
+        uploadedEvidencePath = uploadedEvidence.objectPath
+
+        await client.query(
+          `
+            INSERT INTO public.report_media (
+              report_id,
+              media_type,
+              file_url
+            )
+            VALUES ($1, 'image', $2)
+          `,
+          [reportId, uploadedEvidence.publicUrl]
         )
-        VALUES ($1, $2, $3)
-        RETURNING scan_id
-      `,
-      [context.tripId, context.qrId, input.deviceInfo ?? {}]
-    )
+      }
 
-    const scanId = scanResult.rows[0]?.scan_id
-    if (!scanId) {
-      throw new Error("Unable to save passenger scan context.")
+      const created = await queryAdminReportByIdForTransaction(client, reportId)
+      if (!created) {
+        throw new Error("Saved report could not be reloaded.")
+      }
+
+      return created
+    })
+  } catch (error) {
+    if (uploadedEvidencePath) {
+      await deletePassengerReportEvidence(uploadedEvidencePath).catch(() => null)
     }
 
-    const reportResult = await client.query<{ report_id: number }>(
-      `
-        INSERT INTO public.reports (
-          scan_id,
-          trip_id,
-          report_type_id,
-          description
-        )
-        VALUES ($1, $2, $3, $4)
-        RETURNING report_id
-      `,
-      [scanId, context.tripId, reportTypeId, input.description]
-    )
-
-    const reportId = reportResult.rows[0]?.report_id
-    if (!reportId) {
-      throw new Error("Unable to save passenger report.")
-    }
-
-    const created = await queryAdminReportByIdForTransaction(client, reportId)
-    if (!created) {
-      throw new Error("Saved report could not be reloaded.")
-    }
-
-    return created
-  })
+    throw error
+  }
 }
 
 export const listReportsForAdmin = async (profile: AdminProfile) => {

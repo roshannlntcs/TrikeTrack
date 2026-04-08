@@ -1,4 +1,4 @@
-import type { TripPointEvent } from "../../../../common/types"
+import type { TripPointEvent } from "./operational-types"
 import { ensureDatabaseReady, query } from "./database"
 import { resolveDriverIdFromIdentifier } from "./driver-identifier-db"
 

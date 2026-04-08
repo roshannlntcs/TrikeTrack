@@ -237,17 +237,14 @@ const parseCreateDriver = (payload: Record<string, unknown>): CreateDriverInput 
   const todaId = asPositiveInteger(payload.todaId)
   const tricycleId =
     payload.tricycleId === undefined ? undefined : asPositiveInteger(payload.tricycleId)
-  const qrId = payload.qrId === undefined ? undefined : asPositiveInteger(payload.qrId)
   const firstName = asNonEmptyString(payload.firstName)
   const lastName = asNonEmptyString(payload.lastName)
   const contactNo = asOptionalString(payload.contactNo)
   if (!todaId || !firstName || !lastName || contactNo === null) return null
   if (payload.tricycleId !== undefined && !tricycleId) return null
-  if (payload.qrId !== undefined && !qrId) return null
   return {
     todaId,
     tricycleId: tricycleId ?? undefined,
-    qrId: qrId ?? undefined,
     firstName,
     lastName,
     contactNo: contactNo || undefined
@@ -265,11 +262,6 @@ const parseUpdateDriver = (payload: Record<string, unknown>): UpdateDriverInput 
     const tricycleId = asOptionalPositiveInteger(payload.tricycleId)
     if (tricycleId === undefined) return null
     next.tricycleId = tricycleId
-  }
-  if ("qrId" in payload) {
-    const qrId = asOptionalPositiveInteger(payload.qrId)
-    if (qrId === undefined) return null
-    next.qrId = qrId
   }
   if ("firstName" in payload) {
     const firstName = asNonEmptyString(payload.firstName)
@@ -290,6 +282,10 @@ const parseUpdateDriver = (payload: Record<string, unknown>): UpdateDriverInput 
     const status = asEntityStatus(payload.status)
     if (!status) return null
     next.status = status
+  }
+  if ("regenerateQr" in payload) {
+    if (typeof payload.regenerateQr !== "boolean") return null
+    next.regenerateQr = payload.regenerateQr
   }
   return Object.keys(next).length > 0 ? next : null
 }
