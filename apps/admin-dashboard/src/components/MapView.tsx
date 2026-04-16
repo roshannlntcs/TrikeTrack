@@ -190,13 +190,6 @@ export default function MapView() {
           (feature: any) => feature.geometry?.type === "LineString"
         ) ?? turf.polygonToLine(geofencePolygon as any)
 
-      const geofencePoints = {
-        type: "FeatureCollection",
-        features: ((geofence as any).features ?? []).filter(
-          (feature: any) => feature.geometry?.type === "Point"
-        )
-      }
-
       map.addSource("area-geofence", {
         type: "geojson",
         data: geofencePolygon as any
@@ -235,24 +228,6 @@ export default function MapView() {
           "line-opacity": 0.95
         }
       })
-
-      if (geofencePoints.features.length > 0) {
-        map.addSource("geofence-points", {
-          type: "geojson",
-          data: geofencePoints as any
-        })
-        map.addLayer({
-          id: "geofence-points-layer",
-          type: "circle",
-          source: "geofence-points",
-          paint: {
-            "circle-color": "#ef4444",
-            "circle-radius": 6,
-            "circle-stroke-width": 2,
-            "circle-stroke-color": "#ffffff"
-          }
-        })
-      }
 
       const updateMarker = async (event: DriverLocationEvent) => {
         lastSeenByDriver.set(event.driverId, event.ts)

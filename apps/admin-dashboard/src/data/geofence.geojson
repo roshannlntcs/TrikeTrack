@@ -11,15 +11,15 @@
         "type": "Polygon",
         "coordinates": [
           [
-            [125.6242034, 7.0832297],
-            [125.6172481, 7.0769755],
-            [125.6142794, 7.0790363],
-            [125.61345, 7.0817],
-            [125.6126754, 7.0835656],
-            [125.6121403, 7.0849408],
-            [125.6128229, 7.0868171],
-            [125.6176972, 7.090956],
-            [125.6242034, 7.0832297]
+            [125.624803, 7.0832297],
+            [125.617071, 7.076611],
+            [125.6140047, 7.078821],
+            [125.612905, 7.0817],
+            [125.612594, 7.0835656],
+            [125.611754, 7.0849408],
+            [125.613004, 7.0868171],
+            [125.6177977, 7.09187],
+            [125.624803, 7.0832297]
           ]
         ]
       }
@@ -33,15 +33,15 @@
       "geometry": {
         "type": "LineString",
         "coordinates": [
-          [125.6242034, 7.0832297],
-          [125.6172481, 7.0769755],
-          [125.6142794, 7.0790363],
-          [125.61345, 7.0817],
-          [125.6126754, 7.0835656],
-          [125.6121403, 7.0849408],
-          [125.6128229, 7.0868171],
-          [125.6176972, 7.090956],
-          [125.6242034, 7.0832297]
+          [125.624803, 7.0832297],
+          [125.617071, 7.076611],
+          [125.6140047, 7.078821],
+          [125.612905, 7.0817],
+          [125.612594, 7.0835656],
+          [125.611754, 7.0849408],
+          [125.613004, 7.0868171],
+          [125.6177977, 7.09187],
+          [125.624803, 7.0832297]
         ]
       }
     },
@@ -51,7 +51,7 @@
         "pointNumber": 1,
         "name": "AUB Dacudao Avenue"
       },
-      "geometry": { "type": "Point", "coordinates": [125.6242034, 7.0832297] }
+      "geometry": { "type": "Point", "coordinates": [125.624803, 7.0832297] }
     },
     {
       "type": "Feature",
@@ -59,7 +59,7 @@
         "pointNumber": 2,
         "name": "Sta. Ana Shrine Parish Church"
       },
-      "geometry": { "type": "Point", "coordinates": [125.6172481, 7.0769755] }
+      "geometry": { "type": "Point", "coordinates": [125.617071, 7.076611] }
     },
     {
       "type": "Feature",
@@ -67,7 +67,7 @@
         "pointNumber": 3,
         "name": "De Guzman Street (Starbucks GMall Davao)"
       },
-      "geometry": { "type": "Point", "coordinates": [125.6142794, 7.0790363] }
+      "geometry": { "type": "Point", "coordinates": [125.6140047, 7.078821] }
     },
     {
       "type": "Feature",
@@ -75,7 +75,7 @@
         "pointNumber": 4,
         "name": "Umasi Corp (Polo Street)"
       },
-      "geometry": { "type": "Point", "coordinates": [125.61345, 7.0817] }
+      "geometry": { "type": "Point", "coordinates": [125.612905, 7.0817] }
     },
     {
       "type": "Feature",
@@ -83,7 +83,7 @@
         "pointNumber": 5,
         "name": "Bajada Suites (Inigo Street)"
       },
-      "geometry": { "type": "Point", "coordinates": [125.6126754, 7.0835656] }
+      "geometry": { "type": "Point", "coordinates": [125.612594, 7.0835656] }
     },
     {
       "type": "Feature",
@@ -91,7 +91,7 @@
         "pointNumber": 6,
         "name": "McDonald's Bajada (Lacson Street)"
       },
-      "geometry": { "type": "Point", "coordinates": [125.6121403, 7.0849408] }
+      "geometry": { "type": "Point", "coordinates": [125.611754, 7.0849408] }
     },
     {
       "type": "Feature",
@@ -99,7 +99,7 @@
         "pointNumber": 7,
         "name": "Health Center Brgy. 20-B (Veloso Street)"
       },
-      "geometry": { "type": "Point", "coordinates": [125.6128229, 7.0868171] }
+      "geometry": { "type": "Point", "coordinates": [125.613004, 7.0868171] }
     },
     {
       "type": "Feature",
@@ -107,7 +107,7 @@
         "pointNumber": 8,
         "name": "Chick N' Roll (Veloso St. cor Dacudao Ave.)"
       },
-      "geometry": { "type": "Point", "coordinates": [125.6176972, 7.090956] }
+      "geometry": { "type": "Point", "coordinates": [125.6177977, 7.091870] }
     }
   ]
 }

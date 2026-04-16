@@ -166,6 +166,18 @@ const formatDateTime = (value?: string) => (value ? new Date(value).toLocaleStri
 const formatTripStatus = (value: DashboardTripRecord["tripStatus"]) =>
   value.charAt(0).toUpperCase() + value.slice(1)
 
+const hasViolationCoordinates = (
+  alert: Pick<ViolationAlertDetails, "lat" | "lng">
+): alert is Pick<ViolationAlertDetails, "lat" | "lng"> & { lat: number; lng: number } =>
+  typeof alert.lat === "number" &&
+  Number.isFinite(alert.lat) &&
+  typeof alert.lng === "number" &&
+  Number.isFinite(alert.lng)
+
+const formatViolationCoordinates = (
+  alert: Pick<ViolationAlertDetails, "lat" | "lng">
+) => (hasViolationCoordinates(alert) ? `${alert.lat.toFixed(6)}, ${alert.lng.toFixed(6)}` : undefined)
+
 type AdminShellProps = {
   onLogout: () => void
   adminProfile: AdminProfile
@@ -245,6 +257,26 @@ type AlertListItem = {
   reason: string
   description?: string
   status?: string
+  lat?: number
+  lng?: number
+}
+
+type ViolationAlertDetails = {
+  key: string
+  source: "live_geofence" | DashboardViolationRecord["alertSource"]
+  driverId?: number
+  driverCode?: string
+  driverName?: string
+  profileImageUrl?: string
+  plateNo?: string
+  tricycleNo?: string
+  tricycleId?: number
+  tripId?: string | number
+  routeName?: string
+  violationType: string
+  timestamp: string
+  locationLabel?: string
+  description?: string
   lat?: number
   lng?: number
 }
@@ -446,6 +478,7 @@ export default function AdminShell({
   const contentEl = useRef<HTMLElement | null>(null)
   const mapHeaderEl = useRef<HTMLDivElement | null>(null)
   const geofenceBoundsRef = useRef<[[number, number], [number, number]] | null>(null)
+  const violationFocusMarkerRef = useRef<maplibregl.Marker | null>(null)
   const [activePage, setActivePage] = useState<NavKey>(
     adminProfile.role === "superadmin"
       ? "superadmin"
@@ -481,14 +514,98 @@ export default function AdminShell({
     useState<DashboardEmergencyRecord | null>(null)
   const [emergencyQueue, setEmergencyQueue] = useState<DashboardEmergencyRecord[]>([])
   const [emergencyActionBusyId, setEmergencyActionBusyId] = useState<number | null>(null)
+  const [activeViolationAlert, setActiveViolationAlert] =
+    useState<ViolationAlertDetails | null>(null)
+  const [violationAlertQueue, setViolationAlertQueue] = useState<ViolationAlertDetails[]>([])
+  const dashboardDataRef = useRef<DashboardDataSnapshot | null>(null)
   const visibleDriverIdentifiersRef = useRef<Set<string>>(new Set())
   const dashboardDriversRef = useRef<DashboardDriverRecord[]>([])
+  const seenStoredViolationKeysRef = useRef<Set<string> | null>(null)
+  const driverInsideStateRef = useRef<Record<string, boolean>>({})
   const refreshLiveLocationsRef = useRef<(() => void) | null>(null)
   const notificationPanelRef = useRef<HTMLDivElement | null>(null)
   const trimmedSearchQuery = searchQuery.trim()
   const normalizedSearchQuery = trimmedSearchQuery.toLowerCase()
   const hasSearchQuery = normalizedSearchQuery.length > 0
   const showLiveMapView = activePage === "home" || activePage === "live-map"
+
+  const getDashboardDriverByIdentifier = (driverIdentifier: string | number) => {
+    const normalizedIdentifier = String(driverIdentifier).trim().toUpperCase()
+    return dashboardDataRef.current?.drivers.find((driver) => {
+      return (
+        String(driver.driverId) === String(driverIdentifier) ||
+        driver.driverCode.trim().toUpperCase() === normalizedIdentifier
+      )
+    })
+  }
+
+  const getDashboardTripForViolation = (
+    driverId?: number,
+    tripId?: string | number
+  ) => {
+    const trips = dashboardDataRef.current?.recentTrips ?? []
+    if (tripId !== undefined) {
+      const normalizedTripId = String(tripId).replace(/^TRIP-/i, "")
+      const byTripId = trips.find((trip) => String(trip.tripId) === normalizedTripId)
+      if (byTripId) return byTripId
+    }
+
+    if (driverId === undefined) return undefined
+    return trips.find((trip) => trip.driverId === driverId && trip.tripStatus === "ongoing")
+  }
+
+  const queueViolationAlert = (alert: ViolationAlertDetails) => {
+    setActiveViolationAlert((current) => {
+      if (!current) return alert
+      if (current.key === alert.key) return current
+      setViolationAlertQueue((queue) =>
+        queue.some((item) => item.key === alert.key) ? queue : [...queue, alert]
+      )
+      return current
+    })
+  }
+
+  const closeViolationAlert = () => {
+    setActiveViolationAlert(null)
+    setViolationAlertQueue((queue) => {
+      const [next, ...rest] = queue
+      if (next) {
+        window.setTimeout(() => setActiveViolationAlert(next), 0)
+      }
+      return rest
+    })
+  }
+
+  const focusViolationOnMap = (alert: ViolationAlertDetails) => {
+    if (!hasViolationCoordinates(alert)) return
+    setActivePage("live-map")
+    closeViolationAlert()
+
+    window.setTimeout(() => {
+      const map = mapRef.current
+      if (!map || !hasViolationCoordinates(alert)) return
+
+      map.resize()
+      map.flyTo({
+        center: [alert.lng, alert.lat],
+        zoom: Math.max(map.getZoom(), 16),
+        essential: true
+      })
+
+      violationFocusMarkerRef.current?.remove()
+      const markerEl = document.createElement("div")
+      markerEl.className = "violation-map-focus-marker"
+      markerEl.setAttribute("aria-label", "Violation location")
+      violationFocusMarkerRef.current = new maplibregl.Marker({ element: markerEl })
+        .setLngLat([alert.lng, alert.lat])
+        .setPopup(
+          new maplibregl.Popup({ offset: 16 }).setText(
+            `${alert.violationType} | ${alert.driverName ?? alert.driverCode ?? "Unknown driver"}`
+          )
+        )
+        .addTo(map)
+    }, 80)
+  }
 
   const refreshDashboardData = async () => {
     try {
@@ -537,6 +654,10 @@ export default function AdminShell({
   useEffect(() => {
     driversByIdRef.current = driversById
   }, [driversById])
+
+  useEffect(() => {
+    dashboardDataRef.current = dashboardData
+  }, [dashboardData])
 
   useEffect(() => {
     dashboardDriversRef.current = dashboardData?.drivers ?? []
@@ -902,13 +1023,6 @@ export default function AdminShell({
           (feature: any) => feature.geometry?.type === "LineString"
         ) ?? turf.polygonToLine(geofencePolygon as any)
 
-      const geofencePoints = {
-        type: "FeatureCollection",
-        features: ((geofence as any).features ?? []).filter(
-          (feature: any) => feature.geometry?.type === "Point"
-        )
-      }
-
       const geofenceBounds = getGeofenceBounds(geofencePolygon)
       geofenceBoundsRef.current = geofenceBounds
       map.fitBounds(geofenceBounds, {
@@ -956,58 +1070,6 @@ export default function AdminShell({
         }
       })
 
-      if (geofencePoints.features.length > 0) {
-        map.addSource("geofence-points", {
-          type: "geojson",
-          data: geofencePoints as any
-        })
-        map.addLayer({
-          id: "geofence-points-layer",
-          type: "circle",
-          source: "geofence-points",
-          paint: {
-            "circle-color": "#ef4444",
-            "circle-radius": 6,
-            "circle-stroke-width": 2,
-            "circle-stroke-color": "#ffffff"
-          }
-        })
-        map.addLayer({
-          id: "geofence-points-labels",
-          type: "symbol",
-          source: "geofence-points",
-          layout: {
-            "text-field": ["to-string", ["coalesce", ["get", "pointNumber"], ""]],
-            "text-size": 11,
-            "text-anchor": "top",
-            "text-offset": [0, 1.2]
-          },
-          paint: {
-            "text-color": "#991b1b",
-            "text-halo-color": "#ffffff",
-            "text-halo-width": 1.2
-          }
-        })
-
-        map.on("click", "geofence-points-layer", (event) => {
-          const feature = event.features?.[0]
-          if (!feature || feature.geometry.type !== "Point") return
-          const coords = feature.geometry.coordinates as [number, number]
-          const props = feature.properties as Record<string, unknown> | undefined
-          const title = String(props?.name ?? "Boundary Point")
-          const number = String(props?.pointNumber ?? "")
-          const label = number ? `Point ${number}: ${title}` : title
-          new maplibregl.Popup({ offset: 10 }).setLngLat(coords).setText(label).addTo(map)
-        })
-
-        map.on("mouseenter", "geofence-points-layer", () => {
-          map.getCanvas().style.cursor = "pointer"
-        })
-        map.on("mouseleave", "geofence-points-layer", () => {
-          map.getCanvas().style.cursor = ""
-        })
-      }
-
       const updateMarker = (event: DriverLocationEvent, inside: boolean) => {
         const existing = markers.get(event.driverId)
         if (existing) {
@@ -1037,8 +1099,47 @@ export default function AdminShell({
           turf.point([event.lng, event.lat]),
           geofencePolygon as any
         )
+        const driver = getDashboardDriverByIdentifier(event.driverId)
+        const operationalState =
+          driver && dashboardDataRef.current?.operationalDrivers.find(
+            (item) => item.driverId === driver.driverId
+          )
+        const trip = getDashboardTripForViolation(
+          driver?.driverId,
+          event.tripId ?? operationalState?.activeTripId
+        )
+        const activeTripId = event.tripId ?? operationalState?.activeTripId ?? trip?.tripId
+        const hasActiveTrip =
+          activeTripId !== undefined ||
+          operationalState?.operationalStatus === "on_trip" ||
+          trip?.tripStatus === "ongoing"
         updateMarker(event, inside)
-        upsertDriverState(event, !inside)
+        upsertDriverState(event, !inside && hasActiveTrip)
+
+        const previousInside = driverInsideStateRef.current[event.driverId]
+        driverInsideStateRef.current[event.driverId] = inside
+        if (inside || previousInside === false || !hasActiveTrip) return
+
+        const timestamp = new Date(event.ts).toISOString()
+        queueViolationAlert({
+          key: `live-geofence-${event.driverId}-${createPointSignature(event)}`,
+          source: "live_geofence",
+          driverId: driver?.driverId,
+          driverCode: driver?.driverCode ?? event.driverId,
+          driverName: driver ? `${driver.firstName} ${driver.lastName}` : undefined,
+          profileImageUrl: driver?.avatarUrl,
+          plateNo: driver?.tricycleNo ?? operationalState?.plateNo ?? trip?.plateNo,
+          tricycleNo: driver?.tricycleNo ?? operationalState?.plateNo ?? trip?.plateNo,
+          tricycleId: driver?.tricycleId ?? operationalState?.tricycleId ?? trip?.tricycleId,
+          tripId: activeTripId,
+          routeName: trip?.routeName ?? operationalState?.activeRouteName,
+          violationType: "Geofence Deviation",
+          timestamp,
+          locationLabel: formatViolationCoordinates({ lat: event.lat, lng: event.lng }),
+          description: "Driver went outside the active geofence boundary.",
+          lat: event.lat,
+          lng: event.lng
+        })
       }
 
       const toLocationEventFromRow = (
@@ -1279,6 +1380,8 @@ export default function AdminShell({
       for (const marker of markers.values()) {
         marker.remove()
       }
+      violationFocusMarkerRef.current?.remove()
+      violationFocusMarkerRef.current = null
       map.remove()
       mapRef.current = null
       geofenceBoundsRef.current = null
@@ -1516,6 +1619,74 @@ export default function AdminShell({
   }, [dashboardData?.recentEmergencies, activeEmergencyModal])
 
   useEffect(() => {
+    const violations = dashboardData?.recentViolations ?? []
+    const nextSeenKeys = new Set(
+      violations.map((item) => `${item.alertSource}:${item.violationId}`)
+    )
+
+    if (seenStoredViolationKeysRef.current === null) {
+      seenStoredViolationKeysRef.current = nextSeenKeys
+      return
+    }
+
+    const newViolations = violations
+      .filter((item) => {
+        const key = `${item.alertSource}:${item.violationId}`
+        return !seenStoredViolationKeysRef.current?.has(key)
+      })
+      .sort(
+        (a, b) =>
+          new Date(a.detectedAt).getTime() - new Date(b.detectedAt).getTime()
+      )
+
+    seenStoredViolationKeysRef.current = nextSeenKeys
+
+    for (const violation of newViolations) {
+      if (violation.status !== "open" && violation.status !== "under_review") continue
+
+      const driver = violation.driverId
+        ? dashboardData?.drivers.find((item) => item.driverId === violation.driverId)
+        : undefined
+      const operationalState = violation.driverId
+        ? dashboardData?.operationalDrivers.find((item) => item.driverId === violation.driverId)
+        : undefined
+      const trip = getDashboardTripForViolation(violation.driverId, violation.tripId)
+      const activeTripId = violation.tripId ?? operationalState?.activeTripId ?? trip?.tripId
+      const hasActiveTrip =
+        activeTripId !== undefined ||
+        operationalState?.operationalStatus === "on_trip" ||
+        trip?.tripStatus === "ongoing"
+      if (!hasActiveTrip) continue
+
+      const lat = violation.latitude ?? operationalState?.latitude
+      const lng = violation.longitude ?? operationalState?.longitude
+      const coordinates = formatViolationCoordinates({ lat, lng })
+
+      queueViolationAlert({
+        key: `stored-${violation.alertSource}-${violation.violationId}`,
+        source: violation.alertSource,
+        driverId: violation.driverId,
+        driverCode: violation.driverCode ?? driver?.driverCode,
+        driverName:
+          violation.driverName ??
+          (driver ? `${driver.firstName} ${driver.lastName}` : undefined),
+        profileImageUrl: driver?.avatarUrl,
+        plateNo: violation.plateNo ?? driver?.tricycleNo ?? trip?.plateNo,
+        tricycleNo: violation.plateNo ?? driver?.tricycleNo ?? trip?.plateNo,
+        tricycleId: violation.tricycleId ?? driver?.tricycleId ?? trip?.tricycleId,
+        tripId: activeTripId,
+        routeName: violation.routeName ?? trip?.routeName ?? operationalState?.activeRouteName,
+        violationType: violation.violationTypeLabel,
+        timestamp: violation.detectedAt,
+        locationLabel: violation.locationLabel ?? coordinates,
+        description: violation.description,
+        lat,
+        lng
+      })
+    }
+  }, [dashboardData?.recentViolations, dashboardData?.drivers, dashboardData?.operationalDrivers, dashboardData?.recentTrips])
+
+  useEffect(() => {
     const closeStream = connectAdminEmergencyStream(accessToken, {
       onSnapshot: (items) => {
         const pending = items
@@ -1745,6 +1916,21 @@ export default function AdminShell({
   const closeDriverModal = () => {
     setSelectedDriverId(null)
   }
+
+  const activeViolationCoordinates = activeViolationAlert
+    ? formatViolationCoordinates(activeViolationAlert)
+    : undefined
+  const activeViolationDriverLabel =
+    activeViolationAlert?.driverName ??
+    activeViolationAlert?.driverCode ??
+    "Unknown driver"
+  const activeViolationInitials =
+    activeViolationDriverLabel
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part.charAt(0).toUpperCase())
+      .join("") || "D"
 
   return (
     <div className="admin-shell">
@@ -2691,6 +2877,132 @@ export default function AdminShell({
             </section>
           )}
         </main>
+        {activeViolationAlert && (
+          <div
+            className="violation-modal-backdrop"
+            role="presentation"
+            onClick={closeViolationAlert}
+          >
+            <section
+              className="violation-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="admin-violation-modal-title"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="violation-modal__header">
+                <div className="violation-modal__title-row">
+                  <div className="violation-modal__badge" aria-hidden="true">!</div>
+                  <div>
+                    <h2 id="admin-violation-modal-title">Violation Alert</h2>
+                    <p>New driver violation detected</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="violation-modal__close"
+                  onClick={closeViolationAlert}
+                  aria-label="Dismiss violation alert"
+                >
+                  Close
+                </button>
+              </div>
+
+              {violationAlertQueue.length > 0 && (
+                <div className="violation-modal__queue">
+                  {violationAlertQueue.length} more violation
+                  {violationAlertQueue.length === 1 ? " is" : "s are"} waiting.
+                </div>
+              )}
+
+              <div className="violation-modal__driver">
+                <div className="violation-modal__avatar" aria-hidden="true">
+                  {activeViolationAlert.profileImageUrl ? (
+                    <img src={activeViolationAlert.profileImageUrl} alt="" />
+                  ) : (
+                    activeViolationInitials
+                  )}
+                </div>
+                <div>
+                  <strong>{activeViolationDriverLabel}</strong>
+                  <span>{activeViolationAlert.driverCode ?? "No driver code"}</span>
+                </div>
+              </div>
+
+              <div className="violation-modal__details">
+                <div>
+                  <span>Plate Number</span>
+                  <strong>{activeViolationAlert.plateNo ?? "Not available"}</strong>
+                </div>
+                <div>
+                  <span>Tricycle Number</span>
+                  <strong>
+                    {activeViolationAlert.tricycleNo ??
+                      (activeViolationAlert.tricycleId
+                        ? `Tricycle #${activeViolationAlert.tricycleId}`
+                        : "Not available")}
+                  </strong>
+                </div>
+                <div>
+                  <span>Trip ID</span>
+                  <strong>
+                    {activeViolationAlert.tripId
+                      ? `TRIP-${String(activeViolationAlert.tripId).replace(/^TRIP-/i, "")}`
+                      : "No active trip"}
+                  </strong>
+                </div>
+                <div>
+                  <span>Violation Type</span>
+                  <strong>{activeViolationAlert.violationType}</strong>
+                </div>
+                <div>
+                  <span>Timestamp</span>
+                  <strong>{formatDateTime(activeViolationAlert.timestamp)}</strong>
+                </div>
+                <div>
+                  <span>Current Location</span>
+                  <strong>
+                    {activeViolationAlert.locationLabel ??
+                      activeViolationCoordinates ??
+                      "Location not available"}
+                  </strong>
+                </div>
+                <div>
+                  <span>Coordinates</span>
+                  <strong>{activeViolationCoordinates ?? "Not available"}</strong>
+                </div>
+                <div>
+                  <span>Route</span>
+                  <strong>{activeViolationAlert.routeName ?? "No route context"}</strong>
+                </div>
+              </div>
+
+              {activeViolationAlert.description && (
+                <p className="violation-modal__description">
+                  {activeViolationAlert.description}
+                </p>
+              )}
+
+              <div className="violation-modal__actions">
+                <button
+                  type="button"
+                  className="violation-modal__button violation-modal__button--secondary"
+                  onClick={closeViolationAlert}
+                >
+                  Dismiss
+                </button>
+                <button
+                  type="button"
+                  className="violation-modal__button violation-modal__button--primary"
+                  onClick={() => focusViolationOnMap(activeViolationAlert)}
+                  disabled={!hasViolationCoordinates(activeViolationAlert)}
+                >
+                  View Map
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
         {activeEmergencyModal && (
           <div className="emergency-modal-backdrop" role="presentation">
             <section
