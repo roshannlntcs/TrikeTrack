@@ -5,6 +5,13 @@ export type ReportStatus =
   | "resolved"
   | "dismissed"
 
+export type AppealStatus =
+  | "submitted"
+  | "under_review"
+  | "approved"
+  | "denied"
+  | "withdrawn"
+
 export type ReportTypeRecord = {
   reportTypeId: number
   code: string
@@ -40,12 +47,42 @@ export type AdminReportRecord = {
   violationStatus?: "open" | "under_review" | "resolved" | "dismissed"
 }
 
+export type AdminAppealRecord = {
+  appealId: string
+  violationId: string
+  driverId: number
+  driverCode: string
+  driverName: string
+  todaId: number
+  todaName: string
+  barangayId: number
+  barangayName: string
+  tricycleId?: number
+  plateNo?: string
+  tripId?: number
+  routeName?: string
+  violationTypeCode: string
+  violationTypeLabel: string
+  violationStatus: "open" | "under_review" | "resolved"
+  violationOccurredAt: string
+  violationLocationLabel?: string
+  appealReason: string
+  appealMessage?: string
+  status: AppealStatus
+  submittedAt: string
+  reviewedAt?: string
+  decisionNotes?: string
+  proofImageUrl?: string
+  proofImageUrls: string[]
+}
+
 type AdminReportsResponse = {
   ok?: boolean
   message?: string
   data?: {
     reports: AdminReportRecord[]
     reportTypes: ReportTypeRecord[]
+    appeals: AdminAppealRecord[]
   }
 }
 

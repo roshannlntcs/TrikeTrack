@@ -135,14 +135,14 @@ export type DashboardTripRecord = {
 
 export type DashboardNotificationRecord = {
   notificationKey: string
-  kind: "violation" | "trip" | "driver" | "emergency"
-  page: "alerts" | "trip-logs" | "drivers"
+  kind: "violation" | "trip" | "driver" | "emergency" | "appeal"
+  page: "alerts" | "trip-logs" | "drivers" | "reports"
   title: string
   body: string
   timestamp: string
   priority: number
   tone: "danger" | "warn" | "info"
-  sourceEntityType: "alert" | "trip" | "driver" | "emergency"
+  sourceEntityType: "alert" | "trip" | "driver" | "emergency" | "appeal"
   sourceEntityId: string
   isRead: boolean
 }

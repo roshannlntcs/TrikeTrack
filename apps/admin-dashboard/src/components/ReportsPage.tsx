@@ -2,14 +2,18 @@ import { useEffect, useMemo, useState } from "react"
 import {
   fetchAdminReports,
   updateAdminReportStatus,
+  type AdminAppealRecord,
   type AdminReportRecord,
+  type AppealStatus,
   type ReportStatus,
   type ReportTypeRecord
 } from "../lib/reports"
+import { supabase } from "../lib/supabase"
 import "./ReportsPage.css"
 
 type ReportsPageProps = {
   accessToken: string
+  initialSection?: "reports" | "appeals"
   onDataChanged?: () => void
 }
 
@@ -21,7 +25,22 @@ const REPORT_STATUS_OPTIONS: ReportStatus[] = [
   "dismissed"
 ]
 
+const APPEAL_STATUS_OPTIONS: Array<AppealStatus | "all"> = [
+  "all",
+  "submitted",
+  "under_review",
+  "approved",
+  "denied",
+  "withdrawn"
+]
+
 const formatReportStatus = (value: ReportStatus) =>
+  value
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ")
+
+const formatAppealStatus = (value: AppealStatus) =>
   value
     .split("_")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
@@ -30,16 +49,36 @@ const formatReportStatus = (value: ReportStatus) =>
 const formatTripStatus = (value: AdminReportRecord["tripStatus"]) =>
   value ? value.charAt(0).toUpperCase() + value.slice(1) : "No active trip"
 
-export default function ReportsPage({ accessToken, onDataChanged }: ReportsPageProps) {
+const truncateText = (value: string | undefined, maxLength = 140) => {
+  if (!value) return "No appeal message provided."
+  if (value.length <= maxLength) return value
+  return `${value.slice(0, maxLength).trimEnd()}...`
+}
+
+export default function ReportsPage({
+  accessToken,
+  initialSection = "reports",
+  onDataChanged
+}: ReportsPageProps) {
   const [reports, setReports] = useState<AdminReportRecord[]>([])
+  const [appeals, setAppeals] = useState<AdminAppealRecord[]>([])
   const [reportTypes, setReportTypes] = useState<ReportTypeRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busyReportId, setBusyReportId] = useState<number | null>(null)
+  const [activeSection, setActiveSection] = useState<"reports" | "appeals">(initialSection)
   const [searchQuery, setSearchQuery] = useState("")
   const [statusFilter, setStatusFilter] = useState<ReportStatus | "all">("all")
   const [typeFilter, setTypeFilter] = useState<string>("all")
+  const [appealStatusFilter, setAppealStatusFilter] =
+    useState<AppealStatus | "all">("all")
   const [draftStatuses, setDraftStatuses] = useState<Record<number, ReportStatus>>({})
+  const [reloadTick, setReloadTick] = useState(0)
+  const [selectedAppeal, setSelectedAppeal] = useState<AdminAppealRecord | null>(null)
+
+  useEffect(() => {
+    setActiveSection(initialSection)
+  }, [initialSection])
 
   useEffect(() => {
     let active = true
@@ -50,6 +89,7 @@ export default function ReportsPage({ accessToken, onDataChanged }: ReportsPageP
         const data = await fetchAdminReports(accessToken)
         if (!active) return
         setReports(data.reports)
+        setAppeals(data.appeals)
         setReportTypes(data.reportTypes)
         setDraftStatuses(
           Object.fromEntries(data.reports.map((report) => [report.reportId, report.status]))
@@ -70,7 +110,40 @@ export default function ReportsPage({ accessToken, onDataChanged }: ReportsPageP
     return () => {
       active = false
     }
-  }, [accessToken])
+  }, [accessToken, reloadTick])
+
+  useEffect(() => {
+    const appealsChannel = supabase
+      .channel("admin-driver-appeals")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "violation_appeals"
+        },
+        () => {
+          setReloadTick((current) => current + 1)
+          onDataChanged?.()
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "violation_proofs"
+        },
+        () => {
+          setReloadTick((current) => current + 1)
+        }
+      )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(appealsChannel)
+    }
+  }, [onDataChanged])
 
   const normalizedSearchQuery = searchQuery.trim().toLowerCase()
 
@@ -101,18 +174,61 @@ export default function ReportsPage({ accessToken, onDataChanged }: ReportsPageP
     })
   }, [reports, statusFilter, typeFilter, normalizedSearchQuery])
 
-  const counts = useMemo(() => {
-    return REPORT_STATUS_OPTIONS.reduce<Record<ReportStatus, number>>((totals, status) => {
-      totals[status] = reports.filter((report) => report.status === status).length
-      return totals
-    }, {
-      submitted: 0,
-      under_review: 0,
-      verified: 0,
-      resolved: 0,
-      dismissed: 0
+  const filteredAppeals = useMemo(() => {
+    return appeals.filter((appeal) => {
+      if (appealStatusFilter !== "all" && appeal.status !== appealStatusFilter) {
+        return false
+      }
+
+      if (!normalizedSearchQuery) return true
+
+      return (
+        appeal.driverName.toLowerCase().includes(normalizedSearchQuery) ||
+        appeal.driverCode.toLowerCase().includes(normalizedSearchQuery) ||
+        appeal.violationTypeLabel.toLowerCase().includes(normalizedSearchQuery) ||
+        appeal.appealReason.toLowerCase().includes(normalizedSearchQuery) ||
+        (appeal.appealMessage?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
+        (appeal.plateNo?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
+        (appeal.routeName?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
+        appeal.todaName.toLowerCase().includes(normalizedSearchQuery) ||
+        appeal.barangayName.toLowerCase().includes(normalizedSearchQuery)
+      )
     })
+  }, [appeals, appealStatusFilter, normalizedSearchQuery])
+
+  const counts = useMemo(() => {
+    return REPORT_STATUS_OPTIONS.reduce<Record<ReportStatus, number>>(
+      (totals, status) => {
+        totals[status] = reports.filter((report) => report.status === status).length
+        return totals
+      },
+      {
+        submitted: 0,
+        under_review: 0,
+        verified: 0,
+        resolved: 0,
+        dismissed: 0
+      }
+    )
   }, [reports])
+
+  const appealCounts = useMemo(() => {
+    return appeals.reduce<Record<AppealStatus, number>>(
+      (totals, appeal) => {
+        totals[appeal.status] += 1
+        return totals
+      },
+      {
+        submitted: 0,
+        under_review: 0,
+        approved: 0,
+        denied: 0,
+        withdrawn: 0
+      }
+    )
+  }, [appeals])
+
+  const activeAppealTabCount = appealCounts.submitted + appealCounts.under_review
 
   const handleSaveStatus = async (report: AdminReportRecord) => {
     const nextStatus = draftStatuses[report.reportId] ?? report.status
@@ -142,180 +258,448 @@ export default function ReportsPage({ accessToken, onDataChanged }: ReportsPageP
       <section className="page-panel">
         <div className="page-panel__header">
           <div>
-            <h2>Passenger Reports</h2>
+            <h2>{activeSection === "reports" ? "Passenger Reports" : "Driver Appeals"}</h2>
             <p>
               {loading
-                ? "Loading incident reports..."
-                : `${filteredReports.length} reports visible across your admin scope`}
+                ? activeSection === "reports"
+                  ? "Loading incident reports..."
+                  : "Loading submitted appeals..."
+                : activeSection === "reports"
+                  ? `${filteredReports.length} reports visible across your admin scope`
+                  : `${filteredAppeals.length} appeals visible across your admin scope`}
             </p>
           </div>
         </div>
 
-        <div className="reports-summary">
-          {REPORT_STATUS_OPTIONS.map((status) => (
-            <article key={status} className="reports-summary__card">
-              <span>{formatReportStatus(status)}</span>
-              <strong>{counts[status]}</strong>
-            </article>
-          ))}
+        <div className="reports-section-tabs" role="tablist" aria-label="Report views">
+          <button
+            type="button"
+            className={`reports-section-tab${
+              activeSection === "reports" ? " reports-section-tab--active" : ""
+            }`}
+            onClick={() => setActiveSection("reports")}
+            role="tab"
+            aria-selected={activeSection === "reports"}
+          >
+            <span>Passenger Reports</span>
+            <strong>{reports.length}</strong>
+          </button>
+          <button
+            type="button"
+            className={`reports-section-tab${
+              activeSection === "appeals" ? " reports-section-tab--active" : ""
+            }`}
+            onClick={() => setActiveSection("appeals")}
+            role="tab"
+            aria-selected={activeSection === "appeals"}
+          >
+            <span>Driver Appeals</span>
+            <strong>{appeals.length}</strong>
+            {activeAppealTabCount > 0 && <em>{activeAppealTabCount} new</em>}
+          </button>
         </div>
 
-        <div className="reports-toolbar">
-          <input
-            className="reports-toolbar__search"
-            placeholder="Search driver, route, plate, TODA..."
-            value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
-            aria-label="Search reports"
-          />
+        {activeSection === "reports" ? (
+          <>
+            <div className="reports-summary">
+              {REPORT_STATUS_OPTIONS.map((status) => (
+                <article key={status} className="reports-summary__card">
+                  <span>{formatReportStatus(status)}</span>
+                  <strong>{counts[status]}</strong>
+                </article>
+              ))}
+            </div>
 
-          <select
-            className="reports-toolbar__select"
-            value={statusFilter}
-            onChange={(event) => setStatusFilter(event.target.value as ReportStatus | "all")}
-            aria-label="Filter reports by status"
-          >
-            <option value="all">All statuses</option>
-            {REPORT_STATUS_OPTIONS.map((status) => (
-              <option key={status} value={status}>
-                {formatReportStatus(status)}
-              </option>
-            ))}
-          </select>
+            <div className="reports-toolbar">
+              <input
+                className="reports-toolbar__search"
+                placeholder="Search driver, route, plate, TODA..."
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                aria-label="Search reports"
+              />
 
-          <select
-            className="reports-toolbar__select"
-            value={typeFilter}
-            onChange={(event) => setTypeFilter(event.target.value)}
-            aria-label="Filter reports by category"
-          >
-            <option value="all">All categories</option>
-            {reportTypes.map((type) => (
-              <option key={type.reportTypeId} value={type.code}>
-                {type.label}
-              </option>
-            ))}
-          </select>
-        </div>
+              <select
+                className="reports-toolbar__select"
+                value={statusFilter}
+                onChange={(event) => setStatusFilter(event.target.value as ReportStatus | "all")}
+                aria-label="Filter reports by status"
+              >
+                <option value="all">All statuses</option>
+                {REPORT_STATUS_OPTIONS.map((status) => (
+                  <option key={status} value={status}>
+                    {formatReportStatus(status)}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                className="reports-toolbar__select"
+                value={typeFilter}
+                onChange={(event) => setTypeFilter(event.target.value)}
+                aria-label="Filter reports by category"
+              >
+                <option value="all">All categories</option>
+                {reportTypes.map((type) => (
+                  <option key={type.reportTypeId} value={type.code}>
+                    {type.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="reports-summary">
+              {(["submitted", "under_review", "approved", "denied", "withdrawn"] as AppealStatus[]).map(
+                (status) => (
+                  <article key={status} className="reports-summary__card">
+                    <span>{formatAppealStatus(status)}</span>
+                    <strong>{appealCounts[status]}</strong>
+                  </article>
+                )
+              )}
+            </div>
+
+            <div className="reports-toolbar">
+              <input
+                className="reports-toolbar__search"
+                placeholder="Search driver, violation, route, TODA..."
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                aria-label="Search appeals"
+              />
+
+              <select
+                className="reports-toolbar__select"
+                value={appealStatusFilter}
+                onChange={(event) =>
+                  setAppealStatusFilter(event.target.value as AppealStatus | "all")
+                }
+                aria-label="Filter appeals by status"
+              >
+                {APPEAL_STATUS_OPTIONS.map((status) => (
+                  <option key={status} value={status}>
+                    {status === "all" ? "All statuses" : formatAppealStatus(status)}
+                  </option>
+                ))}
+              </select>
+
+              <div className="reports-toolbar__summary">
+                {activeAppealTabCount > 0
+                  ? `${activeAppealTabCount} submitted or under review`
+                  : "No pending appeal actions"}
+              </div>
+            </div>
+          </>
+        )}
 
         {error && <div className="reports-error">{error}</div>}
 
         {loading ? (
-          <div className="muted">Loading passenger reports...</div>
-        ) : filteredReports.length === 0 ? (
           <div className="muted">
-            {reports.length === 0
-              ? "No passenger reports have been submitted yet."
-              : "No reports match the current filters."}
+            {activeSection === "reports"
+              ? "Loading passenger reports..."
+              : "Loading driver appeals..."}
+          </div>
+        ) : activeSection === "reports" ? (
+          filteredReports.length === 0 ? (
+            <div className="muted">
+              {reports.length === 0
+                ? "No passenger reports have been submitted yet."
+                : "No reports match the current filters."}
+            </div>
+          ) : (
+            <div className="reports-list">
+              {filteredReports.map((report) => {
+                const draftStatus = draftStatuses[report.reportId] ?? report.status
+                const isBusy = busyReportId === report.reportId
+                return (
+                  <article key={report.reportId} className="reports-card">
+                    <div className="reports-card__top">
+                      <div>
+                        <div className="reports-card__titleRow">
+                          <h3>{report.driverName}</h3>
+                          <span className={`reports-status reports-status--${report.status}`}>
+                            {formatReportStatus(report.status)}
+                          </span>
+                        </div>
+                        <p>
+                          {report.driverCode} | {report.plateNo ?? "No tricycle"} | {report.todaName} |{" "}
+                          {report.barangayName}
+                        </p>
+                      </div>
+                      <div className="reports-card__meta">
+                        <strong>Report #{report.reportId}</strong>
+                        <span>{new Date(report.reportedAt).toLocaleString()}</span>
+                      </div>
+                    </div>
+
+                    <div className="reports-card__badges">
+                      <span className="reports-chip">{report.reportTypeLabel}</span>
+                      <span className="reports-chip">{formatTripStatus(report.tripStatus)}</span>
+                      {report.tripId && <span className="reports-chip">Trip #{report.tripId}</span>}
+                      <span className="reports-chip">QR #{report.qrId}</span>
+                      {report.violationId && (
+                        <span className="reports-chip">
+                          Alert #{report.violationId} {report.violationStatus ? `(${report.violationStatus})` : ""}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="reports-card__route">
+                      Route: {report.routeName ?? "No route attached"}
+                    </div>
+                    {(report.passengerName || report.passengerContact) && (
+                      <div className="reports-card__route">
+                        Passenger: {report.passengerName ?? "Anonymous"}
+                        {report.passengerContact ? ` | ${report.passengerContact}` : ""}
+                      </div>
+                    )}
+                    <div className="reports-card__description">{report.description}</div>
+                    {report.mediaUrls && report.mediaUrls.length > 0 && (
+                      <div className="reports-card__media">
+                        <span className="reports-card__mediaLabel">Uploaded proof</span>
+                        <div className="reports-card__mediaGrid">
+                          {report.mediaUrls.map((mediaUrl, index) => (
+                            <a
+                              key={`${report.reportId}-${index}`}
+                              className="reports-card__mediaLink"
+                              href={mediaUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              aria-label={`Open uploaded proof ${index + 1} for report ${report.reportId}`}
+                            >
+                              <img
+                                className="reports-card__mediaImage"
+                                src={mediaUrl}
+                                alt={`Uploaded proof ${index + 1} for report ${report.reportId}`}
+                                loading="lazy"
+                              />
+                            </a>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="reports-card__actions">
+                      <select
+                        className="reports-toolbar__select"
+                        value={draftStatus}
+                        onChange={(event) =>
+                          setDraftStatuses((current) => ({
+                            ...current,
+                            [report.reportId]: event.target.value as ReportStatus
+                          }))
+                        }
+                        disabled={isBusy}
+                        aria-label={`Update status for report ${report.reportId}`}
+                      >
+                        {REPORT_STATUS_OPTIONS.map((status) => (
+                          <option key={status} value={status}>
+                            {formatReportStatus(status)}
+                          </option>
+                        ))}
+                      </select>
+
+                      <button
+                        type="button"
+                        className="reports-card__button"
+                        onClick={() => void handleSaveStatus(report)}
+                        disabled={isBusy || draftStatus === report.status}
+                      >
+                        {isBusy ? "Saving..." : "Save status"}
+                      </button>
+                    </div>
+                  </article>
+                )
+              })}
+            </div>
+          )
+        ) : filteredAppeals.length === 0 ? (
+          <div className="muted">
+            {appeals.length === 0
+              ? "No driver appeals have been submitted yet."
+              : "No appeals match the current filters."}
           </div>
         ) : (
           <div className="reports-list">
-            {filteredReports.map((report) => {
-              const draftStatus = draftStatuses[report.reportId] ?? report.status
-              const isBusy = busyReportId === report.reportId
-              return (
-                <article key={report.reportId} className="reports-card">
-                  <div className="reports-card__top">
-                    <div>
-                      <div className="reports-card__titleRow">
-                        <h3>{report.driverName}</h3>
-                        <span className={`reports-status reports-status--${report.status}`}>
-                          {formatReportStatus(report.status)}
-                        </span>
-                      </div>
-                      <p>
-                        {report.driverCode} | {report.plateNo ?? "No tricycle"} | {report.todaName} |{" "}
-                        {report.barangayName}
-                      </p>
-                    </div>
-                    <div className="reports-card__meta">
-                      <strong>Report #{report.reportId}</strong>
-                      <span>{new Date(report.reportedAt).toLocaleString()}</span>
-                    </div>
-                  </div>
-
-                  <div className="reports-card__badges">
-                    <span className="reports-chip">{report.reportTypeLabel}</span>
-                    <span className="reports-chip">{formatTripStatus(report.tripStatus)}</span>
-                    {report.tripId && <span className="reports-chip">Trip #{report.tripId}</span>}
-                    <span className="reports-chip">QR #{report.qrId}</span>
-                    {report.violationId && (
-                      <span className="reports-chip">
-                        Alert #{report.violationId} {report.violationStatus ? `(${report.violationStatus})` : ""}
+            {filteredAppeals.map((appeal) => (
+              <article key={appeal.appealId} className="reports-card">
+                <div className="reports-card__top">
+                  <div>
+                    <div className="reports-card__titleRow">
+                      <h3>{appeal.driverName}</h3>
+                      <span className={`reports-status reports-status--${appeal.status}`}>
+                        {formatAppealStatus(appeal.status)}
                       </span>
-                    )}
-                  </div>
-
-                  <div className="reports-card__route">
-                    Route: {report.routeName ?? "No route attached"}
-                  </div>
-                  {(report.passengerName || report.passengerContact) && (
-                    <div className="reports-card__route">
-                      Passenger: {report.passengerName ?? "Anonymous"}
-                      {report.passengerContact ? ` | ${report.passengerContact}` : ""}
                     </div>
-                  )}
-                  <div className="reports-card__description">{report.description}</div>
-                  {report.mediaUrls && report.mediaUrls.length > 0 && (
-                    <div className="reports-card__media">
-                      <span className="reports-card__mediaLabel">Uploaded proof</span>
-                      <div className="reports-card__mediaGrid">
-                        {report.mediaUrls.map((mediaUrl, index) => (
-                          <a
-                            key={`${report.reportId}-${index}`}
-                            className="reports-card__mediaLink"
-                            href={mediaUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            aria-label={`Open uploaded proof ${index + 1} for report ${report.reportId}`}
-                          >
-                            <img
-                              className="reports-card__mediaImage"
-                              src={mediaUrl}
-                              alt={`Uploaded proof ${index + 1} for report ${report.reportId}`}
-                              loading="lazy"
-                            />
-                          </a>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="reports-card__actions">
-                    <select
-                      className="reports-toolbar__select"
-                      value={draftStatus}
-                      onChange={(event) =>
-                        setDraftStatuses((current) => ({
-                          ...current,
-                          [report.reportId]: event.target.value as ReportStatus
-                        }))
-                      }
-                      disabled={isBusy}
-                      aria-label={`Update status for report ${report.reportId}`}
-                    >
-                      {REPORT_STATUS_OPTIONS.map((status) => (
-                        <option key={status} value={status}>
-                          {formatReportStatus(status)}
-                        </option>
-                      ))}
-                    </select>
-
-                    <button
-                      type="button"
-                      className="reports-card__button"
-                      onClick={() => void handleSaveStatus(report)}
-                      disabled={isBusy || draftStatus === report.status}
-                    >
-                      {isBusy ? "Saving..." : "Save status"}
-                    </button>
+                    <p>
+                      {appeal.driverCode} | {appeal.plateNo ?? "No tricycle"} | {appeal.todaName} |{" "}
+                      {appeal.barangayName}
+                    </p>
                   </div>
-                </article>
-              )
-            })}
+                  <div className="reports-card__meta">
+                    <strong>Appeal</strong>
+                    <span>{new Date(appeal.submittedAt).toLocaleString()}</span>
+                  </div>
+                </div>
+
+                <div className="reports-card__badges">
+                  <span className="reports-chip">{appeal.violationTypeLabel}</span>
+                  <span className="reports-chip">Appeal: {appeal.appealReason}</span>
+                  <span className="reports-chip">
+                    Violation {appeal.violationStatus.replace("_", " ")}
+                  </span>
+                  {appeal.tripId && <span className="reports-chip">Trip #{appeal.tripId}</span>}
+                </div>
+
+                <div className="reports-card__route">
+                  Route: {appeal.routeName ?? "No route attached"}
+                </div>
+                <div className="reports-card__route">
+                  Submitted: {new Date(appeal.submittedAt).toLocaleString()}
+                </div>
+                <div className="reports-card__description">
+                  {truncateText(appeal.appealMessage)}
+                </div>
+
+                {appeal.proofImageUrl ? (
+                  <div className="reports-card__media">
+                    <span className="reports-card__mediaLabel">Proof image</span>
+                    <a
+                      className="reports-card__mediaLink reports-card__mediaLink--single"
+                      href={appeal.proofImageUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <img
+                        className="reports-card__mediaImage"
+                        src={appeal.proofImageUrl}
+                        alt={`Appeal proof for ${appeal.driverName}`}
+                        loading="lazy"
+                      />
+                    </a>
+                  </div>
+                ) : (
+                  <div className="reports-card__route">Proof image: No proof uploaded</div>
+                )}
+
+                <div className="reports-card__actions">
+                  <div className="reports-card__appealMeta">
+                    Violation time: {new Date(appeal.violationOccurredAt).toLocaleString()}
+                  </div>
+                  <button
+                    type="button"
+                    className="reports-card__button"
+                    onClick={() => setSelectedAppeal(appeal)}
+                  >
+                    View appeal
+                  </button>
+                </div>
+              </article>
+            ))}
           </div>
         )}
       </section>
+
+      {selectedAppeal && (
+        <div
+          className="reports-modal-backdrop"
+          role="presentation"
+          onClick={() => setSelectedAppeal(null)}
+        >
+          <section
+            className="reports-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="appeal-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="reports-modal__header">
+              <div>
+                <p className="reports-modal__eyebrow">Driver Appeal</p>
+                <h3 id="appeal-modal-title">{selectedAppeal.driverName}</h3>
+              </div>
+              <button
+                type="button"
+                className="reports-modal__close"
+                onClick={() => setSelectedAppeal(null)}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="reports-card__badges">
+              <span className="reports-chip">{selectedAppeal.violationTypeLabel}</span>
+              <span className="reports-chip">Appeal: {selectedAppeal.appealReason}</span>
+              <span className={`reports-status reports-status--${selectedAppeal.status}`}>
+                {formatAppealStatus(selectedAppeal.status)}
+              </span>
+            </div>
+
+            <div className="reports-modal__grid">
+              <div>
+                <span>Driver Code</span>
+                <strong>{selectedAppeal.driverCode}</strong>
+              </div>
+              <div>
+                <span>Plate / Unit</span>
+                <strong>{selectedAppeal.plateNo ?? "No tricycle assigned"}</strong>
+              </div>
+              <div>
+                <span>Submitted</span>
+                <strong>{new Date(selectedAppeal.submittedAt).toLocaleString()}</strong>
+              </div>
+              <div>
+                <span>Violation Status</span>
+                <strong>{selectedAppeal.violationStatus.replace("_", " ")}</strong>
+              </div>
+              <div>
+                <span>TODA</span>
+                <strong>{selectedAppeal.todaName}</strong>
+              </div>
+              <div>
+                <span>Route</span>
+                <strong>{selectedAppeal.routeName ?? "No route attached"}</strong>
+              </div>
+            </div>
+
+            <div className="reports-modal__section">
+              <span className="reports-card__mediaLabel">Appeal message</span>
+              <div className="reports-card__description">
+                {selectedAppeal.appealMessage ?? "No appeal message provided."}
+              </div>
+            </div>
+
+            <div className="reports-modal__section">
+              <span className="reports-card__mediaLabel">Proof image</span>
+              {selectedAppeal.proofImageUrls.length > 0 ? (
+                <div className="reports-card__mediaGrid">
+                  {selectedAppeal.proofImageUrls.map((proofUrl, index) => (
+                    <a
+                      key={`${selectedAppeal.appealId}-${index}`}
+                      className="reports-card__mediaLink"
+                      href={proofUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <img
+                        className="reports-card__mediaImage"
+                        src={proofUrl}
+                        alt={`Proof ${index + 1} for ${selectedAppeal.driverName}`}
+                        loading="lazy"
+                      />
+                    </a>
+                  ))}
+                </div>
+              ) : (
+                <div className="reports-card__route">No proof image uploaded for this appeal.</div>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
     </section>
   )
 }

@@ -1,6 +1,10 @@
 import type { AdminProfile } from "./admin-auth-db"
 import { ensureDatabaseReady, hasColumn, query } from "./database"
 import {
+  listAppealsForAdmin,
+  type AdminViolationAppealRecord
+} from "./appeals-db"
+import {
   listEmergencyAlertsForAdmin,
   type EmergencyAlertRecord
 } from "./emergency-alerts-db"
@@ -128,14 +132,14 @@ export type DashboardTripRecord = {
 
 export type DashboardNotificationRecord = {
   notificationKey: string
-  kind: "violation" | "trip" | "driver" | "emergency"
-  page: "alerts" | "trip-logs" | "drivers"
+  kind: "violation" | "trip" | "driver" | "emergency" | "appeal"
+  page: "alerts" | "trip-logs" | "drivers" | "reports"
   title: string
   body: string
   timestamp: string
   priority: number
   tone: "danger" | "warn" | "info"
-  sourceEntityType: "alert" | "trip" | "driver" | "emergency"
+  sourceEntityType: "alert" | "trip" | "driver" | "emergency" | "appeal"
   sourceEntityId: string
   isRead: boolean
 }
@@ -448,12 +452,14 @@ const createNotifications = ({
   alerts,
   emergencies,
   trips,
-  drivers
+  drivers,
+  appeals
 }: {
   alerts: DashboardViolationRecord[]
   emergencies: DashboardEmergencyRecord[]
   trips: DashboardTripRecord[]
   drivers: DashboardDriverRecord[]
+  appeals: AdminViolationAppealRecord[]
 }) => {
   const nowTs = Date.now()
 
@@ -647,11 +653,37 @@ const createNotifications = ({
     .sort(sortNotifications)
     .slice(0, 5)
 
+  const appealNotifications = appeals
+    .filter((appeal) => appeal.status === "submitted")
+    .slice(0, 6)
+    .map<DashboardNotificationRecord>((appeal) => ({
+      notificationKey: `appeal:${appeal.appealId}`,
+      kind: "appeal",
+      page: "reports",
+      title: `New appeal from ${appeal.driverName}`,
+      body: [
+        appeal.violationTypeLabel,
+        appeal.appealReason,
+        appeal.routeName,
+        appeal.plateNo,
+        [appeal.barangayName, appeal.todaName].filter(Boolean).join(" | ")
+      ]
+        .filter(Boolean)
+        .join(" | "),
+      timestamp: appeal.submittedAt,
+      priority: 88,
+      tone: "warn",
+      sourceEntityType: "appeal",
+      sourceEntityId: appeal.appealId,
+      isRead: false
+    }))
+
   return [
     ...emergencyNotifications,
     ...violationNotifications,
     ...tripNotifications,
-    ...driverNotifications
+    ...driverNotifications,
+    ...appealNotifications
   ]
     .sort(sortNotifications)
     .slice(0, NOTIFICATION_LIMIT)
@@ -722,6 +754,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
     operationalDriversResult,
     violationsResult,
     emergencyAlerts,
+    appeals,
     tripsResult,
     aggregateCountsResult
   ] = await Promise.all([
@@ -977,6 +1010,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
     listEmergencyAlertsForAdmin(profile, {
       limit: 50
     }),
+    listAppealsForAdmin(profile),
     query<DashboardTripRow>(
       `
         SELECT
@@ -1103,7 +1137,8 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
     alerts: recentViolations,
     emergencies: recentEmergencies,
     trips: recentTrips,
-    drivers
+    drivers,
+    appeals
   })
 
   const readKeys = await loadReadNotificationKeys(

@@ -283,8 +283,8 @@ type ViolationAlertDetails = {
 
 type NotificationItem = {
   key: string
-  kind: "violation" | "trip" | "driver" | "emergency"
-  page: Extract<NavKey, "alerts" | "trip-logs" | "drivers">
+  kind: "violation" | "trip" | "driver" | "emergency" | "appeal"
+  page: Extract<NavKey, "alerts" | "trip-logs" | "drivers" | "reports">
   title: string
   body: string
   ts: number
@@ -461,6 +461,11 @@ const createStoredEmergencyAlertListItem = (
   lng: alert.longitude
 })
 
+const getStoredViolationKey = (
+  alertSource: DashboardViolationRecord["alertSource"],
+  violationId: DashboardViolationRecord["violationId"]
+) => `${alertSource}:${violationId}`
+
 void NOTIFICATION_TRIP_WINDOW_MS
 void NOTIFICATION_DRIVER_WINDOW_MS
 void NOTIFICATION_LIMIT
@@ -508,6 +513,8 @@ export default function AdminShell({
   const [notificationDateFrom, setNotificationDateFrom] = useState("")
   const [notificationDateTo, setNotificationDateTo] = useState("")
   const [profileModalOpen, setProfileModalOpen] = useState(false)
+  const [reportsPageSection, setReportsPageSection] =
+    useState<"reports" | "appeals">("reports")
   const [selectedDriverId, setSelectedDriverId] = useState<number | null>(null)
   const [livePresenceHydrated, setLivePresenceHydrated] = useState(false)
   const [activeEmergencyModal, setActiveEmergencyModal] =
@@ -520,7 +527,10 @@ export default function AdminShell({
   const dashboardDataRef = useRef<DashboardDataSnapshot | null>(null)
   const visibleDriverIdentifiersRef = useRef<Set<string>>(new Set())
   const dashboardDriversRef = useRef<DashboardDriverRecord[]>([])
-  const seenStoredViolationKeysRef = useRef<Set<string> | null>(null)
+  const knownViolationKeysRef = useRef<Set<string>>(new Set())
+  const pendingViolationPopupKeysRef = useRef<Set<string>>(new Set())
+  const shownViolationPopupKeysRef = useRef<Set<string>>(new Set())
+  const violationsHydratedRef = useRef(false)
   const driverInsideStateRef = useRef<Record<string, boolean>>({})
   const refreshLiveLocationsRef = useRef<(() => void) | null>(null)
   const notificationPanelRef = useRef<HTMLDivElement | null>(null)
@@ -1296,8 +1306,20 @@ export default function AdminShell({
               schema: "public",
               table: "mobile_violations"
             },
-            () => {
+            (payload) => {
               if (!active) return
+              if (payload.eventType === "INSERT") {
+                const insertedRow = payload.new as { id?: string } | undefined
+                if (typeof insertedRow?.id === "string" && insertedRow.id.trim()) {
+                  const violationKey = getStoredViolationKey("driver_violation", `driver-${insertedRow.id}`)
+                  if (
+                    !knownViolationKeysRef.current.has(violationKey) &&
+                    !shownViolationPopupKeysRef.current.has(violationKey)
+                  ) {
+                    pendingViolationPopupKeysRef.current.add(violationKey)
+                  }
+                }
+              }
               scheduleDashboardRefresh()
             }
           )
@@ -1308,8 +1330,27 @@ export default function AdminShell({
               schema: "public",
               table: "violations"
             },
-            () => {
+            (payload) => {
               if (!active) return
+              if (payload.eventType === "INSERT") {
+                const insertedRow = payload.new as { violation_id?: number | string } | undefined
+                if (
+                  insertedRow?.violation_id !== undefined &&
+                  insertedRow.violation_id !== null &&
+                  String(insertedRow.violation_id).trim()
+                ) {
+                  const violationKey = getStoredViolationKey(
+                    "system_violation",
+                    `system-${String(insertedRow.violation_id)}`
+                  )
+                  if (
+                    !knownViolationKeysRef.current.has(violationKey) &&
+                    !shownViolationPopupKeysRef.current.has(violationKey)
+                  ) {
+                    pendingViolationPopupKeysRef.current.add(violationKey)
+                  }
+                }
+              }
               scheduleDashboardRefresh()
             }
           )
@@ -1620,29 +1661,34 @@ export default function AdminShell({
 
   useEffect(() => {
     const violations = dashboardData?.recentViolations ?? []
-    const nextSeenKeys = new Set(
-      violations.map((item) => `${item.alertSource}:${item.violationId}`)
+    const nextKnownKeys = new Set(
+      violations.map((item) => getStoredViolationKey(item.alertSource, item.violationId))
     )
 
-    if (seenStoredViolationKeysRef.current === null) {
-      seenStoredViolationKeysRef.current = nextSeenKeys
+    if (!violationsHydratedRef.current) {
+      knownViolationKeysRef.current = nextKnownKeys
+      violationsHydratedRef.current = true
       return
     }
 
     const newViolations = violations
       .filter((item) => {
-        const key = `${item.alertSource}:${item.violationId}`
-        return !seenStoredViolationKeysRef.current?.has(key)
+        const key = getStoredViolationKey(item.alertSource, item.violationId)
+        return pendingViolationPopupKeysRef.current.has(key)
       })
       .sort(
         (a, b) =>
           new Date(a.detectedAt).getTime() - new Date(b.detectedAt).getTime()
       )
 
-    seenStoredViolationKeysRef.current = nextSeenKeys
+    knownViolationKeysRef.current = nextKnownKeys
 
     for (const violation of newViolations) {
+      const violationKey = getStoredViolationKey(violation.alertSource, violation.violationId)
+      pendingViolationPopupKeysRef.current.delete(violationKey)
+
       if (violation.status !== "open" && violation.status !== "under_review") continue
+      if (shownViolationPopupKeysRef.current.has(violationKey)) continue
 
       const driver = violation.driverId
         ? dashboardData?.drivers.find((item) => item.driverId === violation.driverId)
@@ -1683,6 +1729,7 @@ export default function AdminShell({
         lat,
         lng
       })
+      shownViolationPopupKeysRef.current.add(violationKey)
     }
   }, [dashboardData?.recentViolations, dashboardData?.drivers, dashboardData?.operationalDrivers, dashboardData?.recentTrips])
 
@@ -1732,6 +1779,27 @@ export default function AdminShell({
 
     return () => {
       closeStream()
+    }
+  }, [accessToken])
+
+  useEffect(() => {
+    const appealsChannel = supabase
+      .channel("admin-appeal-notifications")
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "violation_appeals"
+        },
+        () => {
+          void refreshDashboardData()
+        }
+      )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(appealsChannel)
     }
   }, [accessToken])
 
@@ -1955,7 +2023,12 @@ export default function AdminShell({
               className={`sidebar-nav__item ${
                 item.key === activePage ? "sidebar-nav__item--active" : ""
               }`}
-              onClick={() => setActivePage(item.key)}
+              onClick={() => {
+                setActivePage(item.key)
+                if (item.key === "reports") {
+                  setReportsPageSection("reports")
+                }
+              }}
             >
               {item.label}
             </button>
@@ -2013,7 +2086,7 @@ export default function AdminShell({
                     <div>
                       <div className="topbar-notification-menu__title">Notifications</div>
                       <div className="topbar-notification-menu__subtitle">
-                        Stored violations, trips, and driver updates shown newest first
+                        Stored alerts, emergencies, appeals, trips, and driver updates shown newest first
                       </div>
                     </div>
                     <div className="topbar-notification-menu__actions">
@@ -2054,6 +2127,7 @@ export default function AdminShell({
                         <option value="all">All categories</option>
                         <option value="violation">Alerts</option>
                         <option value="emergency">Emergencies</option>
+                        <option value="appeal">Appeals</option>
                         <option value="trip">Trips</option>
                         <option value="driver">Drivers</option>
                       </select>
@@ -2129,6 +2203,9 @@ export default function AdminShell({
                           type="button"
                           className="topbar-notification-item"
                           onClick={() => {
+                            if (item.kind === "appeal") {
+                              setReportsPageSection("appeals")
+                            }
                             setActivePage(item.page)
                             setNotificationsOpen(false)
                           }}
@@ -2137,7 +2214,15 @@ export default function AdminShell({
                             className={`topbar-notification-item__icon topbar-notification-item__icon--${item.tone}`}
                             aria-hidden="true"
                           >
-                            {item.kind === "violation" ? "!" : item.kind === "trip" ? "T" : "D"}
+                            {item.kind === "violation"
+                              ? "!"
+                              : item.kind === "emergency"
+                                ? "E"
+                                : item.kind === "appeal"
+                                  ? "A"
+                                  : item.kind === "trip"
+                                    ? "T"
+                                    : "D"}
                           </span>
                           <span className="topbar-notification-item__content">
                             <span className="topbar-notification-item__title">{item.title}</span>
@@ -2813,6 +2898,7 @@ export default function AdminShell({
           {activePage === "reports" && (
             <ReportsPage
               accessToken={accessToken}
+              initialSection={reportsPageSection}
               onDataChanged={() => void refreshDashboardData()}
             />
           )}

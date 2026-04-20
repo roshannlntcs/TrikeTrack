@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { requireAdminSession } from "../../../../lib/admin-session"
+import { listAppealsForAdmin } from "../../../../lib/appeals-db"
 import {
   isReportStatus,
   listReportTypes,
@@ -15,16 +16,18 @@ export async function GET(request: Request) {
   if (session.response) return session.response
 
   try {
-    const [reports, reportTypes] = await Promise.all([
+    const [reports, reportTypes, appeals] = await Promise.all([
       listReportsForAdmin(session.profile),
-      listReportTypes()
+      listReportTypes(),
+      listAppealsForAdmin(session.profile)
     ])
 
     return NextResponse.json({
       ok: true,
       data: {
         reports,
-        reportTypes
+        reportTypes,
+        appeals
       }
     })
   } catch (error) {
