@@ -5,6 +5,10 @@ import {
   getPassengerEmergency,
   type EmergencyAlertRecord
 } from "./emergency-api"
+import {
+  TriketrackMap,
+  type TriketrackMapCoordinate
+} from "../../../common/maps"
 
 type PassengerReportContext = {
   qrId: number
@@ -126,6 +130,12 @@ const buildReportingUrl = (apiBaseUrl: string, qrToken?: string) => {
 }
 
 const formatBytes = (value: number) => `${(value / (1024 * 1024)).toFixed(1)} MB`
+
+const formatCoordinateLabel = (location: TriketrackMapCoordinate | null) => {
+  if (!location) return "Waiting for GPS location"
+
+  return `${location.latitude.toFixed(5)}, ${location.longitude.toFixed(5)}`
+}
 
 const getCategoryMeta = (
   code: string
@@ -306,6 +316,7 @@ export default function App() {
   const [emergencyAlert, setEmergencyAlert] = useState<EmergencyAlertRecord | null>(null)
   const [emergencyBusy, setEmergencyBusy] = useState(false)
   const [emergencyResponseOpen, setEmergencyResponseOpen] = useState(false)
+  const [passengerLocation, setPassengerLocation] = useState<TriketrackMapCoordinate | null>(null)
 
   useEffect(() => {
     let active = true
@@ -616,6 +627,13 @@ export default function App() {
   const selectedCategory = reportTypes.find((type) => type.code === reportTypeCode)
   const emergencyIsActive =
     emergencyAlert !== null && emergencyAlert.status !== "resolved"
+  const emergencyMapPoint =
+    typeof emergencyAlert?.latitude === "number" && typeof emergencyAlert?.longitude === "number"
+      ? {
+          latitude: emergencyAlert.latitude,
+          longitude: emergencyAlert.longitude
+        }
+      : null
   const emergencyStatusLabel =
     emergencyAlert?.status === "responding" || emergencyAlert?.status === "acknowledged"
       ? "Admin responding"
@@ -692,6 +710,38 @@ export default function App() {
                 <div>
                   <span>TODA</span>
                   <strong>{context.todaName}</strong>
+                </div>
+              </div>
+            </section>
+
+            <section className="panel panel--map">
+              <p className="kicker">Trip map</p>
+              <p className="muted">
+                Live GPS centers the map on your device. Switch between street, satellite, and
+                terrain as needed.
+              </p>
+              <div className="trip-map-shell">
+                <TriketrackMap
+                  currentLocation={passengerLocation}
+                  destination={emergencyMapPoint}
+                  mapStyle="street"
+                  showControls
+                  showLocateButton
+                  onLocationUpdate={setPassengerLocation}
+                />
+              </div>
+              <div className="trip-map-meta">
+                <div>
+                  <span>Your location</span>
+                  <strong>{formatCoordinateLabel(passengerLocation)}</strong>
+                </div>
+                <div>
+                  <span>Destination marker</span>
+                  <strong>
+                    {emergencyMapPoint
+                      ? emergencyAlert?.locationLabel ?? "Emergency location"
+                      : "Not available yet"}
+                  </strong>
                 </div>
               </div>
             </section>

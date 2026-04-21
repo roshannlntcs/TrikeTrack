@@ -34,13 +34,19 @@ export type OutboxItem = {
   payload: ViolationPayload
 }
 
+export type CachedSnapshot<TData> = {
+  key: string
+  savedAt: number
+  data: TData
+}
+
 const createPointId = (point: Pick<LocationPoint, "driverId" | "ts" | "lng" | "lat">) => {
   const lngBucket = Math.round(point.lng * 100000)
   const latBucket = Math.round(point.lat * 100000)
   return `${point.driverId}|${point.ts}|${lngBucket}:${latBucket}`
 }
 
-export const dbPromise = openDB("triketrack-admin", 3, {
+export const dbPromise = openDB("triketrack-admin", 4, {
   upgrade(db, oldVersion) {
     if (oldVersion < 1 && !db.objectStoreNames.contains("points")) {
       db.createObjectStore("points", { keyPath: "ts" })
@@ -51,6 +57,9 @@ export const dbPromise = openDB("triketrack-admin", 3, {
     if (oldVersion < 3 && db.objectStoreNames.contains("points")) {
       db.deleteObjectStore("points")
       db.createObjectStore("points", { keyPath: "id" })
+    }
+    if (oldVersion < 4 && !db.objectStoreNames.contains("snapshots")) {
+      db.createObjectStore("snapshots", { keyPath: "key" })
     }
   }
 })
@@ -120,4 +129,18 @@ export async function bumpOutboxAttempts(ids: string[]) {
     await tx.store.put({ ...item, attempts: item.attempts + 1 })
   }
   await tx.done
+}
+
+export async function saveSnapshot<TData>(key: string, data: TData) {
+  const db = await dbPromise
+  await db.put("snapshots", {
+    key,
+    savedAt: Date.now(),
+    data
+  })
+}
+
+export async function getSnapshot<TData>(key: string) {
+  const db = await dbPromise
+  return (await db.get("snapshots", key)) as CachedSnapshot<TData> | undefined
 }

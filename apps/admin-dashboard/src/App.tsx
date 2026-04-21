@@ -3,6 +3,7 @@ import type { Session } from "@supabase/supabase-js"
 import AdminLogin from "./auth/AdminLogin"
 import AdminShell from "./layout/AdminShell"
 import { fetchAdminProfile, type AdminProfile } from "./lib/admin-profile"
+import { toSupabaseAuthErrorMessage } from "./lib/network-errors"
 import { supabase } from "./lib/supabase"
 
 const ADMIN_REMEMBERED_EMAIL_KEY = "triketrack_admin_remembered_email"
@@ -92,7 +93,7 @@ export default function App() {
         if (error.message.toLowerCase().includes("invalid login credentials")) {
           return "incorrect email or password, please try again"
         }
-        return error.message
+        return toSupabaseAuthErrorMessage(error)
       }
 
       if (!data.session?.access_token) {
@@ -119,7 +120,7 @@ export default function App() {
       setAdminProfile(profileResult.profile)
       return null
     } catch (error) {
-      return String(error)
+      return toSupabaseAuthErrorMessage(error)
     }
   }
 

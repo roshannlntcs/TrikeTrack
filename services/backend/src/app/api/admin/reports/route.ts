@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { requireAdminSession } from "../../../../lib/admin-session"
-import { listAppealsForAdmin } from "../../../../lib/appeals-db"
+import { listAppealsForAdmin, markAppealViewedForAdmin } from "../../../../lib/appeals-db"
 import {
   isReportStatus,
   listReportTypes,
@@ -54,6 +54,27 @@ export async function PATCH(request: Request) {
   }
 
   const payload = body as Record<string, unknown>
+  if (payload.action === "markAppealViewed") {
+    const appealId = typeof payload.appealId === "string" ? payload.appealId.trim() : ""
+
+    if (!appealId) {
+      return invalid("appealId must be a non-empty string.")
+    }
+
+    try {
+      const appealViewState = await markAppealViewedForAdmin(session.profile, appealId)
+      return NextResponse.json({
+        ok: true,
+        data: appealViewState
+      })
+    } catch (error) {
+      return invalid(
+        error instanceof Error ? error.message : "Unable to mark appeal as viewed.",
+        400
+      )
+    }
+  }
+
   const reportId = Number(payload.reportId)
   const status = payload.status
 

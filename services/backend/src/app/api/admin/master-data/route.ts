@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server"
 import { requireAdminSession } from "../../../../lib/admin-session"
 import {
+  createAdministrator,
   createBarangay,
   createDriver,
   createRoute,
   createToda,
   createTricycle,
+  deleteAdministrator,
   deleteBarangay,
   deleteDriver,
   deleteRoute,
@@ -14,27 +16,42 @@ import {
   getDriverById,
   getTricycleById,
   listMasterDataForAdmin,
+  updateAdministrator,
   updateBarangay,
   updateDriver,
   updateRoute,
   updateToda,
   updateTricycle,
+  type AdministratorRole,
   type CreateBarangayInput,
+  type CreateAdministratorInput,
   type CreateDriverInput,
   type CreateRouteInput,
   type CreateTodaInput,
   type CreateTricycleInput,
   type EntityStatus,
   type UpdateBarangayInput,
+  type UpdateAdministratorInput,
   type UpdateDriverInput,
   type UpdateRouteInput,
   type UpdateTodaInput,
   type UpdateTricycleInput
 } from "../../../../lib/master-data-db"
 
-type EntityType = "barangay" | "toda" | "driver" | "tricycle" | "route"
+type EntityType =
+  | "administrator"
+  | "barangay"
+  | "toda"
+  | "driver"
+  | "tricycle"
+  | "route"
 
 const ENTITY_STATUS_VALUES = new Set<EntityStatus>(["active", "inactive", "suspended"])
+const ADMIN_ROLE_VALUES = new Set<AdministratorRole>([
+  "superadmin",
+  "barangay_admin",
+  "toda_admin"
+])
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value)
@@ -65,8 +82,14 @@ const asEntityStatus = (value: unknown) =>
     ? (value as EntityStatus)
     : null
 
+const asAdministratorRole = (value: unknown) =>
+  typeof value === "string" && ADMIN_ROLE_VALUES.has(value as AdministratorRole)
+    ? (value as AdministratorRole)
+    : null
+
 const parseEntity = (value: unknown): EntityType | null => {
-  return value === "barangay" ||
+  return value === "administrator" ||
+    value === "barangay" ||
     value === "toda" ||
     value === "driver" ||
     value === "tricycle" ||
@@ -78,7 +101,12 @@ const parseEntity = (value: unknown): EntityType | null => {
 const invalid = (message: string, status = 400) =>
   NextResponse.json({ ok: false, message }, { status })
 
-const SUPERADMIN_ENTITIES = new Set<EntityType>(["barangay", "toda", "route"])
+const SUPERADMIN_ENTITIES = new Set<EntityType>([
+  "administrator",
+  "barangay",
+  "toda",
+  "route"
+])
 const TODA_ADMIN_ENTITIES = new Set<EntityType>(["driver", "tricycle"])
 
 const requireMasterDataSession = async (request: Request) => {
@@ -112,7 +140,7 @@ const ensureEntityPermission = (
       ok: false,
       message:
         role === "superadmin"
-          ? "Superadmin can manage barangays, TODAs, and routes only."
+          ? "Superadmin can manage administrator accounts, barangays, TODAs, and routes only."
           : "TODA admin can manage drivers and tricycles only."
     },
     { status: 403 }
@@ -168,6 +196,69 @@ const ensureTodaScopedUpdate = async (
 
   return null
 }
+
+const parseUpdateAdministrator = (
+  payload: Record<string, unknown>
+): UpdateAdministratorInput | null => {
+  const next: UpdateAdministratorInput = {}
+
+  if ("role" in payload) {
+    const role = asAdministratorRole(payload.role)
+    if (!role) return null
+    next.role = role
+  }
+
+  if ("barangayId" in payload) {
+    const barangayId = asOptionalPositiveInteger(payload.barangayId)
+    if (barangayId === undefined) return null
+    next.barangayId = barangayId
+  }
+
+  if ("todaId" in payload) {
+    const todaId = asOptionalPositiveInteger(payload.todaId)
+    if (todaId === undefined) return null
+    next.todaId = todaId
+  }
+
+  if ("status" in payload) {
+    const status = asEntityStatus(payload.status)
+    if (!status) return null
+    next.status = status
+  }
+
+  return Object.keys(next).length > 0 ? next : null
+}
+
+const parseCreateAdministrator = (
+  payload: Record<string, unknown>
+): CreateAdministratorInput | null => {
+  const email = asNonEmptyString(payload.email)
+  const role = asAdministratorRole(payload.role)
+  const password = asOptionalString(payload.password)
+  const status = "status" in payload ? asEntityStatus(payload.status) : "active"
+  const barangayId =
+    "barangayId" in payload ? asOptionalPositiveInteger(payload.barangayId) : undefined
+  const todaId =
+    "todaId" in payload ? asOptionalPositiveInteger(payload.todaId) : undefined
+
+  if (!email || !role || status === null || password === null) return null
+  if (barangayId === undefined || todaId === undefined) return null
+
+  return {
+    email,
+    password: password || undefined,
+    role,
+    barangayId,
+    todaId,
+    status
+  }
+}
+
+const isStrongPassword = (value: string) =>
+  value.length >= 8 &&
+  /[a-z]/.test(value) &&
+  /[A-Z]/.test(value) &&
+  /\d/.test(value)
 
 const parseCreateBarangay = (payload: Record<string, unknown>): CreateBarangayInput | null => {
   const barangayName = asNonEmptyString(payload.barangayName)
@@ -421,6 +512,26 @@ export async function POST(request: Request) {
 
   try {
     switch (entity) {
+      case "administrator": {
+        const parsed = parseCreateAdministrator(payload)
+        if (!parsed) return invalid("Invalid administrator payload.")
+
+        if (parsed.password && !isStrongPassword(parsed.password)) {
+          return invalid(
+            "Temporary password must be at least 8 characters and include uppercase, lowercase, and number characters."
+          )
+        }
+
+        if (parsed.role === "barangay_admin" && !parsed.barangayId) {
+          return invalid("Barangay admin accounts must target a barangay.")
+        }
+
+        if (parsed.role === "toda_admin" && !parsed.todaId) {
+          return invalid("TODA admin accounts must target a TODA.")
+        }
+
+        return NextResponse.json({ ok: true, item: await createAdministrator(parsed) })
+      }
       case "barangay": {
         const parsed = parseCreateBarangay(payload)
         if (!parsed) return invalid("Invalid barangay payload.")
@@ -485,6 +596,20 @@ export async function PATCH(request: Request) {
 
   try {
     switch (entity) {
+      case "administrator": {
+        const parsed = parseUpdateAdministrator(payload)
+        if (!parsed) return invalid("Invalid administrator update payload.")
+
+        if (parsed.role === "barangay_admin" && !parsed.barangayId) {
+          return invalid("Barangay admin accounts must target a barangay.")
+        }
+
+        if (parsed.role === "toda_admin" && !parsed.todaId) {
+          return invalid("TODA admin accounts must target a TODA.")
+        }
+
+        return NextResponse.json({ ok: true, item: await updateAdministrator(id, parsed) })
+      }
       case "barangay": {
         const parsed = parseUpdateBarangay(payload)
         if (!parsed) return invalid("Invalid barangay update payload.")
@@ -567,6 +692,9 @@ export async function DELETE(request: Request) {
     }
 
     switch (entity) {
+      case "administrator":
+        await deleteAdministrator(id, session.profile.adminId)
+        break
       case "barangay":
         await deleteBarangay(id)
         break

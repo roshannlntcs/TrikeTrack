@@ -1,5 +1,6 @@
 const SUPABASE_URL = process.env.SUPABASE_URL
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY
+const SUPABASE_ANON_KEY =
+  process.env.SUPABASE_PUBLISHABLE_KEY ?? process.env.SUPABASE_ANON_KEY
 
 type SupabaseUser = {
   id: string
@@ -8,7 +9,9 @@ type SupabaseUser = {
 
 const ensureConfig = () => {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-    throw new Error("Missing SUPABASE_URL or SUPABASE_ANON_KEY in backend environment.")
+    throw new Error(
+      "Missing SUPABASE_URL or either SUPABASE_PUBLISHABLE_KEY or SUPABASE_ANON_KEY in backend environment."
+    )
   }
 }
 

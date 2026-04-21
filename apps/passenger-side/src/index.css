@@ -96,6 +96,11 @@ textarea {
   background: #ffffff;
 }
 
+.panel--map {
+  display: grid;
+  gap: 14px;
+}
+
 .panel--centered,
 .success-panel {
   text-align: center;
@@ -178,6 +183,25 @@ textarea {
 .form-stack {
   display: grid;
   gap: 14px;
+}
+
+.trip-map-shell {
+  min-height: 340px;
+}
+
+.trip-map-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.trip-map-meta div {
+  padding: 12px;
+  border-radius: 14px;
+  background: #fafafa;
+  border: 1px solid #efefef;
+  display: grid;
+  gap: 6px;
 }
 
 .field {
@@ -563,6 +587,14 @@ textarea {
   }
 
   .driver-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .trip-map-shell {
+    min-height: 300px;
+  }
+
+  .trip-map-meta {
     grid-template-columns: 1fr;
   }
 }

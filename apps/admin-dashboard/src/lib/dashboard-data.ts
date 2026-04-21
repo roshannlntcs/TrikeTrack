@@ -1,3 +1,10 @@
+import { getSnapshot, saveSnapshot } from "./db"
+
+export type CacheMeta = {
+  fromCache: boolean
+  savedAt: string
+}
+
 export type DashboardDriverRecord = {
   driverId: number
   driverCode: string
@@ -129,6 +136,9 @@ export type DashboardTripRecord = {
   durationMinutes?: number
   fareAmount?: number
   distanceKm?: number
+  hasPath?: boolean
+  pathPointCount?: number
+  pathUpdatedAt?: string
   violationCount: number
   createdAt: string
 }
@@ -166,6 +176,18 @@ export type DashboardDataSnapshot = {
     openAlerts: number
     unreadNotifications: number
   }
+  cacheMeta?: CacheMeta
+}
+
+export type TripPathRecord = {
+  tripPathId: number
+  tripId: number
+  pointCount: number
+  pathGeojson: unknown
+  startedAt?: string
+  endedAt?: string
+  updatedAt: string
+  cacheMeta?: CacheMeta
 }
 
 type DashboardDataResponse = {
@@ -179,21 +201,77 @@ type NotificationReadResponse = {
   message?: string
 }
 
+type TripPathResponse = {
+  ok?: boolean
+  message?: string
+  data?: TripPathRecord | null
+}
+
+const DASHBOARD_CACHE_KEY = "dashboard-data"
+const tripPathCacheKey = (tripId: number) => `trip-path:${tripId}`
+
 export const fetchDashboardData = async (accessToken: string) => {
-  const response = await fetch("/api/admin/dashboard-data", {
-    headers: {
-      Authorization: `Bearer ${accessToken}`
+  try {
+    const response = await fetch("/api/admin/dashboard-data", {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      }
+    })
+
+    const payload = (await response.json().catch(() => ({}))) as DashboardDataResponse
+    if (!response.ok || !payload.data) {
+      throw new Error(
+        payload.message ?? `Dashboard API returned HTTP ${response.status}.`
+      )
     }
-  })
 
-  const payload = (await response.json().catch(() => ({}))) as DashboardDataResponse
-  if (!response.ok || !payload.data) {
-    throw new Error(
-      payload.message ?? `Dashboard API returned HTTP ${response.status}.`
-    )
+    await saveSnapshot(DASHBOARD_CACHE_KEY, payload.data)
+    return payload.data
+  } catch (error) {
+    const cached = await getSnapshot<DashboardDataSnapshot>(DASHBOARD_CACHE_KEY)
+    if (cached) {
+      return {
+        ...cached.data,
+        cacheMeta: {
+          fromCache: true,
+          savedAt: new Date(cached.savedAt).toISOString()
+        }
+      }
+    }
+    throw error
   }
+}
 
-  return payload.data
+export const fetchTripPath = async (accessToken: string, tripId: number) => {
+  try {
+    const response = await fetch(`/api/admin/trips/${tripId}/path`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      }
+    })
+
+    const payload = (await response.json().catch(() => ({}))) as TripPathResponse
+    if (!response.ok) {
+      throw new Error(payload.message ?? `Trip path API returned HTTP ${response.status}.`)
+    }
+
+    if (payload.data) {
+      await saveSnapshot(tripPathCacheKey(tripId), payload.data)
+    }
+    return payload.data ?? null
+  } catch (error) {
+    const cached = await getSnapshot<TripPathRecord>(tripPathCacheKey(tripId))
+    if (cached) {
+      return {
+        ...cached.data,
+        cacheMeta: {
+          fromCache: true,
+          savedAt: new Date(cached.savedAt).toISOString()
+        }
+      }
+    }
+    throw error
+  }
 }
 
 export const markDashboardNotificationsRead = async (

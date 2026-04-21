@@ -65,6 +65,7 @@ const STATUS_OPTIONS: Array<"all" | EntityStatus> = [
 ]
 
 const initialMasterData: MasterDataSnapshot = {
+  administrators: [],
   barangays: [],
   todas: [],
   drivers: [],
@@ -689,8 +690,6 @@ export default function TodaManagementPage({
   const pageTitle = isDriverPage ? "Drivers" : "Tricycles"
   const searchPlaceholder = isDriverPage ? "Search drivers..." : "Search tricycles..."
   const addButtonLabel = isDriverPage ? "Add Driver" : "Add Tricycle"
-  const totalCount = isDriverPage ? data.drivers.length : data.tricycles.length
-  const filteredCount = isDriverPage ? filteredDriverRows.length : filteredTricycleRows.length
   const modalBusyKey = isDriverPage
     ? modalMode === "create"
       ? "create-driver"
@@ -701,17 +700,6 @@ export default function TodaManagementPage({
 
   return (
     <section className="fleet-page">
-      <header className="fleet-page__header">
-        <div>
-          <h2>{pageTitle}</h2>
-          <p>
-            {lockedTodaLabel
-              ? `${filteredCount} of ${totalCount} records for ${lockedTodaLabel}.`
-              : `${filteredCount} of ${totalCount} records loaded.`}
-          </p>
-        </div>
-      </header>
-
       {(error || notice) && (
         <div className={`fleet-banner ${error ? "fleet-banner--error" : ""}`}>
           {error ?? notice}

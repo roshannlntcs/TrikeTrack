@@ -1,3 +1,5 @@
+import { toAdminApiErrorMessage } from "./network-errors"
+
 export type AdminProfile = {
   adminId: number
   authUserId: string
@@ -44,7 +46,7 @@ export const fetchAdminProfile = async (accessToken: string) => {
   } catch (error) {
     return {
       profile: null,
-      error: `Unable to reach admin API: ${String(error)}`
+      error: toAdminApiErrorMessage(error)
     }
   }
 }

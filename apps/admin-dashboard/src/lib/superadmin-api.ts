@@ -1,4 +1,7 @@
+import { getSnapshot, saveSnapshot, type CachedSnapshot } from "./db"
+
 export type EntityStatus = "active" | "inactive" | "suspended"
+export type AdministratorRole = "superadmin" | "barangay_admin" | "toda_admin"
 
 export type BarangayRecord = {
   barangayId: number
@@ -66,15 +69,40 @@ export type RouteRecord = {
   createdAt: string
 }
 
+export type AdministratorRecord = {
+  adminId: number
+  authUserId: string
+  email: string
+  role: AdministratorRole
+  status: EntityStatus
+  barangayId?: number
+  barangayName?: string
+  todaId?: number
+  todaName?: string
+  city?: string
+  createdAt: string
+}
+
 export type MasterDataSnapshot = {
+  administrators: AdministratorRecord[]
   barangays: BarangayRecord[]
   todas: TodaRecord[]
   drivers: DriverRecord[]
   tricycles: TricycleRecord[]
   routes: RouteRecord[]
+  cacheMeta?: {
+    fromCache: boolean
+    savedAt: string
+  }
 }
 
-export type EntityType = "barangay" | "toda" | "driver" | "tricycle" | "route"
+export type EntityType =
+  | "administrator"
+  | "barangay"
+  | "toda"
+  | "driver"
+  | "tricycle"
+  | "route"
 
 type MasterDataResponse = {
   ok?: boolean
@@ -82,6 +110,16 @@ type MasterDataResponse = {
   data?: MasterDataSnapshot
   item?: unknown
 }
+
+const MASTER_DATA_CACHE_KEY = "master-data"
+
+const withCacheMeta = <TData extends object>(cached: CachedSnapshot<TData>) => ({
+  ...cached.data,
+  cacheMeta: {
+    fromCache: true,
+    savedAt: new Date(cached.savedAt).toISOString()
+  }
+})
 
 const parseError = async (response: Response) => {
   const payload = (await response.json().catch(() => ({}))) as MasterDataResponse
@@ -109,11 +147,20 @@ const request = async <T>(
 }
 
 export const fetchMasterData = async (accessToken: string) => {
-  const response = await request<MasterDataResponse>(accessToken, { method: "GET" })
-  if (!response.data) {
-    throw new Error("Master data response was missing data.")
+  try {
+    const response = await request<MasterDataResponse>(accessToken, { method: "GET" })
+    if (!response.data) {
+      throw new Error("Master data response was missing data.")
+    }
+    await saveSnapshot(MASTER_DATA_CACHE_KEY, response.data)
+    return response.data
+  } catch (error) {
+    const cached = await getSnapshot<MasterDataSnapshot>(MASTER_DATA_CACHE_KEY)
+    if (cached) {
+      return withCacheMeta(cached)
+    }
+    throw error
   }
-  return response.data
 }
 
 export const createMasterDataItem = async <TItem>(

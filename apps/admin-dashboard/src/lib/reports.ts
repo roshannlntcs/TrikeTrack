@@ -1,3 +1,5 @@
+import { getSnapshot, saveSnapshot, type CachedSnapshot } from "./db"
+
 export type ReportStatus =
   | "submitted"
   | "under_review"
@@ -71,6 +73,8 @@ export type AdminAppealRecord = {
   status: AppealStatus
   submittedAt: string
   reviewedAt?: string
+  viewedAt?: string
+  viewedByAdminId?: number
   decisionNotes?: string
   proofImageUrl?: string
   proofImageUrls: string[]
@@ -86,25 +90,61 @@ type AdminReportsResponse = {
   }
 }
 
+type AdminReportsData = NonNullable<AdminReportsResponse["data"]> & {
+  cacheMeta?: {
+    fromCache: boolean
+    savedAt: string
+  }
+}
+
+const REPORTS_CACHE_KEY = "admin-reports"
+
+const withCacheMeta = <TData extends object>(cached: CachedSnapshot<TData>) => ({
+  ...cached.data,
+  cacheMeta: {
+    fromCache: true,
+    savedAt: new Date(cached.savedAt).toISOString()
+  }
+})
+
 type AdminReportUpdateResponse = {
   ok?: boolean
   message?: string
   data?: AdminReportRecord
 }
 
-export const fetchAdminReports = async (accessToken: string) => {
-  const response = await fetch("/api/admin/reports", {
-    headers: {
-      Authorization: `Bearer ${accessToken}`
-    }
-  })
-
-  const payload = (await response.json().catch(() => ({}))) as AdminReportsResponse
-  if (!response.ok || !payload.data) {
-    throw new Error(payload.message ?? `Reports API returned HTTP ${response.status}.`)
+type AdminAppealViewUpdateResponse = {
+  ok?: boolean
+  message?: string
+  data?: {
+    appealId: string
+    viewedAt: string
+    viewedByAdminId?: number
   }
+}
 
-  return payload.data
+export const fetchAdminReports = async (accessToken: string) => {
+  try {
+    const response = await fetch("/api/admin/reports", {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      }
+    })
+
+    const payload = (await response.json().catch(() => ({}))) as AdminReportsResponse
+    if (!response.ok || !payload.data) {
+      throw new Error(payload.message ?? `Reports API returned HTTP ${response.status}.`)
+    }
+
+    await saveSnapshot(REPORTS_CACHE_KEY, payload.data)
+    return payload.data
+  } catch (error) {
+    const cached = await getSnapshot<AdminReportsData>(REPORTS_CACHE_KEY)
+    if (cached) {
+      return withCacheMeta(cached)
+    }
+    throw error
+  }
 }
 
 export const updateAdminReportStatus = async (
@@ -125,6 +165,27 @@ export const updateAdminReportStatus = async (
   })
 
   const payload = (await response.json().catch(() => ({}))) as AdminReportUpdateResponse
+  if (!response.ok || !payload.data) {
+    throw new Error(payload.message ?? `Reports API returned HTTP ${response.status}.`)
+  }
+
+  return payload.data
+}
+
+export const markAdminAppealViewed = async (accessToken: string, appealId: string) => {
+  const response = await fetch("/api/admin/reports", {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      action: "markAppealViewed",
+      appealId
+    })
+  })
+
+  const payload = (await response.json().catch(() => ({}))) as AdminAppealViewUpdateResponse
   if (!response.ok || !payload.data) {
     throw new Error(payload.message ?? `Reports API returned HTTP ${response.status}.`)
   }

@@ -193,6 +193,30 @@ create table public.trip_points (
   created_at timestamptz not null default now()
 );
 
+create table public.driver_locations (
+  driver_id bigint primary key references public.drivers(driver_id) on delete cascade,
+  driver_code text not null,
+  trip_id bigint references public.trips(trip_id) on delete set null,
+  latitude double precision not null,
+  longitude double precision not null,
+  speed double precision,
+  heading double precision,
+  accuracy double precision,
+  recorded_at timestamptz not null,
+  is_online boolean not null default true,
+  updated_at timestamptz not null default now()
+);
+
+create table public.trip_paths (
+  trip_path_id bigint generated always as identity primary key,
+  trip_id bigint not null unique references public.trips(trip_id) on delete cascade,
+  point_count integer not null default 0,
+  path_geojson jsonb not null,
+  started_at timestamptz,
+  ended_at timestamptz,
+  updated_at timestamptz not null default now()
+);
+
 create table public.passenger_scans (
   scan_id bigint generated always as identity primary key,
   trip_id bigint references public.trips(trip_id) on delete set null,
@@ -236,6 +260,10 @@ create table public.violations (
   driver_id bigint references public.drivers(driver_id) on delete set null,
   tricycle_id bigint references public.tricycles(tricycle_id) on delete set null,
   description text,
+  latitude double precision,
+  longitude double precision,
+  location_label text,
+  dedupe_key text,
   detected_at timestamptz not null default now(),
   source violation_source not null default 'system',
   status violation_status not null default 'open',
@@ -326,6 +354,9 @@ create index idx_trips_trip_start on public.trips(trip_start);
 create index idx_trip_points_trip_id on public.trip_points(trip_id);
 create index idx_trip_points_driver_id on public.trip_points(driver_id);
 create index idx_trip_points_recorded_at on public.trip_points(recorded_at desc);
+create index idx_driver_locations_trip_id on public.driver_locations(trip_id);
+create index idx_driver_locations_recorded_at on public.driver_locations(recorded_at desc);
+create index idx_trip_paths_updated_at on public.trip_paths(updated_at desc);
 
 create index idx_passenger_scans_trip_id on public.passenger_scans(trip_id);
 create index idx_passenger_scans_driver_id on public.passenger_scans(driver_id);
@@ -349,6 +380,9 @@ create index idx_violations_driver_id on public.violations(driver_id);
 create index idx_violations_tricycle_id on public.violations(tricycle_id);
 create index idx_violations_status on public.violations(status);
 create index idx_violations_detected_at on public.violations(detected_at);
+create unique index uq_violations_dedupe_key
+on public.violations(dedupe_key)
+where dedupe_key is not null;
 create index idx_emergency_alerts_status on public.emergency_alerts(status);
 create index idx_emergency_alerts_created_at on public.emergency_alerts(created_at desc);
 create index idx_emergency_alerts_driver_id on public.emergency_alerts(driver_id);

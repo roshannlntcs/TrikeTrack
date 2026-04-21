@@ -73,7 +73,7 @@
 }
 
 .brand-title--blue {
-  color: #0832ad;
+  color: #101317;
 }
 
 .brand-title--white {
@@ -108,12 +108,14 @@
   font-weight: 700;
   line-height: 1.08;
   letter-spacing: -0.03em;
+  text-align: center;
 }
 
 .login-form__lead {
   margin: 0 0 18px;
   font-size: 0.96rem;
   color: #1f3036;
+  text-align: center;
 }
 
 .login-form label {

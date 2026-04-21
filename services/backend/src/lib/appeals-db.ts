@@ -1,4 +1,4 @@
-import { ensureDatabaseReady, hasTable, query } from "./database"
+import { ensureDatabaseReady, hasColumn, hasTable, query } from "./database"
 import type { AdminProfile } from "./admin-auth-db"
 
 export type AppealStatus =
@@ -32,6 +32,8 @@ export type AdminViolationAppealRecord = {
   status: AppealStatus
   submittedAt: string
   reviewedAt?: string
+  viewedAt?: string
+  viewedByAdminId?: number
   decisionNotes?: string
   proofImageUrl?: string
   proofImageUrls: string[]
@@ -63,9 +65,13 @@ type AdminViolationAppealRow = {
   appeal_status: AppealStatus
   submitted_at: Date
   reviewed_at: Date | null
+  admin_viewed_at: Date | null
+  admin_viewed_by_admin_id: number | null
   decision_notes: string | null
   proof_urls: string[] | null
 }
+
+let ensureAppealViewColumnsPromise: Promise<void> | undefined
 
 const buildScopeClause = (
   profile: AdminProfile,
@@ -125,10 +131,58 @@ const mapAppeal = (
     status: row.appeal_status,
     submittedAt: row.submitted_at.toISOString(),
     reviewedAt: row.reviewed_at?.toISOString(),
+    viewedAt: row.admin_viewed_at?.toISOString(),
+    viewedByAdminId:
+      row.admin_viewed_by_admin_id === null
+        ? undefined
+        : Number(row.admin_viewed_by_admin_id),
     decisionNotes: row.decision_notes ?? undefined,
     proofImageUrl: proofImageUrls[0] ?? undefined,
     proofImageUrls
   }
+}
+
+const ensureAppealViewColumns = async () => {
+  if (ensureAppealViewColumnsPromise) {
+    return ensureAppealViewColumnsPromise
+  }
+
+  ensureAppealViewColumnsPromise = (async () => {
+    const [hasViewedAtColumn, hasViewedByColumn] = await Promise.all([
+      hasColumn("public", "violation_appeals", "admin_viewed_at"),
+      hasColumn("public", "violation_appeals", "admin_viewed_by_admin_id")
+    ])
+
+    if (!hasViewedAtColumn) {
+      await query(`
+        ALTER TABLE public.violation_appeals
+        ADD COLUMN IF NOT EXISTS admin_viewed_at timestamptz
+      `)
+    }
+
+    if (!hasViewedByColumn) {
+      await query(`
+        ALTER TABLE public.violation_appeals
+        ADD COLUMN IF NOT EXISTS admin_viewed_by_admin_id bigint
+        REFERENCES public.admin_accounts(admin_id)
+        ON DELETE SET NULL
+      `)
+      await query(`
+        CREATE INDEX IF NOT EXISTS idx_violation_appeals_admin_viewed_by
+        ON public.violation_appeals(admin_viewed_by_admin_id)
+      `)
+    }
+
+    await query(`
+      CREATE INDEX IF NOT EXISTS idx_violation_appeals_admin_viewed_at
+      ON public.violation_appeals(admin_viewed_at DESC NULLS LAST)
+    `)
+  })().catch((error) => {
+    ensureAppealViewColumnsPromise = undefined
+    throw error
+  })
+
+  return ensureAppealViewColumnsPromise
 }
 
 export const listAppealsForAdmin = async (profile: AdminProfile) => {
@@ -143,6 +197,8 @@ export const listAppealsForAdmin = async (profile: AdminProfile) => {
   if (!hasAppealsTable || !hasMobileViolationsTable) {
     return [] as AdminViolationAppealRecord[]
   }
+
+  await ensureAppealViewColumns()
 
   const scope = buildScopeClause(profile, "td.toda_id", "b.barangay_id")
   const proofSelect = hasProofsTable
@@ -188,6 +244,8 @@ export const listAppealsForAdmin = async (profile: AdminProfile) => {
         LOWER(va.status::text)::text AS appeal_status,
         va.submitted_at,
         va.reviewed_at,
+        va.admin_viewed_at,
+        va.admin_viewed_by_admin_id,
         va.decision_notes,
         ${proofSelect}
       FROM public.violation_appeals va
@@ -214,4 +272,78 @@ export const listAppealsForAdmin = async (profile: AdminProfile) => {
   )
 
   return result.rows.map(mapAppeal)
+}
+
+export const markAppealViewedForAdmin = async (
+  profile: AdminProfile,
+  appealId: string
+) => {
+  await ensureDatabaseReady()
+
+  const [hasAppealsTable, hasMobileViolationsTable] = await Promise.all([
+    hasTable("public", "violation_appeals"),
+    hasTable("public", "mobile_violations")
+  ])
+
+  if (!hasAppealsTable || !hasMobileViolationsTable) {
+    throw new Error("Driver appeals are not available.")
+  }
+
+  await ensureAppealViewColumns()
+
+  const scope = buildScopeClause(profile, "td.toda_id", "b.barangay_id")
+  const params = [appealId.trim(), profile.adminId, ...scope.params]
+  const appealIdParam = "$1"
+  const adminIdParam = "$2"
+  const scopeClause = scope.clause
+    ? scope.clause
+        .replace(/^WHERE\s+/i, "AND ")
+        .replace(/\$(\d+)/g, (_, index: string) => `$${Number(index) + 2}`)
+    : ""
+
+  const result = await query<{
+    appeal_id: string
+    admin_viewed_at: Date
+    admin_viewed_by_admin_id: number | null
+  }>(
+    `
+      WITH scoped_appeal AS (
+        SELECT va.id
+        FROM public.violation_appeals va
+        JOIN public.mobile_violations mv
+          ON mv.id = va.violation_id
+        JOIN public.drivers d
+          ON d.driver_id = va.driver_id
+        JOIN public.todas td
+          ON td.toda_id = d.toda_id
+        JOIN public.barangays b
+          ON b.barangay_id = td.barangay_id
+        WHERE va.id::text = ${appealIdParam}
+        ${scopeClause ? ` ${scopeClause}` : ""}
+        LIMIT 1
+      )
+      UPDATE public.violation_appeals va
+      SET
+        admin_viewed_at = COALESCE(va.admin_viewed_at, NOW()),
+        admin_viewed_by_admin_id = COALESCE(va.admin_viewed_by_admin_id, ${adminIdParam})
+      WHERE va.id IN (SELECT id FROM scoped_appeal)
+      RETURNING
+        va.id::text AS appeal_id,
+        va.admin_viewed_at,
+        va.admin_viewed_by_admin_id
+    `,
+    params
+  )
+
+  const row = result.rows[0]
+  if (!row) {
+    throw new Error("Appeal not found in your admin scope.")
+  }
+
+  return {
+    appealId: row.appeal_id,
+    viewedAt: row.admin_viewed_at.toISOString(),
+    viewedByAdminId:
+      row.admin_viewed_by_admin_id === null ? undefined : Number(row.admin_viewed_by_admin_id)
+  }
 }

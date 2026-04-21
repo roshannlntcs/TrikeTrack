@@ -5,6 +5,21 @@ import { ensureDatabaseReady, query, withTransaction } from "./database"
 
 export type EntityStatus = "active" | "inactive" | "suspended"
 export type QrStatus = "active" | "inactive" | "revoked" | "expired"
+export type AdministratorRole = AdminProfile["role"]
+
+export type AdministratorRecord = {
+  adminId: number
+  authUserId: string
+  email: string
+  role: AdministratorRole
+  status: EntityStatus
+  barangayId?: number
+  barangayName?: string
+  todaId?: number
+  todaName?: string
+  city?: string
+  createdAt: string
+}
 
 export type BarangayRecord = {
   barangayId: number
@@ -73,6 +88,7 @@ export type RouteRecord = {
 }
 
 export type MasterDataSnapshot = {
+  administrators: AdministratorRecord[]
   barangays: BarangayRecord[]
   todas: TodaRecord[]
   drivers: DriverRecord[]
@@ -143,6 +159,36 @@ export type UpdateRouteInput = Partial<CreateRouteInput> & {
   status?: EntityStatus
 }
 
+export type CreateAdministratorInput = {
+  email: string
+  password?: string
+  role: AdministratorRole
+  barangayId?: number | null
+  todaId?: number | null
+  status?: EntityStatus
+}
+
+export type UpdateAdministratorInput = {
+  role?: AdministratorRole
+  barangayId?: number | null
+  todaId?: number | null
+  status?: EntityStatus
+}
+
+type AdministratorRow = {
+  admin_id: number
+  auth_user_id: string
+  email: string
+  admin_role: AdministratorRole
+  status: EntityStatus
+  barangay_id: number | null
+  barangay_name: string | null
+  toda_id: number | null
+  toda_name: string | null
+  city: string | null
+  created_at: Date
+}
+
 type BarangayRow = {
   barangay_id: number
   barangay_name: string
@@ -207,6 +253,20 @@ type RouteRow = {
   status: EntityStatus
   created_at: Date
 }
+
+const mapAdministrator = (row: AdministratorRow): AdministratorRecord => ({
+  adminId: Number(row.admin_id),
+  authUserId: row.auth_user_id,
+  email: row.email,
+  role: row.admin_role,
+  status: row.status,
+  barangayId: row.barangay_id === null ? undefined : Number(row.barangay_id),
+  barangayName: row.barangay_name ?? undefined,
+  todaId: row.toda_id === null ? undefined : Number(row.toda_id),
+  todaName: row.toda_name ?? undefined,
+  city: row.city ?? undefined,
+  createdAt: row.created_at.toISOString()
+})
 
 const mapBarangay = (row: BarangayRow): BarangayRecord => ({
   barangayId: row.barangay_id,
@@ -276,6 +336,68 @@ const mapRoute = (row: RouteRow): RouteRecord => ({
 
 const hasOwn = <T extends object>(value: T, key: PropertyKey) =>
   Object.prototype.hasOwnProperty.call(value, key)
+
+const SUPABASE_URL = process.env.SUPABASE_URL?.trim().replace(/\/$/, "")
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()
+
+const normalizeEmail = (email: string) => email.trim().toLowerCase()
+
+const getAuthUserIdByEmail = async (email: string) => {
+  const result = await query<{ id: string }>(
+    `
+      SELECT id
+      FROM auth.users
+      WHERE lower(email) = lower($1)
+      LIMIT 1
+    `,
+    [email]
+  )
+
+  return result.rows[0]?.id
+}
+
+const createSupabaseAuthUser = async (email: string, password: string) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error(
+      "Cannot create a new authenticated admin user because SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing. Add a temporary password only when Supabase admin credentials are configured, or link an existing auth user by email."
+    )
+  }
+
+  const response = await fetch(`${SUPABASE_URL}/auth/v1/admin/users`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: {
+        source: "admin-dashboard"
+      }
+    })
+  })
+
+  const payload = (await response.json().catch(() => ({}))) as {
+    id?: string
+    message?: string
+    error_description?: string
+    error?: string
+  }
+
+  if (!response.ok || !payload.id) {
+    throw new Error(
+      payload.message ??
+        payload.error_description ??
+        payload.error ??
+        `Supabase Auth returned HTTP ${response.status}.`
+    )
+  }
+
+  return payload.id
+}
 
 const B_BARANGAY_SELECT = `
   SELECT
@@ -535,6 +657,30 @@ const R_ROUTE_SELECT = `
     ON b.barangay_id = t.barangay_id
 `
 
+const A_ADMINISTRATOR_SELECT = `
+  SELECT
+    aa.admin_id,
+    aa.auth_user_id,
+    au.email,
+    aa.admin_role,
+    aa.status,
+    COALESCE(aa.barangay_id, tb.barangay_id) AS barangay_id,
+    COALESCE(b.barangay_name, tb.barangay_name) AS barangay_name,
+    aa.toda_id,
+    t.toda_name,
+    COALESCE(b.city, tb.city) AS city,
+    aa.created_at
+  FROM public.admin_accounts aa
+  JOIN auth.users au
+    ON au.id = aa.auth_user_id
+  LEFT JOIN public.barangays b
+    ON b.barangay_id = aa.barangay_id
+  LEFT JOIN public.todas t
+    ON t.toda_id = aa.toda_id
+  LEFT JOIN public.barangays tb
+    ON tb.barangay_id = t.barangay_id
+`
+
 const getBarangayById = async (barangayId: number) => {
   const result = await query<BarangayRow>(
     `
@@ -610,10 +756,31 @@ const getRouteById = async (routeId: number) => {
   return mapRoute(row)
 }
 
+const getAdministratorById = async (adminId: number) => {
+  const result = await query<AdministratorRow>(
+    `
+      ${A_ADMINISTRATOR_SELECT}
+      WHERE aa.admin_id = $1
+      LIMIT 1
+    `,
+    [adminId]
+  )
+
+  const row = result.rows[0]
+  if (!row) throw new Error("Administrator not found.")
+  return mapAdministrator(row)
+}
+
 export const listMasterData = async (): Promise<MasterDataSnapshot> => {
   await ensureDatabaseReady()
 
-  const [barangays, todas, initialDrivers, tricycles, routes] = await Promise.all([
+  const [administrators, barangays, todas, initialDrivers, tricycles, routes] = await Promise.all([
+    query<AdministratorRow>(
+      `
+        ${A_ADMINISTRATOR_SELECT}
+        ORDER BY aa.created_at DESC, au.email ASC
+      `
+    ),
     query<BarangayRow>(
       `
         ${B_BARANGAY_SELECT}
@@ -660,6 +827,7 @@ export const listMasterData = async (): Promise<MasterDataSnapshot> => {
     : initialDrivers.rows
 
   return {
+    administrators: administrators.rows.map(mapAdministrator),
     barangays: barangays.rows.map(mapBarangay),
     todas: todas.rows.map(mapToda),
     drivers: driverRows.map(mapDriver),
@@ -699,13 +867,33 @@ export const listMasterDataForAdmin = async (
 ): Promise<MasterDataSnapshot> => {
   await ensureDatabaseReady()
 
+  const administratorScope =
+    profile.role === "superadmin"
+      ? { clause: "", params: [] as unknown[] }
+      : profile.role === "barangay_admin" && profile.barangayId
+        ? {
+            clause:
+              "WHERE COALESCE(aa.barangay_id, tb.barangay_id) = $1",
+            params: [profile.barangayId]
+          }
+        : profile.role === "toda_admin" && profile.todaId
+          ? { clause: "WHERE aa.toda_id = $1", params: [profile.todaId] }
+          : { clause: "WHERE 1 = 0", params: [] as unknown[] }
   const barangayScope = buildScopeClause(profile, "t.toda_id", "b.barangay_id")
   const todaScope = buildScopeClause(profile, "t.toda_id", "b.barangay_id")
   const driverScope = buildScopeClause(profile, "d.toda_id", "b.barangay_id")
   const tricycleScope = buildScopeClause(profile, "tr.toda_id", "b.barangay_id")
   const routeScope = buildScopeClause(profile, "r.toda_id", "b.barangay_id")
 
-  const [barangays, todas, initialDrivers, tricycles, routes] = await Promise.all([
+  const [administrators, barangays, todas, initialDrivers, tricycles, routes] = await Promise.all([
+    query<AdministratorRow>(
+      `
+        ${A_ADMINISTRATOR_SELECT}
+        ${administratorScope.clause}
+        ORDER BY aa.created_at DESC, au.email ASC
+      `,
+      administratorScope.params
+    ),
     query<BarangayRow>(
       `
         ${B_BARANGAY_SELECT}
@@ -764,12 +952,168 @@ export const listMasterDataForAdmin = async (
     : initialDrivers.rows
 
   return {
+    administrators: administrators.rows.map(mapAdministrator),
     barangays: barangays.rows.map(mapBarangay),
     todas: todas.rows.map(mapToda),
     drivers: driverRows.map(mapDriver),
     tricycles: tricycles.rows.map(mapTricycle),
     routes: routes.rows.map(mapRoute)
   }
+}
+
+export const createAdministrator = async (input: CreateAdministratorInput) => {
+  await ensureDatabaseReady()
+
+  const email = normalizeEmail(input.email)
+  const password = input.password?.trim()
+  const nextStatus = input.status ?? "active"
+  const nextBarangayId = input.role === "barangay_admin" ? (input.barangayId ?? null) : null
+  const nextTodaId = input.role === "toda_admin" ? (input.todaId ?? null) : null
+
+  if (!email) {
+    throw new Error("Administrator email is required.")
+  }
+
+  if (input.role === "barangay_admin" && !nextBarangayId) {
+    throw new Error("Barangay admin accounts must be assigned to a barangay.")
+  }
+
+  if (input.role === "toda_admin" && !nextTodaId) {
+    throw new Error("TODA admin accounts must be assigned to a TODA.")
+  }
+
+  let authUserId = await getAuthUserIdByEmail(email)
+  if (!authUserId) {
+    if (!password || password.length < 8) {
+      throw new Error(
+        "No existing auth user was found for this email. Provide a temporary password with at least 8 characters to create one."
+      )
+    }
+
+    authUserId = await createSupabaseAuthUser(email, password)
+  }
+
+  const existing = await query<{ admin_id: number }>(
+    `
+      SELECT admin_id
+      FROM public.admin_accounts
+      WHERE auth_user_id = $1
+      LIMIT 1
+    `,
+    [authUserId]
+  )
+
+  if (existing.rows[0]) {
+    throw new Error("This email is already linked to an administrator account.")
+  }
+
+  const result = await query<{ admin_id: number }>(
+    `
+      INSERT INTO public.admin_accounts (
+        auth_user_id,
+        admin_role,
+        barangay_id,
+        toda_id,
+        status
+      )
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING admin_id
+    `,
+    [
+      authUserId,
+      input.role,
+      input.role === "barangay_admin" ? nextBarangayId : null,
+      input.role === "toda_admin" ? nextTodaId : null,
+      nextStatus
+    ]
+  )
+
+  return getAdministratorById(result.rows[0].admin_id)
+}
+
+export const updateAdministrator = async (
+  adminId: number,
+  input: UpdateAdministratorInput
+) => {
+  await ensureDatabaseReady()
+
+  const current = await getAdministratorById(adminId)
+  const nextRole = input.role ?? current.role
+  const nextStatus = input.status ?? current.status
+  const nextBarangayId =
+    input.barangayId !== undefined
+      ? input.barangayId
+      : nextRole === "barangay_admin"
+        ? (current.barangayId ?? null)
+        : null
+  const nextTodaId =
+    input.todaId !== undefined
+      ? input.todaId
+      : nextRole === "toda_admin"
+        ? (current.todaId ?? null)
+        : null
+
+  if (nextRole === "barangay_admin" && !nextBarangayId) {
+    throw new Error("Barangay admin accounts must be assigned to a barangay.")
+  }
+
+  if (nextRole === "toda_admin" && !nextTodaId) {
+    throw new Error("TODA admin accounts must be assigned to a TODA.")
+  }
+
+  await query(
+    `
+      UPDATE public.admin_accounts
+      SET
+        admin_role = $2,
+        barangay_id = $3,
+        toda_id = $4,
+        status = $5
+      WHERE admin_id = $1
+    `,
+    [
+      adminId,
+      nextRole,
+      nextRole === "barangay_admin" ? nextBarangayId : null,
+      nextRole === "toda_admin" ? nextTodaId : null,
+      nextStatus
+    ]
+  )
+
+  return getAdministratorById(adminId)
+}
+
+export const deleteAdministrator = async (adminId: number, currentAdminId: number) => {
+  await ensureDatabaseReady()
+
+  if (adminId === currentAdminId) {
+    throw new Error("You cannot delete your own administrator account.")
+  }
+
+  const current = await getAdministratorById(adminId)
+
+  if (current.role === "superadmin") {
+    const superadminCount = await query<{ count: string }>(
+      `
+        SELECT COUNT(*)::text AS count
+        FROM public.admin_accounts
+        WHERE admin_role = 'superadmin'
+          AND status = 'active'
+      `
+    )
+
+    if (Number(superadminCount.rows[0]?.count ?? "0") <= 1) {
+      throw new Error("Cannot delete the last active superadmin account.")
+    }
+  }
+
+  await query(
+    `
+      DELETE FROM public.admin_accounts
+      WHERE admin_id = $1
+    `,
+    [adminId]
+  )
 }
 
 export const createBarangay = async (input: CreateBarangayInput) => {

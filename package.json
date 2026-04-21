@@ -17,5 +17,12 @@
   "bugs": {
     "url": "https://github.com/roshannlntcs/TrikeTrack/issues"
   },
-  "homepage": "https://github.com/roshannlntcs/TrikeTrack#readme"
+  "homepage": "https://github.com/roshannlntcs/TrikeTrack#readme",
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "maplibre-gl": "^5.23.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
+  }
 }

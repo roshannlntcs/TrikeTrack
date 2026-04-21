@@ -4,6 +4,7 @@ import * as turf from "@turf/turf"
 import type { GeoJSON as MapGeoJSON } from "../types/geojson"
 import type { DriverLocationEvent } from "../lib/shared-types"
 import type { AdminProfile } from "../lib/admin-profile"
+import { markAdminAppealViewed } from "../lib/reports"
 import {
   fetchDashboardData,
   type DashboardDataSnapshot,
@@ -12,6 +13,8 @@ import {
   type DashboardOperationalDriverRecord,
   type DashboardTripRecord,
   type DashboardViolationRecord,
+  type TripPathRecord,
+  fetchTripPath,
   markDashboardNotificationsRead
 } from "../lib/dashboard-data"
 import {
@@ -23,6 +26,11 @@ import { supabase } from "../lib/supabase"
 import ReportsPage from "../components/ReportsPage"
 import SuperadminPage from "../superadmin/SuperadminPage"
 import TodaManagementPage from "../toda/TodaManagementPage"
+import {
+  MAP_STYLE_OPTIONS,
+  createRasterStyle,
+  type TriketrackMapStyleId
+} from "../../../../common/maps"
 import "./AdminShell.css"
 
 type DriverStreamState = {
@@ -49,6 +57,98 @@ type NavItem = {
   label: string
 }
 
+const renderNavIcon = (key: NavKey) => {
+  const commonProps = {
+    width: 18,
+    height: 18,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.8,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true
+  }
+
+  switch (key) {
+    case "home":
+      return (
+        <svg {...commonProps}>
+          <path d="M3 10.5 12 3l9 7.5" />
+          <path d="M5.5 9.5V20h13V9.5" />
+          <path d="M9.5 20v-6h5v6" />
+        </svg>
+      )
+    case "live-map":
+      return (
+        <svg {...commonProps}>
+          <path d="M9 18 3.8 20.2V6L9 3.8l6 2.4 5.2-2.4v14.2L15 20.2z" />
+          <path d="M9 3.8v14.2" />
+          <path d="M15 6.2v14" />
+        </svg>
+      )
+    case "drivers":
+      return (
+        <svg {...commonProps}>
+          <circle cx="12" cy="8" r="3.2" />
+          <path d="M5.5 19.5c1.7-3 4-4.5 6.5-4.5s4.8 1.5 6.5 4.5" />
+        </svg>
+      )
+    case "tricycles":
+      return (
+        <svg {...commonProps}>
+          <circle cx="7.5" cy="17" r="2" />
+          <circle cx="17.5" cy="17" r="2" />
+          <path d="M5.5 17H4l1.8-6h6.6l2.5 6H14" />
+          <path d="M10 11V8h3.2l2.8 3" />
+        </svg>
+      )
+    case "alerts":
+      return (
+        <svg {...commonProps}>
+          <path d="M12 4a4 4 0 0 0-4 4v2.2c0 .7-.2 1.4-.6 2L6 14.5h12l-1.4-2.3c-.4-.6-.6-1.3-.6-2V8a4 4 0 0 0-4-4Z" />
+          <path d="M10 18a2.2 2.2 0 0 0 4 0" />
+        </svg>
+      )
+    case "reports":
+      return (
+        <svg {...commonProps}>
+          <path d="M7 3.5h7l4 4V20H7z" />
+          <path d="M14 3.5V8h4" />
+          <path d="M10 12h5" />
+          <path d="M10 16h5" />
+        </svg>
+      )
+    case "trip-logs":
+      return (
+        <svg {...commonProps}>
+          <path d="M7 5.5h10" />
+          <path d="M7 12h10" />
+          <path d="M7 18.5h10" />
+          <path d="M4.5 5.5h.01" />
+          <path d="M4.5 12h.01" />
+          <path d="M4.5 18.5h.01" />
+        </svg>
+      )
+    case "superadmin":
+      return (
+        <svg {...commonProps}>
+          <circle cx="12" cy="12" r="3" />
+          <path d="m19 12-.7-.4a7.7 7.7 0 0 0-.2-1.1l.5-.7-1.6-2.7-.8.2a7.8 7.8 0 0 0-.9-.7L14.8 4h-3.6l-.4.8a7.8 7.8 0 0 0-.9.7l-.8-.2-1.6 2.7.5.7a7.7 7.7 0 0 0-.2 1.1L5 12l.7.4c0 .4.1.8.2 1.1l-.5.7 1.6 2.7.8-.2c.3.3.6.5.9.7l.4.8h3.6l.4-.8c.3-.2.6-.4.9-.7l.8.2 1.6-2.7-.5-.7c.1-.3.2-.7.2-1.1Z" />
+        </svg>
+      )
+    case "toda-admin":
+      return (
+        <svg {...commonProps}>
+          <path d="M4 7.5h16" />
+          <path d="M6 4.5h12V19.5H6z" />
+          <path d="M9 11h6" />
+          <path d="M9 14.5h4" />
+        </svg>
+      )
+  }
+}
+
 const BASE_NAV_ITEMS: NavItem[] = [
   { key: "home", label: "Home" },
   { key: "live-map", label: "Live Map" },
@@ -69,7 +169,6 @@ const TODA_NAV_ITEMS: NavItem[] = [
 ]
 
 const RECENT_POINTS_PER_DRIVER = 8
-const MAP_STYLE_URL = "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json"
 const OBRERO_CENTER: [number, number] = [125.6128, 7.0848]
 const DEFAULT_CITY_ZOOM = 11
 const WORLD_MIN_ZOOM = 1
@@ -84,6 +183,14 @@ const DRIVER_PRESENCE_STALE_MS = 2 * 60 * 1000
 
 type NotificationCategoryFilter = "all" | NotificationItem["kind"]
 type NotificationRecencyFilter = "all" | "24h" | "7d" | "30d"
+type NotificationReadFilter = "all" | "unread" | "read"
+type AdminMapLocation = {
+  latitude: number
+  longitude: number
+  accuracy?: number
+  heading?: number | null
+  timestamp?: number
+}
 
 const ALERT_REASON_PRIORITY: Record<string, number> = {
   EMERGENCY: 100,
@@ -165,6 +272,147 @@ const formatDateTime = (value?: string) => (value ? new Date(value).toLocaleStri
 
 const formatTripStatus = (value: DashboardTripRecord["tripStatus"]) =>
   value.charAt(0).toUpperCase() + value.slice(1)
+
+const getGeolocationErrorMessage = (error: GeolocationPositionError) => {
+  switch (error.code) {
+    case error.PERMISSION_DENIED:
+      return "Location access was denied."
+    case error.POSITION_UNAVAILABLE:
+      return "Current location is unavailable."
+    case error.TIMEOUT:
+      return "Location request timed out."
+    default:
+      return "Unable to get the current location."
+  }
+}
+
+const createAdminCurrentLocationMarker = () => {
+  const markerEl = document.createElement("div")
+  markerEl.className = "admin-map-current-location-marker"
+  markerEl.setAttribute("aria-label", "Current location")
+  return markerEl
+}
+
+const LocateMeIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <path
+      d="M12 3.75v3m0 10.5v3m8.25-8.25h-3M6.75 12h-3m12.45 0a5.2 5.2 0 1 1-10.4 0 5.2 5.2 0 0 1 10.4 0Z"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.8"
+    />
+  </svg>
+)
+
+const isLngLatPair = (value: unknown): value is [number, number] =>
+  Array.isArray(value) &&
+  value.length >= 2 &&
+  typeof value[0] === "number" &&
+  Number.isFinite(value[0]) &&
+  typeof value[1] === "number" &&
+  Number.isFinite(value[1])
+
+const getTripPathCoordinates = (pathGeojson: unknown): Array<[number, number]> => {
+  if (!pathGeojson || typeof pathGeojson !== "object") return []
+  const candidate = pathGeojson as Record<string, unknown>
+  const geometry =
+    candidate.type === "Feature" && candidate.geometry && typeof candidate.geometry === "object"
+      ? (candidate.geometry as Record<string, unknown>)
+      : candidate
+
+  if (geometry?.type !== "LineString" || !Array.isArray(geometry.coordinates)) {
+    return []
+  }
+
+  return geometry.coordinates.filter(isLngLatPair)
+}
+
+function TripPathMap({ tripPath }: { tripPath: TripPathRecord }) {
+  const mapRootRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!mapRootRef.current) return
+
+    const coordinates = getTripPathCoordinates(tripPath.pathGeojson)
+    const map = new maplibregl.Map({
+      container: mapRootRef.current,
+      style: createRasterStyle("street") as maplibregl.StyleSpecification,
+      center: coordinates[0] ?? OBRERO_CENTER,
+      zoom: coordinates.length > 0 ? 14 : DEFAULT_CITY_ZOOM,
+      minZoom: WORLD_MIN_ZOOM,
+      maxZoom: 19
+    })
+
+    map.addControl(
+      new maplibregl.NavigationControl({
+        showCompass: false,
+        visualizePitch: false
+      }),
+      "top-right"
+    )
+
+    map.on("load", () => {
+      if (coordinates.length < 2) return
+
+      const lineFeature = {
+        type: "Feature",
+        geometry: {
+          type: "LineString",
+          coordinates
+        },
+        properties: {}
+      }
+
+      map.addSource("trip-path", {
+        type: "geojson",
+        data: lineFeature as any
+      })
+      map.addLayer({
+        id: "trip-path-line",
+        type: "line",
+        source: "trip-path",
+        paint: {
+          "line-color": "#2563eb",
+          "line-width": 5,
+          "line-opacity": 0.9
+        }
+      })
+
+      const bounds = new maplibregl.LngLatBounds()
+      for (const coordinate of coordinates) {
+        bounds.extend(coordinate)
+      }
+      map.fitBounds(bounds, {
+        padding: 54,
+        maxZoom: 16,
+        duration: 0
+      })
+
+      const [startPoint] = coordinates
+      const endPoint = coordinates[coordinates.length - 1]
+      if (startPoint) {
+        new maplibregl.Marker({ color: "#16a34a" })
+          .setLngLat(startPoint)
+          .setPopup(new maplibregl.Popup({ offset: 12 }).setText("Trip start"))
+          .addTo(map)
+      }
+      if (endPoint) {
+        new maplibregl.Marker({ color: "#dc2626" })
+          .setLngLat(endPoint)
+          .setPopup(new maplibregl.Popup({ offset: 12 }).setText("Latest/end point"))
+          .addTo(map)
+      }
+    })
+
+    return () => {
+      map.remove()
+    }
+  }, [tripPath])
+
+  return <div className="trip-path-map" ref={mapRootRef} />
+}
 
 const hasViolationCoordinates = (
   alert: Pick<ViolationAlertDetails, "lat" | "lng">
@@ -290,6 +538,7 @@ type NotificationItem = {
   ts: number
   priority: number
   tone: "danger" | "warn" | "info"
+  sourceEntityId: string
   isRead: boolean
 }
 
@@ -311,6 +560,7 @@ const createViolationNotification = (alert: AlertListItem): NotificationItem => 
     ts: alert.ts,
     priority: getAlertPriority(alert) + (alert.status === "open" ? 30 : 0),
     tone: "danger",
+    sourceEntityId: String(alert.key),
     isRead: false
   }
 }
@@ -343,6 +593,7 @@ const createTripNotification = (trip: DashboardTripRecord): NotificationItem => 
     ts,
     priority,
     tone: trip.tripStatus === "cancelled" ? "warn" : "info",
+    sourceEntityId: String(trip.tripId),
     isRead: false
   }
 }
@@ -379,6 +630,7 @@ const createDriverNotification = (
     ts,
     priority,
     tone: reason === "suspended" ? "danger" : "warn",
+    sourceEntityId: String(driver.driverId),
     isRead: false
   }
 }
@@ -480,15 +732,20 @@ export default function AdminShell({
 }: AdminShellProps) {
   const mapEl = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
-  const contentEl = useRef<HTMLElement | null>(null)
-  const mapHeaderEl = useRef<HTMLDivElement | null>(null)
   const geofenceBoundsRef = useRef<[[number, number], [number, number]] | null>(null)
+  const ensureGeofenceLayersRef = useRef<((fitToBounds?: boolean) => void) | null>(null)
+  const appliedMapStyleRef = useRef<TriketrackMapStyleId>("street")
   const violationFocusMarkerRef = useRef<maplibregl.Marker | null>(null)
+  const currentLocationMarkerRef = useRef<maplibregl.Marker | null>(null)
   const [activePage, setActivePage] = useState<NavKey>(
     adminProfile.role === "superadmin"
       ? "superadmin"
       : "home"
   )
+  const [selectedMapStyle, setSelectedMapStyle] = useState<TriketrackMapStyleId>("street")
+  const [currentMapLocation, setCurrentMapLocation] = useState<AdminMapLocation | null>(null)
+  const [mapLocationError, setMapLocationError] = useState<string | null>(null)
+  const [isLocatingMap, setIsLocatingMap] = useState(false)
 
   const [syncStatus, setSyncStatus] = useState<
     "connecting" | "connected" | "disconnected"
@@ -502,7 +759,6 @@ export default function AdminShell({
   const [dashboardData, setDashboardData] = useState<DashboardDataSnapshot | null>(null)
   const [dashboardError, setDashboardError] = useState<string | null>(null)
   const [clockTs, setClockTs] = useState<number>(Date.now())
-  const [liveMapCanvasHeight, setLiveMapCanvasHeight] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState<string>("")
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [isRefreshingNotifications, setIsRefreshingNotifications] = useState(false)
@@ -510,12 +766,19 @@ export default function AdminShell({
     useState<NotificationCategoryFilter>("all")
   const [notificationRecencyFilter, setNotificationRecencyFilter] =
     useState<NotificationRecencyFilter>("all")
+  const [notificationReadFilter, setNotificationReadFilter] =
+    useState<NotificationReadFilter>("all")
   const [notificationDateFrom, setNotificationDateFrom] = useState("")
   const [notificationDateTo, setNotificationDateTo] = useState("")
   const [profileModalOpen, setProfileModalOpen] = useState(false)
-  const [reportsPageSection, setReportsPageSection] =
-    useState<"reports" | "appeals">("reports")
+  const [reportsPageSection] = useState<"reports" | "appeals">("reports")
   const [selectedDriverId, setSelectedDriverId] = useState<number | null>(null)
+  const [driverTripHistoryOpen, setDriverTripHistoryOpen] = useState(false)
+  const [selectedTripForPath, setSelectedTripForPath] =
+    useState<DashboardTripRecord | null>(null)
+  const [tripPathData, setTripPathData] = useState<TripPathRecord | null>(null)
+  const [tripPathLoading, setTripPathLoading] = useState(false)
+  const [tripPathError, setTripPathError] = useState<string | null>(null)
   const [livePresenceHydrated, setLivePresenceHydrated] = useState(false)
   const [activeEmergencyModal, setActiveEmergencyModal] =
     useState<DashboardEmergencyRecord | null>(null)
@@ -525,6 +788,8 @@ export default function AdminShell({
     useState<ViolationAlertDetails | null>(null)
   const [violationAlertQueue, setViolationAlertQueue] = useState<ViolationAlertDetails[]>([])
   const dashboardDataRef = useRef<DashboardDataSnapshot | null>(null)
+  const dashboardRefreshInFlightRef = useRef<Promise<void> | null>(null)
+  const dashboardRefreshQueuedRef = useRef(false)
   const visibleDriverIdentifiersRef = useRef<Set<string>>(new Set())
   const dashboardDriversRef = useRef<DashboardDriverRecord[]>([])
   const knownViolationKeysRef = useRef<Set<string>>(new Set())
@@ -618,13 +883,34 @@ export default function AdminShell({
   }
 
   const refreshDashboardData = async () => {
-    try {
-      const snapshot = await fetchDashboardData(accessToken)
-      setDashboardData(snapshot)
-      setDashboardError(null)
-    } catch (error) {
-      setDashboardError(String(error))
+    if (dashboardRefreshInFlightRef.current) {
+      dashboardRefreshQueuedRef.current = true
+      return dashboardRefreshInFlightRef.current
     }
+
+    const runRefresh = async () => {
+      try {
+        const snapshot = await fetchDashboardData(accessToken)
+        setDashboardData(snapshot)
+        setDashboardError(
+          snapshot.cacheMeta
+            ? `Showing cached dashboard data from ${formatDateTime(snapshot.cacheMeta.savedAt)}.`
+            : null
+        )
+      } catch (error) {
+        setDashboardError(String(error))
+      } finally {
+        dashboardRefreshInFlightRef.current = null
+        if (dashboardRefreshQueuedRef.current) {
+          dashboardRefreshQueuedRef.current = false
+          void refreshDashboardData()
+        }
+      }
+    }
+
+    const pendingRefresh = runRefresh()
+    dashboardRefreshInFlightRef.current = pendingRefresh
+    return pendingRefresh
   }
 
   const refreshNotificationsAndAlerts = async () => {
@@ -649,7 +935,11 @@ export default function AdminShell({
         const snapshot = await fetchDashboardData(accessToken)
         if (!active) return
         setDashboardData(snapshot)
-        setDashboardError(null)
+        setDashboardError(
+          snapshot.cacheMeta
+            ? `Showing cached dashboard data from ${formatDateTime(snapshot.cacheMeta.savedAt)}.`
+            : null
+        )
       } catch (error) {
         if (!active) return
         setDashboardError(String(error))
@@ -658,6 +948,8 @@ export default function AdminShell({
 
     return () => {
       active = false
+      dashboardRefreshInFlightRef.current = null
+      dashboardRefreshQueuedRef.current = false
     }
   }, [accessToken])
 
@@ -705,15 +997,26 @@ export default function AdminShell({
   useEffect(() => {
     if (selectedDriverId === null) return
 
+    const previousBodyOverflow = document.body.style.overflow
+    document.body.style.overflow = "hidden"
+
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        if (driverTripHistoryOpen) {
+          setDriverTripHistoryOpen(false)
+          return
+        }
         setSelectedDriverId(null)
+        setDriverTripHistoryOpen(false)
       }
     }
 
     window.addEventListener("keydown", handleKeyDown)
-    return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [selectedDriverId])
+    return () => {
+      document.body.style.overflow = previousBodyOverflow
+      window.removeEventListener("keydown", handleKeyDown)
+    }
+  }, [driverTripHistoryOpen, selectedDriverId])
 
   useEffect(() => {
     if (!profileModalOpen) return
@@ -729,14 +1032,105 @@ export default function AdminShell({
   }, [profileModalOpen])
 
   useEffect(() => {
+    if (!selectedTripForPath) {
+      setTripPathData(null)
+      setTripPathError(null)
+      setTripPathLoading(false)
+      return
+    }
+
+    let active = true
+    setTripPathLoading(true)
+    setTripPathError(null)
+    setTripPathData(null)
+
+    void fetchTripPath(accessToken, selectedTripForPath.tripId)
+      .then((path) => {
+        if (!active) return
+        setTripPathData(path)
+        setTripPathError(
+          path?.cacheMeta
+            ? `Showing cached trip path from ${formatDateTime(path.cacheMeta.savedAt)}.`
+            : null
+        )
+      })
+      .catch((error) => {
+        if (active) setTripPathError(String(error))
+      })
+      .finally(() => {
+        if (active) setTripPathLoading(false)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [accessToken, selectedTripForPath])
+
+  useEffect(() => {
+    if (!("geolocation" in navigator)) {
+      setMapLocationError("Geolocation is not supported on this device.")
+      return
+    }
+
+    const watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        setCurrentMapLocation({
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          accuracy: position.coords.accuracy,
+          heading:
+            typeof position.coords.heading === "number" && Number.isFinite(position.coords.heading)
+              ? position.coords.heading
+              : null,
+          timestamp: position.timestamp
+        })
+        setMapLocationError(null)
+        setIsLocatingMap(false)
+      },
+      (error) => {
+        setMapLocationError(getGeolocationErrorMessage(error))
+        setIsLocatingMap(false)
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 15000,
+        maximumAge: 10000
+      }
+    )
+
+    return () => {
+      navigator.geolocation.clearWatch(watchId)
+    }
+  }, [])
+
+  useEffect(() => {
     if (!mapEl.current) return
 
     setLivePresenceHydrated(false)
     const geofence = JSON.parse(geofenceRaw) as MapGeoJSON
+    const geofencePolygon = (geofence as any).features?.find(
+      (feature: any) => feature.geometry?.type === "Polygon"
+    )
+    if (!geofencePolygon) {
+      console.error("geofence.geojson is missing a Polygon feature.")
+      return
+    }
+
+    const polygonRing = geofencePolygon.geometry?.coordinates?.[0] as number[][]
+    if (!Array.isArray(polygonRing) || polygonRing.length < 4) {
+      console.error("geofence.geojson Polygon ring must have at least 4 coordinates.")
+      return
+    }
+
+    const geofencePolyline =
+      (geofence as any).features?.find(
+        (feature: any) => feature.geometry?.type === "LineString"
+      ) ?? turf.polygonToLine(geofencePolygon as any)
+    const geofenceBounds = getGeofenceBounds(geofencePolygon)
 
     const map = new maplibregl.Map({
       container: mapEl.current,
-      style: MAP_STYLE_URL,
+      style: createRasterStyle(selectedMapStyle) as maplibregl.StyleSpecification,
       center: OBRERO_CENTER,
       zoom: DEFAULT_CITY_ZOOM,
       minZoom: WORLD_MIN_ZOOM,
@@ -744,6 +1138,7 @@ export default function AdminShell({
       renderWorldCopies: true
     })
     mapRef.current = map
+    appliedMapStyleRef.current = selectedMapStyle
     map.addControl(
       new maplibregl.NavigationControl({
         showCompass: false,
@@ -768,6 +1163,90 @@ export default function AdminShell({
     let stalePresenceTimer: number | undefined
 
     const markers = new Map<string, maplibregl.Marker>()
+    let pendingGeofenceFit = false
+    let geofenceRetryQueued = false
+    const ensureGeofenceLayers = (fitToBounds = false) => {
+      geofenceBoundsRef.current = geofenceBounds
+
+      if (fitToBounds) {
+        pendingGeofenceFit = true
+      }
+
+      if (!map.isStyleLoaded()) {
+        if (!geofenceRetryQueued) {
+          geofenceRetryQueued = true
+          map.once("style.load", () => {
+            geofenceRetryQueued = false
+            ensureGeofenceLayers(false)
+          })
+        }
+        return
+      }
+
+      const shouldFitToBounds = pendingGeofenceFit
+      pendingGeofenceFit = false
+
+      if (shouldFitToBounds) {
+        map.fitBounds(geofenceBounds, {
+          padding: GEOFENCE_FIT_PADDING,
+          duration: 0,
+          maxZoom: GEOFENCE_FOCUS_MAX_ZOOM
+        })
+      }
+
+      if (!map.getSource("area-geofence")) {
+        map.addSource("area-geofence", {
+          type: "geojson",
+          data: geofencePolygon as any
+        })
+      }
+
+      if (!map.getLayer("area-geofence-fill")) {
+        map.addLayer({
+          id: "area-geofence-fill",
+          type: "fill",
+          source: "area-geofence",
+          paint: {
+            "fill-color": "#0ea5e9",
+            "fill-opacity": 0.12
+          }
+        })
+      }
+
+      if (!map.getLayer("area-geofence-outline")) {
+        map.addLayer({
+          id: "area-geofence-outline",
+          type: "line",
+          source: "area-geofence",
+          paint: {
+            "line-color": "#0284c7",
+            "line-width": 2,
+            "line-opacity": 0.9
+          }
+        })
+      }
+
+      if (!map.getSource("geofence-boundary")) {
+        map.addSource("geofence-boundary", {
+          type: "geojson",
+          data: geofencePolyline as any
+        })
+      }
+
+      if (!map.getLayer("geofence-boundary-line")) {
+        map.addLayer({
+          id: "geofence-boundary-line",
+          type: "line",
+          source: "geofence-boundary",
+          paint: {
+            "line-color": "#2563eb",
+            "line-width": 4,
+            "line-opacity": 0.95
+          }
+        })
+      }
+    }
+    ensureGeofenceLayersRef.current = ensureGeofenceLayers
 
     const scheduleDashboardRefresh = () => {
       if (dashboardRefreshTimer) {
@@ -1013,72 +1492,16 @@ export default function AdminShell({
       })
     }
 
+    map.on("style.load", () => {
+      ensureGeofenceLayers(false)
+    })
+
+    map.on("idle", () => {
+      ensureGeofenceLayers(false)
+    })
+
     map.on("load", () => {
-      const geofencePolygon = (geofence as any).features?.find(
-        (feature: any) => feature.geometry?.type === "Polygon"
-      )
-      if (!geofencePolygon) {
-        console.error("geofence.geojson is missing a Polygon feature.")
-        return
-      }
-
-      const polygonRing = geofencePolygon.geometry?.coordinates?.[0] as number[][]
-      if (!Array.isArray(polygonRing) || polygonRing.length < 4) {
-        console.error("geofence.geojson Polygon ring must have at least 4 coordinates.")
-        return
-      }
-
-      const geofencePolyline =
-        (geofence as any).features?.find(
-          (feature: any) => feature.geometry?.type === "LineString"
-        ) ?? turf.polygonToLine(geofencePolygon as any)
-
-      const geofenceBounds = getGeofenceBounds(geofencePolygon)
-      geofenceBoundsRef.current = geofenceBounds
-      map.fitBounds(geofenceBounds, {
-        padding: GEOFENCE_FIT_PADDING,
-        duration: 0,
-        maxZoom: GEOFENCE_FOCUS_MAX_ZOOM
-      })
-
-      map.addSource("area-geofence", {
-        type: "geojson",
-        data: geofencePolygon as any
-      })
-      map.addLayer({
-        id: "area-geofence-fill",
-        type: "fill",
-        source: "area-geofence",
-        paint: {
-          "fill-color": "#0ea5e9",
-          "fill-opacity": 0.12
-        }
-      })
-      map.addLayer({
-        id: "area-geofence-outline",
-        type: "line",
-        source: "area-geofence",
-        paint: {
-          "line-color": "#0284c7",
-          "line-width": 2,
-          "line-opacity": 0.9
-        }
-      })
-
-      map.addSource("geofence-boundary", {
-        type: "geojson",
-        data: geofencePolyline as any
-      })
-      map.addLayer({
-        id: "geofence-boundary-line",
-        type: "line",
-        source: "geofence-boundary",
-        paint: {
-          "line-color": "#2563eb",
-          "line-width": 4,
-          "line-opacity": 0.95
-        }
-      })
+      ensureGeofenceLayers(true)
 
       const updateMarker = (event: DriverLocationEvent, inside: boolean) => {
         const existing = markers.get(event.driverId)
@@ -1418,9 +1841,12 @@ export default function AdminShell({
         window.removeEventListener("online", onlineHandler)
         window.removeEventListener("offline", onlineHandler)
       }
+      ensureGeofenceLayersRef.current = null
       for (const marker of markers.values()) {
         marker.remove()
       }
+      currentLocationMarkerRef.current?.remove()
+      currentLocationMarkerRef.current = null
       violationFocusMarkerRef.current?.remove()
       violationFocusMarkerRef.current = null
       map.remove()
@@ -1433,36 +1859,86 @@ export default function AdminShell({
     if (showLiveMapView && mapRef.current) {
       window.setTimeout(() => {
         mapRef.current?.resize()
+        ensureGeofenceLayersRef.current?.(activePage === "live-map")
       }, 0)
     }
-  }, [showLiveMapView])
+  }, [activePage, showLiveMapView])
 
   useEffect(() => {
-    if (activePage !== "live-map") return
+    const map = mapRef.current
+    if (!map) return
 
-    let rafId: number | undefined
-    const updateLiveMapHeight = () => {
-      const contentHeight = contentEl.current?.clientHeight ?? 0
-      const headerHeight = mapHeaderEl.current?.offsetHeight ?? 0
-      if (!contentHeight || !headerHeight) return
+    if (appliedMapStyleRef.current === selectedMapStyle) {
+      ensureGeofenceLayersRef.current?.(false)
+      return
+    }
 
-      const nextHeight = Math.max(360, contentHeight - headerHeight - 2)
-      setLiveMapCanvasHeight(nextHeight)
-      rafId = window.requestAnimationFrame(() => {
-        const map = mapRef.current
-        if (!map) return
-        map.resize()
+    appliedMapStyleRef.current = selectedMapStyle
+    map.setStyle(createRasterStyle(selectedMapStyle) as maplibregl.StyleSpecification)
+    ensureGeofenceLayersRef.current?.(false)
+  }, [selectedMapStyle])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !currentMapLocation) return
+
+    const lngLat: [number, number] = [
+      currentMapLocation.longitude,
+      currentMapLocation.latitude
+    ]
+
+    if (!currentLocationMarkerRef.current) {
+      currentLocationMarkerRef.current = new maplibregl.Marker({
+        element: createAdminCurrentLocationMarker()
       })
+        .setLngLat(lngLat)
+        .setPopup(new maplibregl.Popup({ offset: 16 }).setText("Your current location"))
+        .addTo(map)
+      return
     }
 
-    updateLiveMapHeight()
-    window.addEventListener("resize", updateLiveMapHeight)
+    currentLocationMarkerRef.current.setLngLat(lngLat)
+  }, [currentMapLocation])
 
-    return () => {
-      window.removeEventListener("resize", updateLiveMapHeight)
-      if (rafId) window.cancelAnimationFrame(rafId)
+  const handleLocateMap = () => {
+    if (!("geolocation" in navigator)) {
+      setMapLocationError("Geolocation is not supported on this device.")
+      return
     }
-  }, [activePage])
+
+    setIsLocatingMap(true)
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const nextLocation = {
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          accuracy: position.coords.accuracy,
+          heading:
+            typeof position.coords.heading === "number" && Number.isFinite(position.coords.heading)
+              ? position.coords.heading
+              : null,
+          timestamp: position.timestamp
+        }
+        setCurrentMapLocation(nextLocation)
+        setMapLocationError(null)
+        setIsLocatingMap(false)
+        mapRef.current?.flyTo({
+          center: [nextLocation.longitude, nextLocation.latitude],
+          zoom: Math.max(mapRef.current.getZoom(), 15.5),
+          essential: true
+        })
+      },
+      (error) => {
+        setMapLocationError(getGeolocationErrorMessage(error))
+        setIsLocatingMap(false)
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 15000,
+        maximumAge: 5000
+      }
+    )
+  }
 
   const operationalDriversById = useMemo(() => {
     return new Map(
@@ -1502,6 +1978,27 @@ export default function AdminShell({
   }, [driverDirectoryRows, selectedDriverId])
 
   const activeDriverCount = activeDriverRows.length
+
+  const systemDriverStats = useMemo(() => {
+    const inTransitCount = driverDirectoryRows.filter(
+      (driver) => driver.operationalState?.operationalStatus === "on_trip"
+    ).length
+    const idleCount = driverDirectoryRows.filter(
+      (driver) =>
+        driver.operationalState?.operationalStatus === "online_idle" ||
+        (isDriverOnlineNow(driver, clockTs, livePresenceHydrated) &&
+          driver.operationalState?.operationalStatus !== "on_trip")
+    ).length
+    const setupPendingCount = driverDirectoryRows.filter((driver) => !driver.passwordSet).length
+
+    return {
+      total: driverDirectoryRows.length,
+      active: activeDriverCount,
+      inTransit: inTransitCount,
+      idle: idleCount,
+      setupPending: setupPendingCount
+    }
+  }, [activeDriverCount, clockTs, driverDirectoryRows, livePresenceHydrated])
 
   const activeTricycleCount = useMemo(() => {
     const activeTricycleKeys = new Set<string>()
@@ -1593,6 +2090,19 @@ export default function AdminShell({
     })
   }, [alertRows, hasSearchQuery, normalizedSearchQuery])
 
+  const alertStats = useMemo(() => {
+    const open = alertRows.filter((item) => item.status === "open").length
+    const emergency = alertRows.filter((item) => item.source === "emergency").length
+    const resolved = alertRows.filter((item) => item.status === "resolved").length
+
+    return {
+      total: alertRows.length,
+      open,
+      emergency,
+      resolved
+    }
+  }, [alertRows])
+
   const homeAlertSummary = useMemo(() => {
     return [...filteredAlerts]
       .sort((a, b) => b.ts - a.ts || String(b.key).localeCompare(String(a.key)))
@@ -1614,6 +2124,7 @@ export default function AdminShell({
         ts: new Date(item.timestamp).getTime(),
         priority: item.priority,
         tone: item.tone,
+        sourceEntityId: item.sourceEntityId,
         isRead: item.isRead
       }))
       .sort(sortNotificationsByRecency)
@@ -1766,14 +2277,7 @@ export default function AdminShell({
           )
         }
 
-        void fetchDashboardData(accessToken)
-          .then((snapshot) => {
-            setDashboardData(snapshot)
-            setDashboardError(null)
-          })
-          .catch((error) => {
-            setDashboardError(String(error))
-          })
+        void refreshDashboardData()
       }
     })
 
@@ -1830,6 +2334,12 @@ export default function AdminShell({
       if (notificationCategoryFilter !== "all" && item.kind !== notificationCategoryFilter) {
         return false
       }
+      if (notificationReadFilter === "unread" && item.isRead) {
+        return false
+      }
+      if (notificationReadFilter === "read" && !item.isRead) {
+        return false
+      }
       if (recencyCutoff !== null && item.ts < recencyCutoff) {
         return false
       }
@@ -1844,6 +2354,7 @@ export default function AdminShell({
   }, [
     notificationItems,
     notificationCategoryFilter,
+    notificationReadFilter,
     notificationRecencyFilter,
     notificationDateFrom,
     notificationDateTo,
@@ -1852,6 +2363,7 @@ export default function AdminShell({
 
   const hasNotificationFilters =
     notificationCategoryFilter !== "all" ||
+    notificationReadFilter !== "all" ||
     notificationRecencyFilter !== "all" ||
     notificationDateFrom.length > 0 ||
     notificationDateTo.length > 0
@@ -1860,44 +2372,36 @@ export default function AdminShell({
     return notificationItems.filter((item) => !item.isRead).length
   }, [notificationItems])
 
-  useEffect(() => {
-    if (!notificationsOpen) return
+  const markNotificationAsRead = async (notificationKey: string) => {
+    const target = notificationItems.find((item) => item.key === notificationKey)
+    if (!target || target.isRead) return
 
-    const unreadKeys = notificationItems
-      .filter((item) => !item.isRead)
-      .map((item) => item.key)
+    setDashboardData((current) =>
+      current
+        ? {
+            ...current,
+            notifications: current.notifications.map((item) =>
+              item.notificationKey === notificationKey ? { ...item, isRead: true } : item
+            ),
+            counts: {
+              ...current.counts,
+              unreadNotifications: Math.max(0, current.counts.unreadNotifications - 1)
+            }
+          }
+        : current
+    )
 
-    if (unreadKeys.length === 0) return
-
-    const unreadKeySet = new Set(unreadKeys)
-    let cancelled = false
-
-    void markDashboardNotificationsRead(accessToken, unreadKeys)
-      .then(() => {
-        if (cancelled) return
-        setDashboardData((current) =>
-          current
-            ? {
-                ...current,
-                notifications: current.notifications.map((item) =>
-                  unreadKeySet.has(item.notificationKey)
-                    ? { ...item, isRead: true }
-                    : item
-                ),
-                counts: {
-                  ...current.counts,
-                  unreadNotifications: 0
-                }
-              }
-            : current
-        )
-      })
-      .catch(() => {})
-
-    return () => {
-      cancelled = true
+    try {
+      await Promise.all([
+        markDashboardNotificationsRead(accessToken, [notificationKey]),
+        target.kind === "appeal"
+          ? markAdminAppealViewed(accessToken, target.sourceEntityId)
+          : Promise.resolve()
+      ])
+    } catch {
+      void refreshDashboardData()
     }
-  }, [accessToken, notificationItems, notificationsOpen])
+  }
 
   const filteredTripRows = useMemo(() => {
     if (!hasSearchQuery) return tripRows
@@ -1925,6 +2429,19 @@ export default function AdminShell({
       .slice(0, HOME_TRIP_LOG_SUMMARY_LIMIT)
   }, [filteredTripRows])
 
+  const tripLogStats = useMemo(() => {
+    const ongoing = tripRows.filter((trip) => trip.tripStatus === "ongoing").length
+    const completed = tripRows.filter((trip) => trip.tripStatus === "completed").length
+    const cancelled = tripRows.filter((trip) => trip.tripStatus === "cancelled").length
+
+    return {
+      total: tripRows.length,
+      ongoing,
+      completed,
+      cancelled
+    }
+  }, [tripRows])
+
   const selectedDriverTripRows = useMemo(() => {
     if (!selectedDriver) return []
 
@@ -1939,10 +2456,7 @@ export default function AdminShell({
 
   const navItems = useMemo<NavItem[]>(() => {
     if (adminProfile.role === "superadmin") {
-      return [
-        { key: "superadmin", label: "System Setup" },
-        ...BASE_NAV_ITEMS
-      ]
+      return [...BASE_NAV_ITEMS, { key: "superadmin", label: "Settings" }]
     }
 
     if (adminProfile.role === "toda_admin") {
@@ -1951,10 +2465,15 @@ export default function AdminShell({
 
     return BASE_NAV_ITEMS
   }, [adminProfile.role])
+  const mainNavItems = navItems.filter((item) => item.key !== "superadmin")
+  const secondaryNavItems = navItems.filter((item) => item.key === "superadmin")
 
   const pageLabel = navItems.find((item) => item.key === activePage)?.label ?? "Dashboard"
-  const headerBarangay = adminProfile.barangayName ?? "Unassigned Barangay"
-  const headerToda = adminProfile.todaName ?? "All TODAs"
+  const shouldLockPageScroll =
+    activePage === "drivers" || activePage === "alerts" || activePage === "trip-logs"
+  const headerScope = [adminProfile.barangayName, adminProfile.todaName]
+    .filter((item): item is string => Boolean(item))
+    .join(" / ")
   const profileInitials = adminProfile.email
     .split("@")[0]
     .split(/[._-]/)
@@ -1979,10 +2498,20 @@ export default function AdminShell({
 
   const openDriverModal = (driver: DriverDirectoryRow) => {
     setSelectedDriverId(driver.driverId)
+    setDriverTripHistoryOpen(false)
   }
 
   const closeDriverModal = () => {
     setSelectedDriverId(null)
+    setDriverTripHistoryOpen(false)
+  }
+
+  const openTripPathModal = (trip: DashboardTripRecord) => {
+    setSelectedTripForPath(trip)
+  }
+
+  const closeTripPathModal = () => {
+    setSelectedTripForPath(null)
   }
 
   const activeViolationCoordinates = activeViolationAlert
@@ -2003,50 +2532,95 @@ export default function AdminShell({
   return (
     <div className="admin-shell">
       <aside className="admin-sidebar">
-        <div className="sidebar-brand">
+        <button
+          type="button"
+          className="sidebar-brand"
+          onClick={() => setActivePage("home")}
+          aria-label="Go to homepage"
+        >
           <img
-            src="/triketrack_logo.png"
+            src="/triketrack_logo3.png"
             alt="TrikeTrack logo"
             className="sidebar-brand__logo"
           />
-          <div>
-            <div className="sidebar-brand__title">TRIKETRACK</div>
-            <div className="sidebar-brand__subtitle">Admin Panel</div>
+          <div className="sidebar-brand__copy">
+            <strong>TrikeTrack</strong>
+            <span>TODA Monitoring</span>
           </div>
+        </button>
+
+        <div className="sidebar-section">
+          <div className="sidebar-nav__label">Main</div>
+          <nav className="sidebar-nav">
+            {mainNavItems.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                className={`sidebar-nav__item ${
+                  item.key === activePage ? "sidebar-nav__item--active" : ""
+                }`}
+                onClick={() => setActivePage(item.key)}
+              >
+                <span className="sidebar-nav__item-icon">{renderNavIcon(item.key)}</span>
+                <span className="sidebar-nav__item-label">{item.label}</span>
+                <span className="sidebar-nav__item-chevron" aria-hidden="true">
+                  ›
+                </span>
+              </button>
+            ))}
+          </nav>
         </div>
 
-        <nav className="sidebar-nav">
-          {navItems.map((item) => (
-            <button
-              key={item.key}
-              type="button"
-              className={`sidebar-nav__item ${
-                item.key === activePage ? "sidebar-nav__item--active" : ""
-              }`}
-              onClick={() => {
-                setActivePage(item.key)
-                if (item.key === "reports") {
-                  setReportsPageSection("reports")
-                }
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
-        </nav>
+        <div className="sidebar-section sidebar-section--footer">
+          <div className="sidebar-nav__label">Others</div>
+          {secondaryNavItems.length > 0 && (
+            <nav className="sidebar-nav">
+              {secondaryNavItems.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={`sidebar-nav__item ${
+                    item.key === activePage ? "sidebar-nav__item--active" : ""
+                  }`}
+                  onClick={() => setActivePage(item.key)}
+                >
+                  <span className="sidebar-nav__item-icon">{renderNavIcon(item.key)}</span>
+                  <span className="sidebar-nav__item-label">{item.label}</span>
+                  <span className="sidebar-nav__item-chevron" aria-hidden="true">
+                    ›
+                  </span>
+                </button>
+              ))}
+            </nav>
+          )}
 
-        <button type="button" className="logout-button sidebar-logout" onClick={onLogout}>
-          Log out
-        </button>
+          <button type="button" className="logout-button sidebar-logout" onClick={onLogout}>
+            <span className="sidebar-nav__item-icon" aria-hidden="true">
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M10 17 15 12 10 7" />
+                <path d="M15 12H4" />
+                <path d="M20 20V4" />
+              </svg>
+            </span>
+            <span className="sidebar-nav__item-label">Log out</span>
+          </button>
+        </div>
       </aside>
 
       <div className="admin-main">
         <header className="admin-topbar">
-          <div>
-            <div className="admin-topbar__crumb">
-              DASHBOARD / {headerBarangay.toUpperCase()}
-            </div>
-            <div className="admin-topbar__sub">TODA : {headerToda.toUpperCase()}</div>
+          <div className="admin-topbar__intro">
+            <div className="admin-topbar__crumb">{pageLabel}</div>
+            {headerScope && <div className="admin-topbar__sub">{headerScope}</div>}
           </div>
 
           <div className="admin-topbar__controls">
@@ -2104,10 +2678,12 @@ export default function AdminShell({
                       >
                         <RefreshIcon />
                       </button>
-                      <div className="topbar-notification-menu__count">
-                        {hasNotificationFilters
-                          ? `${filteredNotificationItems.length}/${notificationItems.length}`
-                          : notificationItems.length}
+                      <div
+                        className="topbar-notification-menu__count"
+                        aria-label={`${unreadNotificationCount} unread notifications`}
+                        title="Unread notifications"
+                      >
+                        {unreadNotificationCount > 99 ? "99+" : unreadNotificationCount}
                       </div>
                     </div>
                   </div>
@@ -2130,6 +2706,19 @@ export default function AdminShell({
                         <option value="appeal">Appeals</option>
                         <option value="trip">Trips</option>
                         <option value="driver">Drivers</option>
+                      </select>
+
+                      <select
+                        className="topbar-notification-filter"
+                        aria-label="Filter notifications by read status"
+                        value={notificationReadFilter}
+                        onChange={(event) =>
+                          setNotificationReadFilter(event.target.value as NotificationReadFilter)
+                        }
+                      >
+                        <option value="all">Read and unread</option>
+                        <option value="unread">Unread only</option>
+                        <option value="read">Read only</option>
                       </select>
 
                       <select
@@ -2179,6 +2768,7 @@ export default function AdminShell({
                         className="topbar-notification-clear"
                         onClick={() => {
                           setNotificationCategoryFilter("all")
+                          setNotificationReadFilter("all")
                           setNotificationRecencyFilter("all")
                           setNotificationDateFrom("")
                           setNotificationDateTo("")
@@ -2201,11 +2791,13 @@ export default function AdminShell({
                         <button
                           key={item.key}
                           type="button"
-                          className="topbar-notification-item"
+                          className={`topbar-notification-item ${
+                            item.isRead
+                              ? "topbar-notification-item--read"
+                              : "topbar-notification-item--unread"
+                          }`}
                           onClick={() => {
-                            if (item.kind === "appeal") {
-                              setReportsPageSection("appeals")
-                            }
+                            void markNotificationAsRead(item.key)
                             setActivePage(item.page)
                             setNotificationsOpen(false)
                           }}
@@ -2225,7 +2817,17 @@ export default function AdminShell({
                                     : "D"}
                           </span>
                           <span className="topbar-notification-item__content">
-                            <span className="topbar-notification-item__title">{item.title}</span>
+                            <span className="topbar-notification-item__title">
+                              {item.title}
+                              {!item.isRead && (
+                                <span className="topbar-notification-item__state">Unread</span>
+                              )}
+                              {item.isRead && (
+                                <span className="topbar-notification-item__state topbar-notification-item__state--read">
+                                  Read
+                                </span>
+                              )}
+                            </span>
                             <span className="topbar-notification-item__body">{item.body}</span>
                           </span>
                           <span className="topbar-notification-item__time">
@@ -2255,8 +2857,15 @@ export default function AdminShell({
           </div>
         </header>
 
-        <main className="admin-content" ref={contentEl}>
-          {dashboardError && activePage !== "superadmin" && activePage !== "toda-admin" && (
+        <main
+          className={`admin-content ${
+            activePage === "live-map" ? "admin-content--live-map" : ""
+          } ${shouldLockPageScroll ? "admin-content--table-page" : ""}`}
+        >
+          {dashboardError &&
+            activePage !== "superadmin" &&
+            activePage !== "toda-admin" &&
+            activePage !== "live-map" && (
             <div className="page-panel" style={{ padding: "12px 14px", marginBottom: "14px" }}>
               <div className="muted">Dashboard data sync issue: {dashboardError}</div>
             </div>
@@ -2397,22 +3006,44 @@ export default function AdminShell({
               activePage === "home" ? "live-map-grid--home" : ""
             } ${activePage === "live-map" ? "live-map-grid--live" : ""}`}
           >
-              <section className="page-panel page-panel--map">
-                <div className="page-panel__header" ref={mapHeaderEl}>
-                  <h2>Live Map</h2>
-                  <p>UMASA TODA Geofence Boundary</p>
+            <section className="page-panel page-panel--map">
+              <div className="admin-map-toolbar">
+                <div className="admin-map-style-switcher" role="tablist" aria-label="Map style">
+                  {MAP_STYLE_OPTIONS.map((styleOption) => {
+                    const active = selectedMapStyle === styleOption.id
+                    return (
+                      <button
+                        key={styleOption.id}
+                        type="button"
+                        className={`admin-map-style-switcher__button ${
+                          active ? "admin-map-style-switcher__button--active" : ""
+                        }`}
+                        onClick={() => setSelectedMapStyle(styleOption.id)}
+                        role="tab"
+                        aria-selected={active}
+                      >
+                        {styleOption.label}
+                      </button>
+                    )
+                  })}
                 </div>
-                <div
-                  className="admin-map"
-                  ref={mapEl}
-                  style={
-                    activePage === "live-map" && liveMapCanvasHeight
-                      ? { height: `${liveMapCanvasHeight}px` }
-                      : undefined
-                  }
-                />
-              </section>
+                <button
+                  type="button"
+                  className="admin-map-locate-button"
+                  onClick={handleLocateMap}
+                  aria-label="Center map on current location"
+                >
+                  <LocateMeIcon />
+                  <span>{isLocatingMap ? "Locating..." : "Locate me"}</span>
+                </button>
+              </div>
+              <div className="admin-map" ref={mapEl} />
+              {mapLocationError && (
+                <div className="admin-map-status admin-map-status--error">{mapLocationError}</div>
+              )}
+            </section>
 
+            {activePage !== "live-map" ? (
               <aside className="live-map-side">
                 <section className="page-panel side-card">
                   <div className="admin-pane__title">Sync Status</div>
@@ -2508,8 +3139,8 @@ export default function AdminShell({
                     )}
                   </div>
                 </section>
-
               </aside>
+            ) : null}
           </section>
 
           {activePage === "drivers" && (
@@ -2522,72 +3153,141 @@ export default function AdminShell({
                 onDataChanged={() => void refreshDashboardData()}
               />
             ) : (
-              <section className="page-panel page-stack">
-                <div className="page-panel__header">
-                  <h2>Drivers</h2>
-                  <p>
-                    {hasSearchQuery
-                      ? `${filteredAllDriverRows.length} matches for "${trimmedSearchQuery}"`
-                      : `${driverDirectoryRows.length} tracked drivers`}
-                  </p>
+              <section className="page-panel page-panel--table-layout">
+                <div className="drivers-table-summary">
+                  <article className="drivers-table-summary__card">
+                    <span>Total Drivers</span>
+                    <strong>{systemDriverStats.total}</strong>
+                  </article>
+                  <article className="drivers-table-summary__card">
+                    <span>Active Drivers</span>
+                    <strong>{systemDriverStats.active}</strong>
+                  </article>
+                  <article className="drivers-table-summary__card">
+                    <span>In Transit</span>
+                    <strong>{systemDriverStats.inTransit}</strong>
+                  </article>
+                  <article className="drivers-table-summary__card">
+                    <span>Idle Drivers</span>
+                    <strong>{systemDriverStats.idle}</strong>
+                  </article>
+                  <article className="drivers-table-summary__card">
+                    <span>Setup Pending</span>
+                    <strong>{systemDriverStats.setupPending}</strong>
+                  </article>
                 </div>
-                <div className="drivers-list drivers-list--page">
+                <div className="drivers-table-shell">
                   {filteredAllDriverRows.length === 0 ? (
-                    <div className="muted">
+                    <div className="drivers-table-empty">
                       {hasSearchQuery ? `No drivers match "${trimmedSearchQuery}".` : "No drivers yet."}
                     </div>
                   ) : (
-                    filteredAllDriverRows.map((driver) => {
-                      const presence = getDriverPresenceMeta(
-                        driver,
-                        clockTs,
-                        livePresenceHydrated
-                      )
-                      return (
-                        <div
-                          className="driver-row driver-row--interactive"
-                          key={driver.driverId}
-                          role="button"
-                          tabIndex={0}
-                          onClick={() => openDriverModal(driver)}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter" || event.key === " ") {
-                              event.preventDefault()
-                              openDriverModal(driver)
-                            }
-                          }}
-                        >
-                          <div className="driver-row__top">
-                            <strong>{driver.firstName} {driver.lastName}</strong>
-                            <span className={presence.className}>{presence.label}</span>
-                          </div>
-                          <div className="driver-row__meta">
-                            {driver.driverCode} | {driver.barangayName} | {driver.todaName}
-                          </div>
-                          <div className="driver-row__meta">
-                            {driver.tricycleNo
-                              ? `Tricycle ${driver.tricycleNo}`
-                              : "No tricycle assigned"}
-                            {driver.qrId ? ` | QR #${driver.qrId}` : ""}
-                            {` | Password ${driver.passwordSet ? "set" : "pending"}`}
-                          </div>
-                          <div className="driver-row__meta">
-                            {driver.liveState
-                              ? `Live update ${formatLastSeen(driver.liveState.lastSeenTs, clockTs)}`
-                              : driver.operationalState?.lastUpdateAt
-                                ? `Last update ${formatDateTime(driver.operationalState.lastUpdateAt)}`
-                                : "No live point yet"}
-                          </div>
-                          <div className="driver-row__meta">
-                            {driver.liveState
-                              ? `Point ${formatPoint(driver.liveState.latestPoint)}`
-                              : driver.operationalState?.activeRouteName
-                                ? `Route ${driver.operationalState.activeRouteName}`
-                                : `Status ${driver.status}`}
-                          </div>
-                        </div>
-                      )
-                    })
+                    <div className="drivers-table-wrap">
+                      <table className="drivers-table">
+                        <thead>
+                          <tr>
+                            <th>Name</th>
+                            <th>Driver ID</th>
+                            <th>Vehicle</th>
+                            <th>QR</th>
+                            <th>Barangay / TODA</th>
+                            <th>Route / Point</th>
+                            <th>Last Update</th>
+                            <th>Password</th>
+                            <th>Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredAllDriverRows.map((driver) => {
+                            const presence = getDriverPresenceMeta(
+                              driver,
+                              clockTs,
+                              livePresenceHydrated
+                            )
+
+                            return (
+                              <tr
+                                key={driver.driverId}
+                                className="drivers-table__row"
+                                role="button"
+                                tabIndex={0}
+                                onClick={() => openDriverModal(driver)}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter" || event.key === " ") {
+                                    event.preventDefault()
+                                    openDriverModal(driver)
+                                  }
+                                }}
+                                aria-label={`View details for ${driver.firstName} ${driver.lastName}`}
+                              >
+                                <td>
+                                  <div className="drivers-table__identity">
+                                    {driver.avatarUrl ? (
+                                      <img
+                                        className="drivers-table__avatar"
+                                        src={driver.avatarUrl}
+                                        alt={`${driver.firstName} ${driver.lastName}`}
+                                      />
+                                    ) : (
+                                      <div
+                                        className="drivers-table__avatar drivers-table__avatar--fallback"
+                                        aria-hidden="true"
+                                      >
+                                        {`${driver.firstName.charAt(0)}${driver.lastName.charAt(0)}`
+                                          .toUpperCase()
+                                          .slice(0, 2)}
+                                      </div>
+                                    )}
+                                    <div className="drivers-table__identity-text">
+                                      <strong>{driver.firstName} {driver.lastName}</strong>
+                                      <span>{driver.contactNo ?? "No contact provided"}</span>
+                                    </div>
+                                  </div>
+                                </td>
+                                <td>{driver.driverCode}</td>
+                                <td>{driver.tricycleNo ? `Tricycle ${driver.tricycleNo}` : "Unassigned"}</td>
+                                <td>{driver.qrId ? `#${driver.qrId}` : "Not assigned"}</td>
+                                <td>
+                                  <div className="drivers-table__stack">
+                                    <strong>{driver.barangayName}</strong>
+                                    <span>{driver.todaName}</span>
+                                  </div>
+                                </td>
+                                <td>
+                                  <div className="drivers-table__stack">
+                                    <strong>
+                                      {driver.operationalState?.activeRouteName
+                                        ? `Route ${driver.operationalState.activeRouteName}`
+                                        : "No active route"}
+                                    </strong>
+                                    <span>
+                                      {driver.liveState
+                                        ? formatPoint(driver.liveState.latestPoint)
+                                        : "Waiting for live GPS point"}
+                                    </span>
+                                  </div>
+                                </td>
+                                <td>
+                                  {driver.liveState
+                                    ? formatLastSeen(driver.liveState.lastSeenTs, clockTs)
+                                    : driver.operationalState?.lastUpdateAt
+                                      ? formatDateTime(driver.operationalState.lastUpdateAt)
+                                      : "No live point yet"}
+                                </td>
+                                <td>
+                                  <span className="drivers-table__pill">
+                                    {driver.passwordSet ? "Set" : "Pending"}
+                                  </span>
+                                </td>
+                                <td>
+                                  <span className={presence.className}>{presence.label}</span>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
                   )}
                 </div>
               </section>
@@ -2608,77 +3308,180 @@ export default function AdminShell({
                 onClick={(event) => event.stopPropagation()}
               >
                 <div className="driver-modal__header">
-                  <div>
-                    <h3 id="driver-modal-title">
-                      {selectedDriver.firstName} {selectedDriver.lastName}
-                    </h3>
-                    <p>
-                      {selectedDriver.driverCode} | {selectedDriver.barangayName} | {selectedDriver.todaName}
-                    </p>
+                  <div className="driver-modal__profile">
+                    {selectedDriver.avatarUrl ? (
+                      <img
+                        className="driver-modal__avatar"
+                        src={selectedDriver.avatarUrl}
+                        alt={`${selectedDriver.firstName} ${selectedDriver.lastName}`}
+                      />
+                    ) : (
+                      <div className="driver-modal__avatar driver-modal__avatar--fallback" aria-hidden="true">
+                        {`${selectedDriver.firstName.charAt(0)}${selectedDriver.lastName.charAt(0)}`
+                          .toUpperCase()
+                          .slice(0, 2)}
+                      </div>
+                    )}
+                    <div>
+                      <h3 id="driver-modal-title">
+                        {selectedDriver.firstName} {selectedDriver.lastName}
+                      </h3>
+                      <p>{selectedDriver.driverCode}</p>
+                    </div>
                   </div>
-                  <button type="button" className="driver-modal__close" onClick={closeDriverModal}>
-                    Close
-                  </button>
+                  <div className="driver-modal__header-actions">
+                    <button
+                      type="button"
+                      className="driver-modal__primary"
+                      onClick={() => setDriverTripHistoryOpen(true)}
+                    >
+                      Trip History
+                    </button>
+                    <button type="button" className="driver-modal__close" onClick={closeDriverModal}>
+                      Close
+                    </button>
+                  </div>
                 </div>
 
                 <div className="driver-modal__body">
-                  <section className="driver-modal__summary">
-                    <div className="driver-modal__card">
-                      <span className="driver-modal__label">Status</span>
-                      <strong>
-                        {getDriverPresenceMeta(
-                          selectedDriver,
-                          clockTs,
-                          livePresenceHydrated
-                        ).label}
-                      </strong>
-                    </div>
-                    <div className="driver-modal__card">
-                      <span className="driver-modal__label">Assigned Tricycle</span>
-                      <strong>{selectedDriver.tricycleNo ? `Tricycle ${selectedDriver.tricycleNo}` : "No tricycle assigned"}</strong>
-                    </div>
-                    <div className="driver-modal__card">
-                      <span className="driver-modal__label">Password</span>
-                      <strong>{selectedDriver.passwordSet ? "Set" : "Pending"}</strong>
-                    </div>
-                  </section>
-
-                  <section className="driver-modal__details">
-                    <div className="driver-modal__card">
+                  <section className="driver-modal__contact-strip" aria-label="Driver quick details">
+                    <div>
                       <span className="driver-modal__label">Contact</span>
                       <strong>{selectedDriver.contactNo ?? "No contact provided"}</strong>
                     </div>
-                    <div className="driver-modal__card">
-                      <span className="driver-modal__label">QR</span>
-                      <strong>{selectedDriver.qrId ? `#${selectedDriver.qrId}` : "Not assigned"}</strong>
+                    <div>
+                      <span className="driver-modal__label">Barangay</span>
+                      <strong>{selectedDriver.barangayName}</strong>
                     </div>
-                    <div className="driver-modal__card">
-                      <span className="driver-modal__label">Last Update</span>
+                    <div>
+                      <span className="driver-modal__label">TODA</span>
+                      <strong>{selectedDriver.todaName}</strong>
+                    </div>
+                    <div>
+                      <span className="driver-modal__label">Last Active</span>
                       <strong>
                         {selectedDriver.liveState
                           ? formatLastSeen(selectedDriver.liveState.lastSeenTs, clockTs)
                           : "No live point yet"}
                       </strong>
                     </div>
-                    <div className="driver-modal__card">
-                      <span className="driver-modal__label">Current Point</span>
-                      <strong>
-                        {selectedDriver.liveState
-                          ? formatPoint(selectedDriver.liveState.latestPoint)
-                          : selectedDriver.operationalState?.activeRouteName
-                            ? `Route ${selectedDriver.operationalState.activeRouteName}`
-                            : "Waiting for live GPS point"}
-                      </strong>
+                  </section>
+
+                  <div className="driver-modal__tabs" aria-label="Driver detail sections">
+                    <span className="driver-modal__tab driver-modal__tab--active">Personal</span>
+                    <button
+                      type="button"
+                      className="driver-modal__tab"
+                      onClick={() => setDriverTripHistoryOpen(true)}
+                    >
+                      Trip History
+                    </button>
+                  </div>
+
+                  <section className="driver-modal__section">
+                    <div className="driver-modal__section-head">
+                      <h4>General Information</h4>
                     </div>
-                    <div className="driver-modal__card">
-                      <span className="driver-modal__label">Created</span>
-                      <strong>{formatDateTime(selectedDriver.createdAt)}</strong>
+                    <div className="driver-modal__info-grid">
+                      <div>
+                        <span className="driver-modal__label">Driver Status</span>
+                        <strong>
+                          {getDriverPresenceMeta(
+                            selectedDriver,
+                            clockTs,
+                            livePresenceHydrated
+                          ).label}
+                        </strong>
+                      </div>
+                      <div>
+                        <span className="driver-modal__label">Password</span>
+                        <strong>{selectedDriver.passwordSet ? "Set" : "Pending"}</strong>
+                      </div>
+                      <div>
+                        <span className="driver-modal__label">Created</span>
+                        <strong>{formatDateTime(selectedDriver.createdAt)}</strong>
+                      </div>
+                      <div>
+                        <span className="driver-modal__label">Recent Trips</span>
+                        <strong>{selectedDriverTripRows.length}</strong>
+                      </div>
                     </div>
                   </section>
 
-                  <section className="driver-modal__history">
+                  <section className="driver-modal__section">
                     <div className="driver-modal__section-head">
-                      <h4>Trip History</h4>
+                      <h4>Assignment Information</h4>
+                    </div>
+                    <div className="driver-modal__info-grid">
+                      <div>
+                        <span className="driver-modal__label">Assigned Tricycle</span>
+                        <strong>
+                          {selectedDriver.tricycleNo
+                            ? `Tricycle ${selectedDriver.tricycleNo}`
+                            : "No tricycle assigned"}
+                        </strong>
+                      </div>
+                      <div>
+                        <span className="driver-modal__label">QR</span>
+                        <strong>{selectedDriver.qrId ? `#${selectedDriver.qrId}` : "Not assigned"}</strong>
+                      </div>
+                      <div>
+                        <span className="driver-modal__label">Current Route / Point</span>
+                        <strong>
+                          {selectedDriver.liveState
+                            ? formatPoint(selectedDriver.liveState.latestPoint)
+                            : selectedDriver.operationalState?.activeRouteName
+                              ? `Route ${selectedDriver.operationalState.activeRouteName}`
+                              : "Waiting for live GPS point"}
+                        </strong>
+                      </div>
+                      <div>
+                        <span className="driver-modal__label">Operational State</span>
+                        <strong>
+                          {selectedDriver.operationalState?.operationalStatus
+                            ? selectedDriver.operationalState.operationalStatus.replace("_", " ")
+                            : "No active operation"}
+                        </strong>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {selectedDriver && driverTripHistoryOpen && (
+            <div
+              className="driver-modal-backdrop driver-modal-backdrop--stacked"
+              role="presentation"
+              onClick={() => setDriverTripHistoryOpen(false)}
+            >
+              <div
+                className="driver-modal driver-modal--history"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="driver-trip-history-title"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="driver-modal__header">
+                  <div>
+                    <h3 id="driver-trip-history-title">Trip History</h3>
+                    <p>
+                      {selectedDriver.firstName} {selectedDriver.lastName} | {selectedDriver.driverCode}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="driver-modal__close"
+                    onClick={() => setDriverTripHistoryOpen(false)}
+                  >
+                    Close
+                  </button>
+                </div>
+                <div className="driver-modal__body">
+                  <section className="driver-modal__section">
+                    <div className="driver-modal__section-head">
+                      <h4>Recent Trips</h4>
                       <p>Showing recent trips available in the dashboard.</p>
                     </div>
 
@@ -2719,10 +3522,22 @@ export default function AdminShell({
                                 <strong>{trip.distanceKm !== undefined ? `${trip.distanceKm.toFixed(2)} km` : "-"}</strong>
                               </div>
                               <div>
+                                <span>Fare</span>
+                                <strong>{trip.fareAmount !== undefined ? `PHP ${trip.fareAmount.toFixed(2)}` : "-"}</strong>
+                              </div>
+                              <div>
                                 <span>Alerts</span>
                                 <strong>{trip.violationCount}</strong>
                               </div>
                             </div>
+                            <button
+                              type="button"
+                              className="trip-path-button"
+                              onClick={() => openTripPathModal(trip)}
+                              disabled={!trip.hasPath}
+                            >
+                              {trip.hasPath ? "View Trip Path" : "No saved path"}
+                            </button>
                           </article>
                         ))}
                       </div>
@@ -2844,55 +3659,74 @@ export default function AdminShell({
           )}
 
           {activePage === "alerts" && (
-            <section className="page-panel page-stack">
-              <div className="page-panel__header">
-                <h2>Alerts</h2>
-                <p>
-                  {hasSearchQuery
-                    ? `${filteredAlerts.length} matches for "${trimmedSearchQuery}"`
-                    : `${alertRows.length} total alerts and emergencies`}
-                </p>
+            <section className="page-panel page-panel--table-layout">
+              <div className="dashboard-table-summary">
+                <article className="dashboard-table-summary__card">
+                  <span>Total Alerts</span>
+                  <strong>{alertStats.total}</strong>
+                </article>
+                <article className="dashboard-table-summary__card">
+                  <span>Open Alerts</span>
+                  <strong>{alertStats.open}</strong>
+                </article>
+                <article className="dashboard-table-summary__card">
+                  <span>Emergencies</span>
+                  <strong>{alertStats.emergency}</strong>
+                </article>
+                <article className="dashboard-table-summary__card">
+                  <span>Resolved</span>
+                  <strong>{alertStats.resolved}</strong>
+                </article>
               </div>
-              <div className="alerts-list alerts-list--page">
-                  {filteredAlerts.length === 0 ? (
-                    <div className="muted">
-                      {hasSearchQuery
-                        ? `No alerts match "${trimmedSearchQuery}".`
-                        : "No alerts or emergencies yet."}
-                    </div>
-                  ) : (
-                    filteredAlerts.map((alert) => (
-                      <div key={alert.key} className="alert-row">
-                        <div className="alert-row__top">
-                          <strong>{alert.driverName ?? `Driver ${alert.driverId}`}</strong>
-                          <span>{new Date(alert.ts).toLocaleString()}</span>
-                        </div>
-                        <div className="alert-row__meta">{alert.reason}</div>
-                        {alert.description && (
-                          <div className="alert-row__meta">{alert.description}</div>
-                        )}
-                        {(alert.plateNo || alert.routeName) && (
-                          <div className="alert-row__meta">
-                            {[alert.plateNo, alert.routeName].filter(Boolean).join(" | ")}
-                          </div>
-                        )}
-                        {alert.lat !== undefined && alert.lng !== undefined && (
-                          <div className="alert-row__meta">
-                            {alert.lat.toFixed(5)}, {alert.lng.toFixed(5)}
-                        </div>
-                      )}
-                        {(alert.todaName || alert.barangayName || alert.status) && (
-                          <div className="alert-row__meta">
-                            {[alert.barangayName, alert.todaName, alert.status]
-                              .filter(Boolean)
-                              .join(" | ")}
-                          </div>
-                        )}
-                      </div>
-                    ))
-                  )}
-                </div>
-              </section>
+              <div className="dashboard-table-shell">
+                {filteredAlerts.length === 0 ? (
+                  <div className="dashboard-table-empty">
+                    {hasSearchQuery
+                      ? `No alerts match "${trimmedSearchQuery}".`
+                      : "No alerts or emergencies yet."}
+                  </div>
+                ) : (
+                  <div className="dashboard-table-wrap">
+                    <table className="dashboard-data-table">
+                      <thead>
+                        <tr>
+                          <th>Driver</th>
+                          <th>Type</th>
+                          <th>Reason</th>
+                          <th>Plate / Route</th>
+                          <th>Location</th>
+                          <th>Scope</th>
+                          <th>Time</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredAlerts.map((alert) => (
+                          <tr key={alert.key}>
+                            <td>{alert.driverName ?? `Driver ${alert.driverId}`}</td>
+                            <td>{alert.source === "emergency" ? "Emergency" : "Alert"}</td>
+                            <td>{alert.reason}</td>
+                            <td>{[alert.plateNo, alert.routeName].filter(Boolean).join(" / ") || "-"}</td>
+                            <td>
+                              {alert.lat !== undefined && alert.lng !== undefined
+                                ? `${alert.lat.toFixed(5)}, ${alert.lng.toFixed(5)}`
+                                : alert.description ?? "-"}
+                            </td>
+                            <td>{[alert.barangayName, alert.todaName].filter(Boolean).join(" / ") || "-"}</td>
+                            <td>{new Date(alert.ts).toLocaleString()}</td>
+                            <td>
+                              <span className={`drivers-table__pill drivers-table__pill--status`}>
+                                {alert.status ?? (alert.source === "emergency" ? "created" : "open")}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </section>
             )}
 
           {activePage === "reports" && (
@@ -2904,65 +3738,158 @@ export default function AdminShell({
           )}
 
           {activePage === "trip-logs" && (
-            <section className="page-panel page-stack">
-              <div className="page-panel__header">
-                <h2>Trip Logs</h2>
-                <p>
-                  {hasSearchQuery
-                    ? `${filteredTripRows.length} matches for "${trimmedSearchQuery}"`
-                    : `${pageLabel} monitoring stream`}
-                </p>
+            <section className="page-panel page-panel--table-layout">
+              <div className="dashboard-table-summary">
+                <article className="dashboard-table-summary__card">
+                  <span>Total Trips</span>
+                  <strong>{tripLogStats.total}</strong>
+                </article>
+                <article className="dashboard-table-summary__card">
+                  <span>Ongoing</span>
+                  <strong>{tripLogStats.ongoing}</strong>
+                </article>
+                <article className="dashboard-table-summary__card">
+                  <span>Completed</span>
+                  <strong>{tripLogStats.completed}</strong>
+                </article>
+                <article className="dashboard-table-summary__card">
+                  <span>Cancelled</span>
+                  <strong>{tripLogStats.cancelled}</strong>
+                </article>
               </div>
-              <div className="trip-logs-list trip-logs-list--page">
+              <div className="dashboard-table-shell">
                 {filteredTripRows.length === 0 ? (
-                  <div className="muted">
+                  <div className="dashboard-table-empty">
                     {hasSearchQuery
                       ? `No trip logs match "${trimmedSearchQuery}".`
                       : "No stored trips yet."}
                   </div>
                 ) : (
-                  filteredTripRows.map((trip) => (
-                    <div key={trip.tripId} className="trip-driver">
-                      <div className="trip-driver__top">
-                        <strong>{trip.driverName}</strong>
-                        <span>{trip.tripStatus.toUpperCase()}</span>
-                      </div>
-                      <div className="trip-driver__meta">
-                        Trip #{trip.tripId} | {trip.plateNo} | {trip.routeName}
-                      </div>
-                      <div className="trip-points">
-                        <div className="trip-point">
-                          <span>Start</span>
-                          <span>{new Date(trip.tripStart).toLocaleString()}</span>
-                        </div>
-                        <div className="trip-point">
-                          <span>End</span>
-                          <span>{trip.tripEnd ? new Date(trip.tripEnd).toLocaleString() : "-"}</span>
-                        </div>
-                        <div className="trip-point">
-                          <span>Fare</span>
-                          <span>{trip.fareAmount !== undefined ? `PHP ${trip.fareAmount.toFixed(2)}` : "-"}</span>
-                        </div>
-                        <div className="trip-point">
-                          <span>Duration</span>
-                          <span>{trip.durationMinutes !== undefined ? `${trip.durationMinutes} min` : "-"}</span>
-                        </div>
-                        <div className="trip-point">
-                          <span>Distance</span>
-                          <span>{trip.distanceKm !== undefined ? `${trip.distanceKm.toFixed(2)} km` : "-"}</span>
-                        </div>
-                        <div className="trip-point">
-                          <span>Alerts</span>
-                          <span>{trip.violationCount}</span>
-                        </div>
-                      </div>
-                    </div>
-                  ))
+                  <div className="dashboard-table-wrap">
+                    <table className="dashboard-data-table">
+                      <thead>
+                        <tr>
+                          <th>Trip</th>
+                          <th>Driver</th>
+                          <th>Plate</th>
+                          <th>Route</th>
+                          <th>Start</th>
+                          <th>End</th>
+                          <th>Fare</th>
+                          <th>Duration</th>
+                          <th>Distance</th>
+                          <th>Path</th>
+                          <th>Alerts</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredTripRows.map((trip) => (
+                          <tr key={trip.tripId}>
+                            <td>{trip.tripId}</td>
+                            <td>{trip.driverName}</td>
+                            <td>{trip.plateNo}</td>
+                            <td>{trip.routeName}</td>
+                            <td>{new Date(trip.tripStart).toLocaleString()}</td>
+                            <td>{trip.tripEnd ? new Date(trip.tripEnd).toLocaleString() : "-"}</td>
+                            <td>{trip.fareAmount !== undefined ? `PHP ${trip.fareAmount.toFixed(2)}` : "-"}</td>
+                            <td>{trip.durationMinutes !== undefined ? `${trip.durationMinutes} min` : "-"}</td>
+                            <td>{trip.distanceKm !== undefined ? `${trip.distanceKm.toFixed(2)} km` : "-"}</td>
+                            <td>
+                              <button
+                                type="button"
+                                className="table-action-button"
+                                onClick={() => openTripPathModal(trip)}
+                                disabled={!trip.hasPath}
+                              >
+                                {trip.hasPath ? `${trip.pathPointCount ?? 0} pts` : "None"}
+                              </button>
+                            </td>
+                            <td>{trip.violationCount}</td>
+                            <td>
+                              <span className="drivers-table__pill drivers-table__pill--status">
+                                {trip.tripStatus}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 )}
               </div>
             </section>
           )}
         </main>
+        {selectedTripForPath && (
+          <div
+            className="trip-path-modal-backdrop"
+            role="presentation"
+            onClick={closeTripPathModal}
+          >
+            <section
+              className="trip-path-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="trip-path-modal-title"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="trip-path-modal__header">
+                <div>
+                  <h2 id="trip-path-modal-title">
+                    Trip #{selectedTripForPath.tripId} Path
+                  </h2>
+                  <p>
+                    {selectedTripForPath.driverName} | {selectedTripForPath.plateNo} |{" "}
+                    {selectedTripForPath.routeName}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="trip-path-modal__close"
+                  onClick={closeTripPathModal}
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="trip-path-modal__meta">
+                <div>
+                  <span>Start</span>
+                  <strong>{formatDateTime(selectedTripForPath.tripStart)}</strong>
+                </div>
+                <div>
+                  <span>End</span>
+                  <strong>{formatDateTime(selectedTripForPath.tripEnd)}</strong>
+                </div>
+                <div>
+                  <span>Points</span>
+                  <strong>{tripPathData?.pointCount ?? selectedTripForPath.pathPointCount ?? "-"}</strong>
+                </div>
+                <div>
+                  <span>Alerts</span>
+                  <strong>{selectedTripForPath.violationCount}</strong>
+                </div>
+              </div>
+
+              {tripPathError && (
+                <div className="trip-path-modal__notice" role="status">
+                  {tripPathError.replace(/^Error:\s*/, "")}
+                </div>
+              )}
+
+              {tripPathLoading ? (
+                <div className="trip-path-modal__empty">Loading saved trip path...</div>
+              ) : tripPathData ? (
+                <TripPathMap tripPath={tripPathData} />
+              ) : (
+                <div className="trip-path-modal__empty">
+                  No saved path is available for this trip yet.
+                </div>
+              )}
+            </section>
+          </div>
+        )}
         {activeViolationAlert && (
           <div
             className="violation-modal-backdrop"

@@ -1,8 +1,12 @@
 @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
 
 :root {
+  --admin-font-family: "Inter", "Noto Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --admin-font-size: 0.8125rem;
+  --admin-font-size-meta: 0.75rem;
+  --admin-font-size-title: 1.125rem;
   font-family:
-    "Inter", "Noto Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    var(--admin-font-family);
   line-height: 1.4;
   font-weight: 400;
   font-synthesis: none;
@@ -25,6 +29,22 @@ body,
 
 body {
   min-width: 320px;
+  font-family: var(--admin-font-family);
   background: #f5f7fb;
   color: #0f172a;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: var(--admin-font-family);
+  font-size: inherit;
+  line-height: inherit;
+}
+
+input::placeholder,
+textarea::placeholder {
+  font-family: var(--admin-font-family);
+  font-size: inherit;
 }

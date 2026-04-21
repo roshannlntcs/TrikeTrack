@@ -1,5 +1,5 @@
 import type { AdminProfile } from "./admin-auth-db"
-import { ensureDatabaseReady, hasColumn, query } from "./database"
+import { ensureDatabaseReady, hasColumn, hasTable, query } from "./database"
 import {
   listAppealsForAdmin,
   type AdminViolationAppealRecord
@@ -8,6 +8,7 @@ import {
   listEmergencyAlertsForAdmin,
   type EmergencyAlertRecord
 } from "./emergency-alerts-db"
+import { ensureViolationStorageReady } from "./violations-db"
 
 export type DashboardDriverRecord = {
   driverId: number
@@ -126,6 +127,9 @@ export type DashboardTripRecord = {
   durationMinutes?: number
   fareAmount?: number
   distanceKm?: number
+  hasPath: boolean
+  pathPointCount?: number
+  pathUpdatedAt?: string
   violationCount: number
   createdAt: string
 }
@@ -271,12 +275,47 @@ type DashboardTripRow = {
   duration_minutes: number | null
   fare_amount: string | null
   distance_km: number | null
+  path_point_count: number | null
+  path_updated_at: Date | null
   violation_count: number | null
   created_at: Date
 }
 
 type DashboardAggregateCountsRow = {
   completed_trips_today: number
+}
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __triketrackNotificationReadsReady: Promise<void> | undefined
+}
+
+const ensureNotificationReadsReady = () => {
+  if (!globalThis.__triketrackNotificationReadsReady) {
+    globalThis.__triketrackNotificationReadsReady = (async () => {
+      await ensureDatabaseReady()
+
+      await query(`
+        CREATE TABLE IF NOT EXISTS public.admin_notification_reads (
+          admin_id bigint NOT NULL REFERENCES public.admin_accounts(admin_id) ON DELETE CASCADE,
+          notification_key text NOT NULL,
+          read_at timestamptz NOT NULL DEFAULT NOW(),
+          created_at timestamptz NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (admin_id, notification_key)
+        )
+      `)
+
+      await query(`
+        CREATE INDEX IF NOT EXISTS idx_admin_notification_reads_admin_read_at
+        ON public.admin_notification_reads(admin_id, read_at DESC)
+      `)
+    })().catch((error) => {
+      globalThis.__triketrackNotificationReadsReady = undefined
+      throw error
+    })
+  }
+
+  return globalThis.__triketrackNotificationReadsReady
 }
 
 const OPERATIONAL_TIMEZONE = "Asia/Manila"
@@ -436,6 +475,10 @@ const mapTrip = (row: DashboardTripRow): DashboardTripRecord => ({
   durationMinutes: row.duration_minutes ?? undefined,
   fareAmount: row.fare_amount === null ? undefined : Number(row.fare_amount),
   distanceKm: row.distance_km === null ? undefined : Number(row.distance_km),
+  hasPath: Number(row.path_point_count ?? 0) > 1,
+  pathPointCount:
+    row.path_point_count === null ? undefined : Number(row.path_point_count),
+  pathUpdatedAt: row.path_updated_at?.toISOString(),
   violationCount: Number(row.violation_count ?? 0),
   createdAt: row.created_at.toISOString()
 })
@@ -694,6 +737,8 @@ const loadReadNotificationKeys = async (adminId: number, notificationKeys: strin
     return new Set<string>()
   }
 
+  await ensureNotificationReadsReady()
+
   const result = await query<{ notification_key: string }>(
     `
       SELECT notification_key
@@ -711,7 +756,7 @@ export const markDashboardNotificationsRead = async (
   adminId: number,
   notificationKeys: string[]
 ) => {
-  await ensureDatabaseReady()
+  await ensureNotificationReadsReady()
 
   const uniqueKeys = [...new Set(notificationKeys.map((key) => key.trim()).filter(Boolean))]
   if (uniqueKeys.length === 0) {
@@ -739,6 +784,8 @@ export const markDashboardNotificationsRead = async (
 
 export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
   await ensureDatabaseReady()
+  await ensureNotificationReadsReady()
+  await ensureViolationStorageReady()
 
   const driverScope = buildScopeClause(profile, "d.toda_id", "b.barangay_id")
   const tricycleScope = buildScopeClause(profile, "tr.toda_id", "b.barangay_id")
@@ -747,6 +794,86 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
   const driverAvatarSelect = (await hasColumn("public", "drivers", "avatar_url"))
     ? "d.avatar_url"
     : "NULL::text AS avatar_url"
+  const hasMobileViolations = await hasTable("public", "mobile_violations")
+  const hasTripPaths = await hasTable("public", "trip_paths")
+  const mobileAlertCountsUnion = hasMobileViolations
+    ? `
+            UNION ALL
+
+            SELECT
+              mv.driver_id,
+              LOWER(mv.status::text) AS status
+            FROM public.mobile_violations mv
+      `
+    : ""
+  const mobileViolationsUnion = hasMobileViolations
+    ? `
+          UNION ALL
+
+          SELECT
+            CONCAT('driver-', mv.id)::text AS violation_id,
+            'driver_violation'::text AS alert_source,
+            d.driver_id,
+            d.driver_code,
+            d.first_name,
+            d.last_name,
+            td.toda_name,
+            b.barangay_name,
+            d.tricycle_id,
+            tr.plate_no,
+            tp.trip_id,
+            r.route_id,
+            r.origin AS route_origin,
+            r.destination AS route_destination,
+            LOWER(mv.type::text) AS violation_type_code,
+            INITCAP(REPLACE(LOWER(mv.type::text), '_', ' ')) AS violation_type_label,
+            LOWER(mv.priority::text)::text AS severity,
+            COALESCE(mv.title, mv.details) AS description,
+            mv.location_label,
+            mv.latitude,
+            mv.longitude,
+            mv.occurred_at AS detected_at,
+            LOWER(mv.status::text)::text AS status
+          FROM public.mobile_violations mv
+          JOIN public.drivers d
+            ON d.driver_id = mv.driver_id
+          LEFT JOIN public.tricycles tr
+            ON tr.tricycle_id = d.tricycle_id
+          LEFT JOIN public.trips tp
+            ON tp.trip_id = mv.trip_id
+          LEFT JOIN public.routes r
+            ON r.route_id = tp.route_id
+          JOIN public.todas td
+            ON td.toda_id = d.toda_id
+          JOIN public.barangays b
+            ON b.barangay_id = td.barangay_id
+          ${alertScope.clause}
+      `
+    : ""
+  const mobileTripAlertsUnion = hasMobileViolations
+    ? `
+            UNION ALL
+
+            SELECT 1
+            FROM public.mobile_violations mv
+            WHERE mv.trip_id = tp.trip_id
+      `
+    : ""
+  const tripPathSelect = hasTripPaths
+    ? `
+          path.point_count AS path_point_count,
+          path.updated_at AS path_updated_at,
+      `
+    : `
+          NULL::integer AS path_point_count,
+          NULL::timestamptz AS path_updated_at,
+      `
+  const tripPathJoin = hasTripPaths
+    ? `
+        LEFT JOIN public.trip_paths path
+          ON path.trip_id = tp.trip_id
+      `
+    : ""
 
   const [
     driversResult,
@@ -842,13 +969,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
               LOWER(v.status::text) AS status
             FROM public.violations v
             WHERE v.driver_id IS NOT NULL
-
-            UNION ALL
-
-            SELECT
-              mv.driver_id,
-              LOWER(mv.status::text) AS status
-            FROM public.mobile_violations mv
+            ${mobileAlertCountsUnion}
           ) alert_source
           GROUP BY driver_id
         )
@@ -936,12 +1057,12 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
             vt.label AS violation_type_label,
             CASE
               WHEN vt.code = 'geofence_deviation' THEN 'high'
-              ELSE 'medium'
+            ELSE 'medium'
             END::text AS severity,
             v.description,
-            NULL::text AS location_label,
-            NULL::double precision AS latitude,
-            NULL::double precision AS longitude,
+            v.location_label,
+            v.latitude,
+            v.longitude,
             v.detected_at,
             LOWER(v.status::text)::text AS status
           FROM public.violations v
@@ -960,47 +1081,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
           LEFT JOIN public.barangays b
             ON b.barangay_id = td.barangay_id
           ${alertScope.clause}
-
-          UNION ALL
-
-          SELECT
-            CONCAT('driver-', mv.id)::text AS violation_id,
-            'driver_violation'::text AS alert_source,
-            d.driver_id,
-            d.driver_code,
-            d.first_name,
-            d.last_name,
-            td.toda_name,
-            b.barangay_name,
-            d.tricycle_id,
-            tr.plate_no,
-            tp.trip_id,
-            r.route_id,
-            r.origin AS route_origin,
-            r.destination AS route_destination,
-            LOWER(mv.type::text) AS violation_type_code,
-            INITCAP(REPLACE(LOWER(mv.type::text), '_', ' ')) AS violation_type_label,
-            LOWER(mv.priority::text)::text AS severity,
-            COALESCE(mv.title, mv.details) AS description,
-            mv.location_label,
-            mv.latitude,
-            mv.longitude,
-            mv.occurred_at AS detected_at,
-            LOWER(mv.status::text)::text AS status
-          FROM public.mobile_violations mv
-          JOIN public.drivers d
-            ON d.driver_id = mv.driver_id
-          LEFT JOIN public.tricycles tr
-            ON tr.tricycle_id = d.tricycle_id
-          LEFT JOIN public.trips tp
-            ON tp.trip_id = mv.trip_id
-          LEFT JOIN public.routes r
-            ON r.route_id = tp.route_id
-          JOIN public.todas td
-            ON td.toda_id = d.toda_id
-          JOIN public.barangays b
-            ON b.barangay_id = td.barangay_id
-          ${alertScope.clause}
+          ${mobileViolationsUnion}
         ) scoped_alerts
         ORDER BY detected_at DESC, violation_id DESC
         LIMIT 100
@@ -1032,6 +1113,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
           tp.duration_minutes,
           tp.fare_amount,
           dist.distance_km,
+          ${tripPathSelect}
           COALESCE(violations.violation_count, 0) AS violation_count,
           tp.created_at
         FROM public.trips tp
@@ -1045,6 +1127,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
           ON td.toda_id = r.toda_id
         JOIN public.barangays b
           ON b.barangay_id = td.barangay_id
+        ${tripPathJoin}
         LEFT JOIN LATERAL (
           SELECT
             CASE
@@ -1069,11 +1152,11 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
             END AS distance_km
           FROM (
             SELECT
-              trp.latitude AS lat,
-              trp.longitude AS lng,
-              LAG(trp.latitude) OVER (ORDER BY trp.idx ASC) AS prev_lat,
-              LAG(trp.longitude) OVER (ORDER BY trp.idx ASC) AS prev_lng
-            FROM public.trip_route_points trp
+              trp.lat AS lat,
+              trp.lng AS lng,
+              LAG(trp.lat) OVER (ORDER BY trp.recorded_at ASC, trp.point_id ASC) AS prev_lat,
+              LAG(trp.lng) OVER (ORDER BY trp.recorded_at ASC, trp.point_id ASC) AS prev_lng
+            FROM public.trip_points trp
             WHERE trp.trip_id = tp.trip_id
           ) path
         ) dist ON TRUE
@@ -1083,12 +1166,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
             SELECT 1
             FROM public.violations v
             WHERE v.trip_id = tp.trip_id
-
-            UNION ALL
-
-            SELECT 1
-            FROM public.mobile_violations mv
-            WHERE mv.trip_id = tp.trip_id
+            ${mobileTripAlertsUnion}
           ) trip_alerts
         ) violations ON TRUE
         ${tripScope.clause}
@@ -1148,7 +1226,11 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
 
   const notificationsWithReadState = notifications.map((item) => ({
     ...item,
-    isRead: readKeys.has(item.notificationKey)
+    isRead:
+      item.kind === "appeal"
+        ? appeals.some((appeal) => appeal.appealId === item.sourceEntityId && Boolean(appeal.viewedAt)) ||
+          readKeys.has(item.notificationKey)
+        : readKeys.has(item.notificationKey)
   }))
 
   const onlineDrivers = operationalDrivers.filter((driver) => driver.isOnline)
