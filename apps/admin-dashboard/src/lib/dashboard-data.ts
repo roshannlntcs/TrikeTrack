@@ -210,6 +210,21 @@ type TripPathResponse = {
 const DASHBOARD_CACHE_KEY = "dashboard-data"
 const tripPathCacheKey = (tripId: number) => `trip-path:${tripId}`
 
+const withCacheMeta = <TData extends object>(
+  cached: { savedAt: number; data: TData }
+) => ({
+  ...cached.data,
+  cacheMeta: {
+    fromCache: true,
+    savedAt: new Date(cached.savedAt).toISOString()
+  }
+})
+
+export const getCachedDashboardData = async () => {
+  const cached = await getSnapshot<DashboardDataSnapshot>(DASHBOARD_CACHE_KEY)
+  return cached ? withCacheMeta(cached) : null
+}
+
 export const fetchDashboardData = async (accessToken: string) => {
   try {
     const response = await fetch("/api/admin/dashboard-data", {
@@ -228,18 +243,15 @@ export const fetchDashboardData = async (accessToken: string) => {
     await saveSnapshot(DASHBOARD_CACHE_KEY, payload.data)
     return payload.data
   } catch (error) {
-    const cached = await getSnapshot<DashboardDataSnapshot>(DASHBOARD_CACHE_KEY)
-    if (cached) {
-      return {
-        ...cached.data,
-        cacheMeta: {
-          fromCache: true,
-          savedAt: new Date(cached.savedAt).toISOString()
-        }
-      }
-    }
+    const cached = await getCachedDashboardData()
+    if (cached) return cached
     throw error
   }
+}
+
+export const getCachedTripPath = async (tripId: number) => {
+  const cached = await getSnapshot<TripPathRecord>(tripPathCacheKey(tripId))
+  return cached ? withCacheMeta(cached) : null
 }
 
 export const fetchTripPath = async (accessToken: string, tripId: number) => {
@@ -260,16 +272,8 @@ export const fetchTripPath = async (accessToken: string, tripId: number) => {
     }
     return payload.data ?? null
   } catch (error) {
-    const cached = await getSnapshot<TripPathRecord>(tripPathCacheKey(tripId))
-    if (cached) {
-      return {
-        ...cached.data,
-        cacheMeta: {
-          fromCache: true,
-          savedAt: new Date(cached.savedAt).toISOString()
-        }
-      }
-    }
+    const cached = await getCachedTripPath(tripId)
+    if (cached) return cached
     throw error
   }
 }

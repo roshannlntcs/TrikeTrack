@@ -22,6 +22,8 @@ type SuperadminPageProps = {
   mode?: "superadmin" | "toda-admin"
   lockedTodaId?: number
   lockedTodaLabel?: string
+  searchQuery?: string
+  onSearchPlaceholderChange?: (placeholder: string) => void
   onDataChanged?: () => void
 }
 
@@ -59,6 +61,7 @@ type RouteFormState = {
   todaId: string
   origin: string
   destination: string
+  defaultFareAmount: string
   geofenceGeojsonText: string
   status: EntityStatus
 }
@@ -138,6 +141,7 @@ const createRouteForm = (): RouteFormState => ({
   todaId: "",
   origin: "",
   destination: "",
+  defaultFareAmount: "",
   geofenceGeojsonText: "",
   status: "active"
 })
@@ -179,6 +183,27 @@ const formatAdministratorScope = (row: AdministratorRecord) => {
 const formatDateLabel = (value?: string) =>
   value ? new Date(value).toLocaleDateString() : "Not available"
 
+const formatFareLabel = (value?: number) =>
+  typeof value === "number" && Number.isFinite(value)
+    ? new Intl.NumberFormat("en-PH", {
+        style: "currency",
+        currency: "PHP",
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      }).format(value)
+    : "Not set"
+
+const textMatchesSearch = (
+  normalizedSearchQuery: string,
+  ...values: Array<string | number | boolean | undefined | null>
+) =>
+  values.some(
+    (value) =>
+      value !== undefined &&
+      value !== null &&
+      String(value).toLowerCase().includes(normalizedSearchQuery)
+  )
+
 const isStrongTemporaryPassword = (value: string) =>
   value.length >= 8 &&
   /[a-z]/.test(value) &&
@@ -190,6 +215,8 @@ export default function SuperadminPage({
   mode = "superadmin",
   lockedTodaId,
   lockedTodaLabel,
+  searchQuery: controlledSearchQuery,
+  onSearchPlaceholderChange,
   onDataChanged
 }: SuperadminPageProps) {
   const isTodaAdminMode = mode === "toda-admin"
@@ -247,6 +274,30 @@ export default function SuperadminPage({
     setTricycleForm((current) => ({ ...current, todaId: String(lockedTodaId) }))
   }, [isTodaAdminMode, lockedTodaId])
 
+  useEffect(() => {
+    if (isTodaAdminMode) {
+      onSearchPlaceholderChange?.("Search driver ID, tricycle ID, plate...")
+      return
+    }
+
+    const placeholder =
+      activeTab === "admin-panel"
+        ? "Search admins, barangays, TODAs, routes..."
+        : activeTab === "barangays"
+          ? "Search barangay ID, name, district, city..."
+          : activeTab === "todas"
+            ? "Search TODA ID, name, barangay..."
+            : activeTab === "routes"
+              ? "Search route ID, TODA, origin, destination..."
+              : "Search admin ID, email, role, scope..."
+
+    onSearchPlaceholderChange?.(placeholder)
+  }, [activeTab, isTodaAdminMode, onSearchPlaceholderChange])
+
+  const searchQuery = controlledSearchQuery ?? ""
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase()
+  const hasSearchQuery = normalizedSearchQuery.length > 0
+
   const todaOptions = useMemo(() => data.todas, [data.todas])
   const barangayOptions = useMemo(() => data.barangays, [data.barangays])
   const tricycleOptions = useMemo(() => data.tricycles, [data.tricycles])
@@ -293,6 +344,135 @@ export default function SuperadminPage({
       )
       .slice(0, 8)
   }, [data.administrators, data.barangays, data.routes, data.todas])
+
+  const filteredRecentActivity = useMemo(() => {
+    if (!hasSearchQuery) return recentActivity
+    return recentActivity.filter((item) =>
+      textMatchesSearch(
+        normalizedSearchQuery,
+        item.key,
+        item.category,
+        item.title,
+        item.scope,
+        item.status,
+        item.createdAt
+      )
+    )
+  }, [hasSearchQuery, normalizedSearchQuery, recentActivity])
+
+  const filteredBarangays = useMemo(() => {
+    if (!hasSearchQuery) return data.barangays
+    return data.barangays.filter((row) =>
+      textMatchesSearch(
+        normalizedSearchQuery,
+        row.barangayId,
+        row.barangayName,
+        row.district,
+        row.city,
+        row.status,
+        row.todaCount,
+        row.createdAt
+      )
+    )
+  }, [data.barangays, hasSearchQuery, normalizedSearchQuery])
+
+  const filteredTodas = useMemo(() => {
+    if (!hasSearchQuery) return data.todas
+    return data.todas.filter((row) =>
+      textMatchesSearch(
+        normalizedSearchQuery,
+        row.todaId,
+        row.todaName,
+        row.barangayId,
+        row.barangayName,
+        row.status,
+        row.driverCount,
+        row.tricycleCount,
+        row.createdAt
+      )
+    )
+  }, [data.todas, hasSearchQuery, normalizedSearchQuery])
+
+  const filteredRoutes = useMemo(() => {
+    if (!hasSearchQuery) return data.routes
+    return data.routes.filter((row) =>
+      textMatchesSearch(
+        normalizedSearchQuery,
+        row.routeId,
+        row.origin,
+        row.destination,
+        row.defaultFareAmount,
+        row.todaId,
+        row.todaName,
+        row.barangayName,
+        row.status,
+        row.createdAt
+      )
+    )
+  }, [data.routes, hasSearchQuery, normalizedSearchQuery])
+
+  const filteredAdministrators = useMemo(() => {
+    if (!hasSearchQuery) return data.administrators
+    return data.administrators.filter((row) =>
+      textMatchesSearch(
+        normalizedSearchQuery,
+        row.adminId,
+        row.email,
+        row.role,
+        formatAdministratorScope(row),
+        row.status,
+        row.barangayId,
+        row.barangayName,
+        row.todaId,
+        row.todaName,
+        row.city,
+        row.createdAt
+      )
+    )
+  }, [data.administrators, hasSearchQuery, normalizedSearchQuery])
+
+  const filteredDrivers = useMemo(() => {
+    if (!hasSearchQuery) return data.drivers
+    return data.drivers.filter((row) =>
+      textMatchesSearch(
+        normalizedSearchQuery,
+        row.driverId,
+        row.driverCode,
+        `${row.firstName} ${row.lastName}`,
+        row.firstName,
+        row.lastName,
+        row.contactNo,
+        row.tricycleId,
+        row.tricycleNo,
+        row.qrId,
+        row.qrStatus,
+        row.todaId,
+        row.todaName,
+        row.barangayName,
+        row.passwordSet ? "password set" : "password pending",
+        row.status,
+        row.createdAt
+      )
+    )
+  }, [data.drivers, hasSearchQuery, normalizedSearchQuery])
+
+  const filteredTricycles = useMemo(() => {
+    if (!hasSearchQuery) return data.tricycles
+    return data.tricycles.filter((row) =>
+      textMatchesSearch(
+        normalizedSearchQuery,
+        row.tricycleId,
+        row.plateNo,
+        row.regNo,
+        row.permitExpirationDate,
+        row.todaId,
+        row.todaName,
+        row.barangayName,
+        row.status,
+        row.createdAt
+      )
+    )
+  }, [data.tricycles, hasSearchQuery, normalizedSearchQuery])
 
   const totalRecordsManaged =
     data.administrators.length +
@@ -373,6 +553,8 @@ export default function SuperadminPage({
       todaId: String(row.todaId),
       origin: row.origin,
       destination: row.destination,
+      defaultFareAmount:
+        row.defaultFareAmount === undefined ? "" : String(row.defaultFareAmount),
       geofenceGeojsonText: row.geofenceGeojson
         ? JSON.stringify(row.geofenceGeojson, null, 2)
         : "",
@@ -580,6 +762,9 @@ export default function SuperadminPage({
             todaId: Number(routeForm.todaId),
             origin: routeForm.origin,
             destination: routeForm.destination,
+            defaultFareAmount: routeForm.defaultFareAmount.trim()
+              ? Number(routeForm.defaultFareAmount)
+              : null,
             geofenceGeojson: parsedGeofence
           })
           await loadMasterData()
@@ -589,6 +774,9 @@ export default function SuperadminPage({
             todaId: Number(routeForm.todaId),
             origin: routeForm.origin,
             destination: routeForm.destination,
+            defaultFareAmount: routeForm.defaultFareAmount.trim()
+              ? Number(routeForm.defaultFareAmount)
+              : null,
             geofenceGeojson: parsedGeofence,
             status: routeForm.status
           })
@@ -716,6 +904,10 @@ export default function SuperadminPage({
       ? `create-${activeModal.entity}`
       : `save-${activeModal.entity}-${activeModal.id}`
     : null
+  const routeDefaultFareInvalid =
+    routeForm.defaultFareAmount.trim().length > 0 &&
+    (!Number.isFinite(Number(routeForm.defaultFareAmount)) ||
+      Number(routeForm.defaultFareAmount) < 0)
 
   const modalSubmitDisabled = !activeModal
     ? true
@@ -732,7 +924,10 @@ export default function SuperadminPage({
         ? !barangayForm.barangayName.trim() || !barangayForm.city.trim()
         : activeModal.entity === "toda"
           ? !todaForm.barangayId || !todaForm.todaName.trim()
-          : !routeForm.todaId || !routeForm.origin.trim() || !routeForm.destination.trim()
+          : !routeForm.todaId ||
+            !routeForm.origin.trim() ||
+            !routeForm.destination.trim() ||
+            routeDefaultFareInvalid
 
   const modalTitle = !activeModal
     ? ""
@@ -963,16 +1158,18 @@ export default function SuperadminPage({
                 </tr>
               </thead>
               <tbody>
-                {data.drivers.length === 0 ? (
+                {filteredDrivers.length === 0 ? (
                   <tr>
                     <td colSpan={8}>
                       <div className="superadmin-empty-state">
-                        No drivers have been added to this TODA yet.
+                        {hasSearchQuery
+                          ? `No drivers match "${searchQuery.trim()}".`
+                          : "No drivers have been added to this TODA yet."}
                       </div>
                     </td>
                   </tr>
                 ) : (
-                  data.drivers.map((row) => (
+                  filteredDrivers.map((row) => (
                     <tr key={row.driverId}>
                       <td>
                         <select
@@ -1090,16 +1287,18 @@ export default function SuperadminPage({
                 </tr>
               </thead>
               <tbody>
-                {data.tricycles.length === 0 ? (
+                {filteredTricycles.length === 0 ? (
                   <tr>
                     <td colSpan={5}>
                       <div className="superadmin-empty-state">
-                        No tricycles have been added to this TODA yet.
+                        {hasSearchQuery
+                          ? `No tricycles match "${searchQuery.trim()}".`
+                          : "No tricycles have been added to this TODA yet."}
                       </div>
                     </td>
                   </tr>
                 ) : (
-                  data.tricycles.map((row) => (
+                  filteredTricycles.map((row) => (
                     <tr key={row.tricycleId}>
                       <td>
                         <input
@@ -1251,16 +1450,18 @@ export default function SuperadminPage({
                   </tr>
                 </thead>
                 <tbody>
-                  {recentActivity.length === 0 ? (
+                  {filteredRecentActivity.length === 0 ? (
                     <tr>
                       <td colSpan={5}>
                         <div className="superadmin-empty-state">
-                          No settings records are available yet.
+                          {hasSearchQuery
+                            ? `No settings records match "${searchQuery.trim()}".`
+                            : "No settings records are available yet."}
                         </div>
                       </td>
                     </tr>
                   ) : (
-                    recentActivity.map((item) => (
+                    filteredRecentActivity.map((item) => (
                       <tr key={item.key}>
                         <td>
                           <span className="superadmin-category-chip">{item.category}</span>
@@ -1310,14 +1511,18 @@ export default function SuperadminPage({
                   </tr>
                 </thead>
                 <tbody>
-                  {data.barangays.length === 0 ? (
+                  {filteredBarangays.length === 0 ? (
                     <tr>
                       <td colSpan={6}>
-                        <div className="superadmin-empty-state">No barangays added yet.</div>
+                        <div className="superadmin-empty-state">
+                          {hasSearchQuery
+                            ? `No barangays match "${searchQuery.trim()}".`
+                            : "No barangays added yet."}
+                        </div>
                       </td>
                     </tr>
                   ) : (
-                    data.barangays.map((row) => {
+                    filteredBarangays.map((row) => {
                       const rowBusy =
                         busyKey === `save-barangay-${row.barangayId}` ||
                         busyKey === `delete-barangay-${row.barangayId}`
@@ -1396,14 +1601,18 @@ export default function SuperadminPage({
                 </tr>
               </thead>
               <tbody>
-                {data.todas.length === 0 ? (
+                {filteredTodas.length === 0 ? (
                   <tr>
                     <td colSpan={6}>
-                      <div className="superadmin-empty-state">No TODAs added yet.</div>
+                      <div className="superadmin-empty-state">
+                        {hasSearchQuery
+                          ? `No TODAs match "${searchQuery.trim()}".`
+                          : "No TODAs added yet."}
+                      </div>
                     </td>
                   </tr>
                 ) : (
-                  data.todas.map((row) => {
+                  filteredTodas.map((row) => {
                     const rowBusy =
                       busyKey === `save-toda-${row.todaId}` || busyKey === `delete-toda-${row.todaId}`
 
@@ -1475,19 +1684,24 @@ export default function SuperadminPage({
                   <th>TODA</th>
                   <th>Origin</th>
                   <th>Destination</th>
+                  <th>Default Fare</th>
                   <th>Status</th>
                   <th />
                 </tr>
               </thead>
               <tbody>
-                {data.routes.length === 0 ? (
+                {filteredRoutes.length === 0 ? (
                   <tr>
-                    <td colSpan={5}>
-                      <div className="superadmin-empty-state">No routes added yet.</div>
+                    <td colSpan={6}>
+                      <div className="superadmin-empty-state">
+                        {hasSearchQuery
+                          ? `No routes match "${searchQuery.trim()}".`
+                          : "No routes added yet."}
+                      </div>
                     </td>
                   </tr>
                 ) : (
-                  data.routes.map((row) => {
+                  filteredRoutes.map((row) => {
                     const rowBusy =
                       busyKey === `save-route-${row.routeId}` ||
                       busyKey === `delete-route-${row.routeId}`
@@ -1497,6 +1711,7 @@ export default function SuperadminPage({
                         <td>{`${row.barangayName} / ${row.todaName}`}</td>
                         <td>{row.origin}</td>
                         <td>{row.destination}</td>
+                        <td>{formatFareLabel(row.defaultFareAmount)}</td>
                         <td>
                           <span className={`superadmin-status superadmin-status--${row.status}`}>
                             {formatStatusLabel(row.status)}
@@ -1560,16 +1775,18 @@ export default function SuperadminPage({
                 </tr>
               </thead>
               <tbody>
-                {data.administrators.length === 0 ? (
+                {filteredAdministrators.length === 0 ? (
                   <tr>
                     <td colSpan={6}>
                       <div className="superadmin-empty-state">
-                        No administrator accounts are linked yet.
+                        {hasSearchQuery
+                          ? `No administrators match "${searchQuery.trim()}".`
+                          : "No administrator accounts are linked yet."}
                       </div>
                     </td>
                   </tr>
                 ) : (
-                  data.administrators.map((row) => {
+                  filteredAdministrators.map((row) => {
                     const rowBusy = busyKey === `delete-administrator-${row.adminId}`
 
                     return (
@@ -1915,6 +2132,23 @@ export default function SuperadminPage({
                       }
                       placeholder="Destination"
                     />
+                  </label>
+                  <label className="superadmin-field">
+                    <span>Default fare</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={routeForm.defaultFareAmount}
+                      onChange={(event) =>
+                        setRouteForm((current) => ({
+                          ...current,
+                          defaultFareAmount: event.target.value
+                        }))
+                      }
+                      placeholder="Optional PHP amount"
+                    />
+                    <small>Used by the passenger QR fare checker before a trip is completed.</small>
                   </label>
                   <label className="superadmin-field">
                     <span>Geofence GeoJSON</span>

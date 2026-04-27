@@ -64,6 +64,7 @@ export type RouteRecord = {
   barangayName: string
   origin: string
   destination: string
+  defaultFareAmount?: number
   geofenceGeojson?: unknown
   status: EntityStatus
   createdAt: string

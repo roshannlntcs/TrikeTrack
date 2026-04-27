@@ -23,6 +23,28 @@ type PassengerReportContext = {
   todaName: string
   barangayId: number
   barangayName: string
+  routeId?: number
+  tripId?: number
+  tripStatus?: "scheduled" | "ongoing" | "completed" | "cancelled"
+  tripStartedAt?: string
+  tripEndedAt?: string
+  routeName?: string
+  latestDriverLocation?: {
+    latitude: number
+    longitude: number
+    speed?: number
+    heading?: number
+    accuracy?: number
+    recordedAt: string
+    updatedAt?: string
+    isOnline: boolean
+  }
+  fare?: {
+    amount?: number
+    currency: "PHP"
+    label: string
+    source: "trip" | "route" | "unavailable"
+  }
   reportingAvailable: boolean
   availabilityMessage?: string
 }
@@ -51,6 +73,7 @@ type EvidenceImage = {
 }
 
 type CategoryTone = "danger" | "info" | "warning" | "neutral"
+type FareCheckState = "ok" | "warning" | "neutral"
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"])
 const PRIVATE_IPV4_PATTERN =
@@ -135,6 +158,134 @@ const formatCoordinateLabel = (location: TriketrackMapCoordinate | null) => {
   if (!location) return "Waiting for GPS location"
 
   return `${location.latitude.toFixed(5)}, ${location.longitude.toFixed(5)}`
+}
+
+const formatTimestamp = (value?: string) => {
+  if (!value) return "Unavailable"
+
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    return "Unavailable"
+  }
+
+  return parsed.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  })
+}
+
+const formatRelativeTime = (value?: string) => {
+  if (!value) return "No recent driver location"
+
+  const parsed = new Date(value)
+  const diffMs = Date.now() - parsed.getTime()
+  if (!Number.isFinite(diffMs)) {
+    return "No recent driver location"
+  }
+
+  const diffMinutes = Math.max(0, Math.round(diffMs / 60000))
+  if (diffMinutes < 1) return "Updated just now"
+  if (diffMinutes === 1) return "Updated 1 minute ago"
+  if (diffMinutes < 60) return `Updated ${diffMinutes} minutes ago`
+
+  const diffHours = Math.round(diffMinutes / 60)
+  if (diffHours === 1) return "Updated 1 hour ago"
+  if (diffHours < 24) return `Updated ${diffHours} hours ago`
+
+  const diffDays = Math.round(diffHours / 24)
+  return diffDays === 1 ? "Updated 1 day ago" : `Updated ${diffDays} days ago`
+}
+
+const formatTripStatus = (status?: PassengerReportContext["tripStatus"]) => {
+  switch (status) {
+    case "ongoing":
+      return "Ongoing"
+    case "completed":
+      return "Completed"
+    case "scheduled":
+      return "Scheduled"
+    case "cancelled":
+      return "Cancelled"
+    default:
+      return "No active trip"
+  }
+}
+
+const formatSpeedLabel = (speed?: number) => {
+  if (typeof speed !== "number" || !Number.isFinite(speed) || speed < 0) {
+    return "Not available"
+  }
+
+  return `${speed.toFixed(1)} km/h`
+}
+
+const formatCurrency = (amount?: number, currency = "PHP") => {
+  if (typeof amount !== "number" || !Number.isFinite(amount)) {
+    return "Unavailable"
+  }
+
+  return new Intl.NumberFormat("en-PH", {
+    style: "currency",
+    currency,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(amount)
+}
+
+const parseFareValue = (value: string) => {
+  const normalized = value.replace(/[^0-9.]/g, "")
+  if (!normalized) return null
+
+  const parsed = Number(normalized)
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null
+  }
+
+  return parsed
+}
+
+const getFareCheckResult = (
+  fare: PassengerReportContext["fare"],
+  chargedFare: string
+): {
+  state: FareCheckState
+  title: string
+  detail: string
+} => {
+  const enteredFare = parseFareValue(chargedFare)
+  if (enteredFare === null) {
+    return {
+      state: "neutral",
+      title: "Enter the fare you were asked to pay",
+      detail: "We will compare it against the encoded trip fare when available."
+    }
+  }
+
+  if (!fare?.amount || fare.source === "unavailable") {
+    return {
+      state: "neutral",
+      title: "No encoded fare available yet",
+      detail: "This route has no backend fare reference yet, so the amount cannot be validated automatically."
+    }
+  }
+
+  const difference = Number((enteredFare - fare.amount).toFixed(2))
+  const referenceLabel = fare.source === "route" ? "route default fare" : "encoded trip fare"
+  if (difference <= 0) {
+    return {
+      state: "ok",
+      title: "Fare looks within the backend fare reference",
+      detail: `Entered fare ${formatCurrency(enteredFare, fare.currency)} versus ${referenceLabel} ${formatCurrency(fare.amount, fare.currency)}.`
+    }
+  }
+
+  return {
+    state: "warning",
+    title: "Possible fare overpricing",
+    detail: `Entered fare ${formatCurrency(enteredFare, fare.currency)} is ${formatCurrency(difference, fare.currency)} above the ${referenceLabel}.`
+  }
 }
 
 const getCategoryMeta = (
@@ -308,6 +459,7 @@ export default function App() {
   const [passengerName, setPassengerName] = useState("")
   const [passengerContact, setPassengerContact] = useState("")
   const [description, setDescription] = useState("")
+  const [fareCharged, setFareCharged] = useState("")
   const [evidenceImage, setEvidenceImage] = useState<EvidenceImage | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [submission, setSubmission] = useState<SubmissionPayload | null>(null)
@@ -343,7 +495,9 @@ export default function App() {
     const load = async () => {
       setLoading(true)
       try {
-        const response = await fetch(buildReportingUrl(reportingApi.apiBaseUrl, qrToken))
+        const response = await fetch(buildReportingUrl(reportingApi.apiBaseUrl, qrToken), {
+          cache: "no-store"
+        })
         const payload = (await response.json().catch(() => ({}))) as {
           ok?: boolean
           message?: string
@@ -356,7 +510,7 @@ export default function App() {
 
         if (!active) return
         setData(payload.data)
-        setReportTypeCode(payload.data.reportTypes[0]?.code ?? "")
+        setReportTypeCode((current) => current || payload.data?.reportTypes[0]?.code || "")
         setPageError(null)
       } catch (loadError) {
         if (!active) return
@@ -376,6 +530,45 @@ export default function App() {
       active = false
     }
   }, [qrToken, reportingApi.apiBaseUrl, reportingApi.error])
+
+  useEffect(() => {
+    let active = true
+
+    if (!qrToken || reportingApi.apiBaseUrl === null || !data) {
+      return () => {
+        active = false
+      }
+    }
+
+    const intervalId = window.setInterval(() => {
+      void (async () => {
+        try {
+          const response = await fetch(buildReportingUrl(reportingApi.apiBaseUrl, qrToken), {
+            cache: "no-store"
+          })
+          const payload = (await response.json().catch(() => ({}))) as {
+            ok?: boolean
+            message?: string
+            data?: ReportingPayload
+          }
+
+          if (!response.ok || !payload.data || !active) {
+            return
+          }
+
+          setData(payload.data)
+          setReportTypeCode((current) => current || payload.data?.reportTypes[0]?.code || "")
+        } catch {
+          // Keep the current page state if background refresh fails.
+        }
+      })()
+    }, 10000)
+
+    return () => {
+      active = false
+      window.clearInterval(intervalId)
+    }
+  }, [data, qrToken, reportingApi.apiBaseUrl])
 
   useEffect(() => {
     let active = true
@@ -557,6 +750,7 @@ export default function App() {
       setPassengerName("")
       setPassengerContact("")
       setDescription("")
+      setFareCharged("")
       clearEvidence()
       setConfirmOpen(false)
     } catch (submitError) {
@@ -625,6 +819,7 @@ export default function App() {
 
   const { context, reportTypes } = data
   const selectedCategory = reportTypes.find((type) => type.code === reportTypeCode)
+  const fareReportType = reportTypes.find((type) => type.code === "fare_overpricing")
   const emergencyIsActive =
     emergencyAlert !== null && emergencyAlert.status !== "resolved"
   const emergencyMapPoint =
@@ -640,6 +835,49 @@ export default function App() {
       : emergencyAlert?.status === "resolved"
         ? "Resolved"
         : "Waiting for admin"
+  const latestDriverPoint = context.latestDriverLocation
+    ? {
+        latitude: context.latestDriverLocation.latitude,
+        longitude: context.latestDriverLocation.longitude,
+        accuracy: context.latestDriverLocation.accuracy,
+        heading: context.latestDriverLocation.heading
+      }
+    : null
+  const tripMapCurrentPoint = latestDriverPoint ?? passengerLocation
+  const fareCheckResult = getFareCheckResult(context.fare, fareCharged)
+  const isDriverLocationFresh =
+    context.latestDriverLocation?.recordedAt !== undefined &&
+    Date.now() - new Date(context.latestDriverLocation.recordedAt).getTime() <= 5 * 60 * 1000
+  const tripStatusLabel = formatTripStatus(context.tripStatus)
+  const routeLabel = context.routeName ?? "No route assigned yet"
+  const fareReferenceLabel =
+    context.fare?.source !== "unavailable" && context.fare?.amount
+      ? formatCurrency(context.fare.amount, context.fare.currency)
+      : context.fare?.label ?? "No fare reference yet"
+
+  const prefillFareReport = () => {
+    if (!fareReportType) return
+
+    const charged = parseFareValue(fareCharged)
+    const expected = context.fare?.amount
+    const summaryLines = [
+      `Passenger fare concern for ${context.driverName}.`,
+      context.routeName ? `Route: ${context.routeName}.` : null,
+      typeof expected === "number"
+        ? `${context.fare?.source === "route" ? "Route default fare" : "Encoded trip fare"}: ${formatCurrency(expected, context.fare?.currency ?? "PHP")}.`
+        : "Backend fare reference is not available yet.",
+      charged !== null
+        ? `Passenger-entered fare: ${formatCurrency(charged, context.fare?.currency ?? "PHP")}.`
+        : null
+    ]
+      .filter(Boolean)
+      .join(" ")
+
+    setReportTypeCode(fareReportType.code)
+    setDescription((current) => current.trim() || summaryLines)
+    setFormError(null)
+    window.scrollTo({ top: document.body.scrollHeight * 0.35, behavior: "smooth" })
+  }
 
   return (
     <main className="page">
@@ -714,35 +952,143 @@ export default function App() {
               </div>
             </section>
 
+            <section className="panel trip-status-panel">
+              <div className="trip-status-panel__header">
+                <div>
+                  <p className="kicker">Current trip</p>
+                  <h2>{tripStatusLabel}</h2>
+                </div>
+                <span
+                  className={`status-pill${
+                    context.tripStatus === "ongoing"
+                      ? " status-pill--active"
+                      : context.tripStatus === "completed"
+                        ? " status-pill--neutral"
+                        : ""
+                  }`}
+                >
+                  {context.tripStatus === "ongoing"
+                    ? "Live"
+                    : context.tripStatus === "completed"
+                      ? "Recent"
+                      : "Idle"}
+                </span>
+              </div>
+              <div className="driver-grid">
+                <div>
+                  <span>Route</span>
+                  <strong>{routeLabel}</strong>
+                </div>
+                <div>
+                  <span>Trip started</span>
+                  <strong>{formatTimestamp(context.tripStartedAt)}</strong>
+                </div>
+                <div>
+                  <span>Latest driver ping</span>
+                  <strong>{formatRelativeTime(context.latestDriverLocation?.recordedAt)}</strong>
+                </div>
+                <div>
+                  <span>Driver speed</span>
+                  <strong>{formatSpeedLabel(context.latestDriverLocation?.speed)}</strong>
+                </div>
+              </div>
+            </section>
+
             <section className="panel panel--map">
-              <p className="kicker">Trip map</p>
+              <p className="kicker">Trip tracking</p>
               <p className="muted">
-                Live GPS centers the map on your device. Switch between street, satellite, and
-                terrain as needed.
+                This map shows the latest known driver location from the shared trip data. The page refreshes automatically while it stays open.
               </p>
               <div className="trip-map-shell">
                 <TriketrackMap
-                  currentLocation={passengerLocation}
+                  currentLocation={tripMapCurrentPoint}
                   destination={emergencyMapPoint}
                   mapStyle="street"
                   showControls
-                  showLocateButton
-                  onLocationUpdate={setPassengerLocation}
+                  showLocateButton={!latestDriverPoint}
+                  onLocationUpdate={!latestDriverPoint ? setPassengerLocation : undefined}
                 />
               </div>
               <div className="trip-map-meta">
                 <div>
-                  <span>Your location</span>
-                  <strong>{formatCoordinateLabel(passengerLocation)}</strong>
+                  <span>Driver location</span>
+                  <strong>
+                    {latestDriverPoint
+                      ? formatCoordinateLabel(latestDriverPoint)
+                      : formatCoordinateLabel(passengerLocation)}
+                  </strong>
                 </div>
                 <div>
-                  <span>Destination marker</span>
+                  <span>Location status</span>
+                  <strong>
+                    {latestDriverPoint
+                      ? isDriverLocationFresh
+                        ? context.latestDriverLocation?.isOnline
+                          ? "Driver online"
+                          : "Driver recently offline"
+                        : "Last known location only"
+                      : "Waiting for driver telemetry"}
+                  </strong>
+                </div>
+                <div>
+                  <span>Recorded at</span>
+                  <strong>{formatTimestamp(context.latestDriverLocation?.recordedAt)}</strong>
+                </div>
+                <div>
+                  <span>Emergency marker</span>
                   <strong>
                     {emergencyMapPoint
                       ? emergencyAlert?.locationLabel ?? "Emergency location"
-                      : "Not available yet"}
+                      : "No emergency marker"}
                   </strong>
                 </div>
+              </div>
+            </section>
+
+            <section className="panel fare-panel">
+              <p className="kicker">Basic fare check</p>
+              <p className="muted">
+                Compare the fare you were asked to pay against the trip fare stored in the backend.
+              </p>
+              <div className="fare-panel__summary">
+                <div>
+                  <span>Fare reference</span>
+                  <strong>{fareReferenceLabel}</strong>
+                </div>
+                <div>
+                  <span>Source</span>
+                  <strong>
+                    {context.fare?.source === "trip"
+                      ? "Trip record"
+                      : context.fare?.source === "route"
+                        ? "Route default"
+                        : "No encoded fare yet"}
+                  </strong>
+                </div>
+              </div>
+              <label className="field">
+                <span>Fare you were charged</span>
+                <input
+                  value={fareCharged}
+                  onChange={(event) => setFareCharged(event.target.value)}
+                  placeholder="0.00"
+                  inputMode="decimal"
+                  disabled={submitting}
+                />
+              </label>
+              <div className={`fare-result fare-result--${fareCheckResult.state}`}>
+                <strong>{fareCheckResult.title}</strong>
+                <span>{fareCheckResult.detail}</span>
+              </div>
+              <div className="fare-panel__actions">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={prefillFareReport}
+                  disabled={submitting || !fareReportType}
+                >
+                  Use this in a fare report
+                </button>
               </div>
             </section>
 

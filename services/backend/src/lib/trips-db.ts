@@ -42,6 +42,7 @@ type RouteTripContextRow = {
   route_id: number
   toda_id: number
   status: "active" | "inactive" | "suspended"
+  default_fare_amount: string | null
 }
 
 type TricycleTripContextRow = {
@@ -113,6 +114,7 @@ const getRouteTripContext = async (routeId: number) => {
       SELECT
         r.route_id,
         r.toda_id,
+        r.default_fare_amount,
         r.status
       FROM public.routes r
       WHERE r.route_id = $1
@@ -230,9 +232,10 @@ export const startTrip = async (input: StartTripInput) => {
         tricycle_id,
         route_id,
         trip_start,
+        fare_amount,
         trip_status
       )
-      VALUES ($1, $2, $3, $4::timestamptz, 'ongoing')
+      VALUES ($1, $2, $3, $4::timestamptz, $5, 'ongoing')
       RETURNING
         trip_id,
         driver_id,
@@ -245,7 +248,13 @@ export const startTrip = async (input: StartTripInput) => {
         trip_status,
         created_at
     `,
-    [driver.driver_id, tricycleId, route.route_id, tripStartIso]
+    [
+      driver.driver_id,
+      tricycleId,
+      route.route_id,
+      tripStartIso,
+      route.default_fare_amount === null ? null : Number(route.default_fare_amount)
+    ]
   )
 
   return mapTrip(result.rows[0])

@@ -23,6 +23,8 @@ type TodaManagementPageProps = {
   page: "drivers" | "tricycles"
   lockedTodaId?: number
   lockedTodaLabel?: string
+  searchQuery?: string
+  onSearchQueryChange?: (query: string) => void
   onDataChanged?: () => void
 }
 
@@ -207,6 +209,8 @@ export default function TodaManagementPage({
   page,
   lockedTodaId,
   lockedTodaLabel,
+  searchQuery: controlledSearchQuery,
+  onSearchQueryChange,
   onDataChanged
 }: TodaManagementPageProps) {
   const isDriverPage = page === "drivers"
@@ -221,7 +225,7 @@ export default function TodaManagementPage({
   const [tripHistoryError, setTripHistoryError] = useState<string | null>(null)
   const [reportHistoryLoading, setReportHistoryLoading] = useState(true)
   const [reportHistoryError, setReportHistoryError] = useState<string | null>(null)
-  const [searchQuery, setSearchQuery] = useState("")
+  const [localSearchQuery, setLocalSearchQuery] = useState("")
   const [statusFilter, setStatusFilter] = useState<"all" | EntityStatus>("all")
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [modalMode, setModalMode] = useState<"create" | "edit">("create")
@@ -296,6 +300,9 @@ export default function TodaManagementPage({
     return () => window.removeEventListener("keydown", handleKeyDown)
   }, [isModalOpen, selectedDriverDetails])
 
+  const searchQuery = controlledSearchQuery ?? localSearchQuery
+  const setSearchQuery = onSearchQueryChange ?? setLocalSearchQuery
+
   const filteredDriverRows = useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase()
 
@@ -305,10 +312,16 @@ export default function TodaManagementPage({
       if (!normalizedQuery) return true
 
       return (
+        String(row.driverId).toLowerCase().includes(normalizedQuery) ||
         row.driverCode.toLowerCase().includes(normalizedQuery) ||
         `${row.firstName} ${row.lastName}`.toLowerCase().includes(normalizedQuery) ||
+        String(row.tricycleId ?? "").toLowerCase().includes(normalizedQuery) ||
         (row.tricycleNo?.toLowerCase().includes(normalizedQuery) ?? false) ||
+        String(row.qrId ?? "").toLowerCase().includes(normalizedQuery) ||
+        row.todaName.toLowerCase().includes(normalizedQuery) ||
+        row.barangayName.toLowerCase().includes(normalizedQuery) ||
         (row.contactNo?.toLowerCase().includes(normalizedQuery) ?? false) ||
+        (row.passwordSet ? "password set" : "password pending").includes(normalizedQuery) ||
         row.status.toLowerCase().includes(normalizedQuery)
       )
     })
@@ -324,8 +337,11 @@ export default function TodaManagementPage({
 
       return (
         formatTricycleCode(row.tricycleId).toLowerCase().includes(normalizedQuery) ||
+        String(row.tricycleId).toLowerCase().includes(normalizedQuery) ||
         row.plateNo.toLowerCase().includes(normalizedQuery) ||
         (row.regNo?.toLowerCase().includes(normalizedQuery) ?? false) ||
+        row.todaName.toLowerCase().includes(normalizedQuery) ||
+        row.barangayName.toLowerCase().includes(normalizedQuery) ||
         row.status.toLowerCase().includes(normalizedQuery)
       )
     })
@@ -688,7 +704,9 @@ export default function TodaManagementPage({
   }
 
   const pageTitle = isDriverPage ? "Drivers" : "Tricycles"
-  const searchPlaceholder = isDriverPage ? "Search drivers..." : "Search tricycles..."
+  const searchPlaceholder = isDriverPage
+    ? "Search driver ID, name, tricycle, QR..."
+    : "Search tricycle ID, plate, registration..."
   const addButtonLabel = isDriverPage ? "Add Driver" : "Add Tricycle"
   const modalBusyKey = isDriverPage
     ? modalMode === "create"

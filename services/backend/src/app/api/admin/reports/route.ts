@@ -11,6 +11,15 @@ import {
 const invalid = (message: string, status = 400) =>
   NextResponse.json({ ok: false, message }, { status })
 
+const jsonNoStore = (body: unknown, init?: ResponseInit) =>
+  NextResponse.json(body, {
+    ...init,
+    headers: {
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      ...(init?.headers ?? {})
+    }
+  })
+
 export async function GET(request: Request) {
   const session = await requireAdminSession(request)
   if (session.response) return session.response
@@ -22,7 +31,7 @@ export async function GET(request: Request) {
       listAppealsForAdmin(session.profile)
     ])
 
-    return NextResponse.json({
+    return jsonNoStore({
       ok: true,
       data: {
         reports,

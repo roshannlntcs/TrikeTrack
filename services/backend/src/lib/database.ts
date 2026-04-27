@@ -62,12 +62,18 @@ const REQUIRED_TABLES = [
   "public.qr_codes",
   "public.report_types",
   "public.routes",
+  "public.driver_locations",
   "public.trips",
+  "public.trip_route_points",
+  "public.trip_routes",
   "public.passenger_scans",
   "public.reports",
   "public.trip_points",
   "public.violations",
-  "public.violation_types"
+  "public.violation_types",
+  "public.mobile_violations",
+  "public.violation_appeals",
+  "public.violation_proofs"
 ] as const
 
 const verifySchema = async () => {
@@ -82,9 +88,35 @@ const verifySchema = async () => {
   }
 }
 
+const ensureSchemaCompatibility = async () => {
+  await query(`
+    ALTER TABLE IF EXISTS public.routes
+    ADD COLUMN IF NOT EXISTS default_fare_amount numeric(10,2)
+  `)
+
+  await query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'route_default_fare_check'
+          AND conrelid = 'public.routes'::regclass
+      ) THEN
+        ALTER TABLE public.routes
+        ADD CONSTRAINT route_default_fare_check
+        CHECK (default_fare_amount IS NULL OR default_fare_amount >= 0);
+      END IF;
+    END $$;
+  `)
+}
+
 export const ensureDatabaseReady = () => {
   if (!globalThis.__triketrackDatabaseReady) {
-    globalThis.__triketrackDatabaseReady = verifySchema()
+    globalThis.__triketrackDatabaseReady = (async () => {
+      await verifySchema()
+      await ensureSchemaCompatibility()
+    })()
   }
 
   return globalThis.__triketrackDatabaseReady

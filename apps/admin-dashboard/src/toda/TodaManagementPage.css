@@ -267,6 +267,8 @@
 .fleet-modal {
   width: min(560px, 100%);
   max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
   border-radius: 24px;
   background: #f8fafb;
   box-shadow: 0 24px 80px rgba(15, 23, 42, 0.22);
@@ -310,6 +312,8 @@
 .fleet-form {
   display: grid;
   gap: 16px;
+  min-height: 0;
+  overflow: auto;
   padding: 20px 24px 24px;
 }
 

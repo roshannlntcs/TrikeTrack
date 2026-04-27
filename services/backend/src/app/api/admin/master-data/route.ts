@@ -77,6 +77,14 @@ const asOptionalPositiveInteger = (value: unknown) => {
   return asPositiveInteger(value)
 }
 
+const asOptionalNonNegativeAmount = (value: unknown) => {
+  if (value === undefined) return undefined
+  if (value === null || value === "") return null
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed < 0) return undefined
+  return Math.round(parsed * 100) / 100
+}
+
 const asEntityStatus = (value: unknown) =>
   typeof value === "string" && ENTITY_STATUS_VALUES.has(value as EntityStatus)
     ? (value as EntityStatus)
@@ -429,11 +437,17 @@ const parseCreateRoute = (payload: Record<string, unknown>): CreateRouteInput | 
   const todaId = asPositiveInteger(payload.todaId)
   const origin = asNonEmptyString(payload.origin)
   const destination = asNonEmptyString(payload.destination)
+  const defaultFareAmount =
+    "defaultFareAmount" in payload
+      ? asOptionalNonNegativeAmount(payload.defaultFareAmount)
+      : null
   if (!todaId || !origin || !destination) return null
+  if (defaultFareAmount === undefined) return null
   return {
     todaId,
     origin,
     destination,
+    defaultFareAmount: defaultFareAmount ?? undefined,
     geofenceGeojson: payload.geofenceGeojson
   }
 }
@@ -454,6 +468,11 @@ const parseUpdateRoute = (payload: Record<string, unknown>): UpdateRouteInput | 
     const destination = asNonEmptyString(payload.destination)
     if (!destination) return null
     next.destination = destination
+  }
+  if ("defaultFareAmount" in payload) {
+    const defaultFareAmount = asOptionalNonNegativeAmount(payload.defaultFareAmount)
+    if (defaultFareAmount === undefined) return null
+    next.defaultFareAmount = defaultFareAmount ?? undefined
   }
   if ("geofenceGeojson" in payload) {
     next.geofenceGeojson = payload.geofenceGeojson

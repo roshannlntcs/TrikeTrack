@@ -157,6 +157,14 @@
   color: #8a2c23;
 }
 
+.reports-cache-notice {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #edf6ff;
+  color: #27527a;
+}
+
 .reports-list {
   display: grid;
   gap: 14px;
@@ -378,21 +386,31 @@
 .reports-modal {
   width: min(760px, 100%);
   max-height: min(88vh, 920px);
-  overflow: auto;
-  display: grid;
-  gap: 18px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
   border-radius: 24px;
   border: 1px solid #cfddd7;
   background: #ffffff;
-  padding: 24px;
   box-shadow: 0 24px 60px rgba(15, 23, 42, 0.2);
 }
 
 .reports-modal__header {
+  flex: 0 0 auto;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 14px;
+  padding: 24px 24px 18px;
+  border-bottom: 1px solid #e2ece7;
+}
+
+.reports-modal__body {
+  display: grid;
+  gap: 18px;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 24px 24px;
 }
 
 .reports-modal__header h3 {
@@ -480,8 +498,14 @@
     text-align: left;
   }
 
-  .reports-modal {
-    padding: 18px;
+  .reports-modal__header,
+  .reports-modal__body {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+
+  .reports-modal__body {
+    padding-bottom: 18px;
   }
 
   .reports-modal__grid {

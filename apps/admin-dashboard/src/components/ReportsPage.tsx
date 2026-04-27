@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import {
   fetchAdminReports,
+  getCachedAdminReports,
   markAdminAppealViewed,
   updateAdminReportStatus,
   type AdminAppealRecord,
@@ -15,8 +16,13 @@ import "./ReportsPage.css"
 type ReportsPageProps = {
   accessToken: string
   initialSection?: "reports" | "appeals"
+  searchQuery?: string
+  onSearchQueryChange?: (query: string) => void
+  onSearchPlaceholderChange?: (placeholder: string) => void
   onDataChanged?: () => void
 }
+
+type ReportsSection = "reports" | "appeals"
 
 const REPORT_STATUS_OPTIONS: ReportStatus[] = [
   "submitted",
@@ -35,26 +41,52 @@ const APPEAL_STATUS_OPTIONS: Array<AppealStatus | "all"> = [
   "withdrawn"
 ]
 
-const formatReportStatus = (value: ReportStatus) =>
-  value
+const APPEAL_SUMMARY_STATUS_OPTIONS = APPEAL_STATUS_OPTIONS.filter(
+  (status): status is AppealStatus => status !== "all"
+)
+
+const formatStatusLabel = (value: string | undefined, fallback = "Unknown") => {
+  if (!value) return fallback
+
+  return value
     .split("_")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ")
+}
+
+const formatReportStatus = (value: ReportStatus) =>
+  formatStatusLabel(value)
 
 const formatAppealStatus = (value: AppealStatus) =>
-  value
-    .split("_")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ")
+  formatStatusLabel(value)
 
 const formatTripStatus = (value: AdminReportRecord["tripStatus"]) =>
-  value ? value.charAt(0).toUpperCase() + value.slice(1) : "No active trip"
+  value ? formatStatusLabel(value) : "No active trip"
+
+const formatViolationStatus = (
+  value: AdminReportRecord["violationStatus"] | AdminAppealRecord["violationStatus"]
+) => formatStatusLabel(value)
+
+const formatDateTime = (value: string | undefined, fallback = "Unknown") => {
+  if (!value) return fallback
+
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? fallback : date.toLocaleString()
+}
 
 const truncateText = (value: string | undefined, maxLength = 140) => {
-  if (!value) return "No appeal message provided."
-  if (value.length <= maxLength) return value
-  return `${value.slice(0, maxLength).trimEnd()}...`
+  const trimmed = value?.trim()
+  if (!trimmed) return "No appeal message provided."
+  if (trimmed.length <= maxLength) return trimmed
+  return `${trimmed.slice(0, maxLength).trimEnd()}...`
 }
+
+const textMatches = (
+  value: string | number | undefined | null,
+  normalizedSearchQuery: string
+) => value !== undefined &&
+  value !== null &&
+  String(value).toLowerCase().includes(normalizedSearchQuery)
 
 const isPendingAppeal = (appeal: AdminAppealRecord) =>
   appeal.status === "submitted" || appeal.status === "under_review"
@@ -65,6 +97,9 @@ const isUnviewedPendingAppeal = (appeal: AdminAppealRecord) =>
 export default function ReportsPage({
   accessToken,
   initialSection = "reports",
+  searchQuery: controlledSearchQuery,
+  onSearchQueryChange,
+  onSearchPlaceholderChange,
   onDataChanged
 }: ReportsPageProps) {
   const [reports, setReports] = useState<AdminReportRecord[]>([])
@@ -73,8 +108,8 @@ export default function ReportsPage({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busyReportId, setBusyReportId] = useState<number | null>(null)
-  const [activeSection, setActiveSection] = useState<"reports" | "appeals">(initialSection)
-  const [searchQuery, setSearchQuery] = useState("")
+  const [activeSection, setActiveSection] = useState<ReportsSection>(initialSection)
+  const [localSearchQuery, setLocalSearchQuery] = useState("")
   const [statusFilter, setStatusFilter] = useState<ReportStatus | "all">("all")
   const [typeFilter, setTypeFilter] = useState<string>("all")
   const [appealStatusFilter, setAppealStatusFilter] =
@@ -83,13 +118,41 @@ export default function ReportsPage({
   const [reloadTick, setReloadTick] = useState(0)
   const [selectedReport, setSelectedReport] = useState<AdminReportRecord | null>(null)
   const [selectedAppeal, setSelectedAppeal] = useState<AdminAppealRecord | null>(null)
+  const [cacheNotice, setCacheNotice] = useState<string | null>(null)
 
   useEffect(() => {
     setActiveSection(initialSection)
   }, [initialSection])
 
   useEffect(() => {
+    onSearchPlaceholderChange?.(
+      activeSection === "reports"
+        ? "Search report ID, driver, route, plate..."
+        : "Search appeal ID, driver, violation, route..."
+    )
+  }, [activeSection, onSearchPlaceholderChange])
+
+  useEffect(() => {
     let active = true
+    let cachedLoaded = false
+
+    void (async () => {
+      const cached = await getCachedAdminReports()
+      if (!active || !cached) return
+      cachedLoaded = true
+      setReports(cached.reports)
+      setAppeals(cached.appeals)
+      setReportTypes(cached.reportTypes)
+      setDraftStatuses(
+        Object.fromEntries(cached.reports.map((report) => [report.reportId, report.status]))
+      )
+      setLoading(false)
+      setCacheNotice(
+        cached.cacheMeta
+          ? `Offline-ready snapshot loaded from ${formatDateTime(cached.cacheMeta.savedAt)}.`
+          : null
+      )
+    })()
 
     const load = async () => {
       setLoading(true)
@@ -102,10 +165,19 @@ export default function ReportsPage({
         setDraftStatuses(
           Object.fromEntries(data.reports.map((report) => [report.reportId, report.status]))
         )
+        setCacheNotice(
+          data.cacheMeta
+            ? `Showing cached reports from ${formatDateTime(data.cacheMeta.savedAt)}.`
+            : null
+        )
         setError(null)
       } catch (loadError) {
         if (!active) return
-        setError(String(loadError))
+        setError(
+          cachedLoaded
+            ? "Unable to refresh reports right now. Showing the last synced records."
+            : String(loadError)
+        )
       } finally {
         if (active) {
           setLoading(false)
@@ -121,8 +193,67 @@ export default function ReportsPage({
   }, [accessToken, reloadTick])
 
   useEffect(() => {
-    const appealsChannel = supabase
-      .channel("admin-driver-appeals")
+    const refreshOnResume = () => {
+      if (document.visibilityState === "hidden" || !navigator.onLine) return
+      setReloadTick((current) => current + 1)
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshOnResume()
+      }
+    }
+
+    window.addEventListener("focus", refreshOnResume)
+    window.addEventListener("pageshow", refreshOnResume)
+    window.addEventListener("online", refreshOnResume)
+    document.addEventListener("visibilitychange", handleVisibilityChange)
+
+    return () => {
+      window.removeEventListener("focus", refreshOnResume)
+      window.removeEventListener("pageshow", refreshOnResume)
+      window.removeEventListener("online", refreshOnResume)
+      document.removeEventListener("visibilitychange", handleVisibilityChange)
+    }
+  }, [])
+
+  useEffect(() => {
+    const reloadReports = (refreshShell = true) => {
+      setReloadTick((current) => current + 1)
+      if (refreshShell) {
+        onDataChanged?.()
+      }
+    }
+
+    const reportsChannel = supabase
+      .channel("admin-reports-page")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "reports"
+        },
+        () => reloadReports()
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "report_media"
+        },
+        () => reloadReports(false)
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "violations"
+        },
+        () => reloadReports()
+      )
       .on(
         "postgres_changes",
         {
@@ -130,10 +261,7 @@ export default function ReportsPage({
           schema: "public",
           table: "violation_appeals"
         },
-        () => {
-          setReloadTick((current) => current + 1)
-          onDataChanged?.()
-        }
+        () => reloadReports()
       )
       .on(
         "postgres_changes",
@@ -142,17 +270,17 @@ export default function ReportsPage({
           schema: "public",
           table: "violation_proofs"
         },
-        () => {
-          setReloadTick((current) => current + 1)
-        }
+        () => reloadReports(false)
       )
       .subscribe()
 
     return () => {
-      void supabase.removeChannel(appealsChannel)
+      void supabase.removeChannel(reportsChannel)
     }
   }, [onDataChanged])
 
+  const searchQuery = controlledSearchQuery ?? localSearchQuery
+  const setSearchQuery = onSearchQueryChange ?? setLocalSearchQuery
   const normalizedSearchQuery = searchQuery.trim().toLowerCase()
 
   const filteredReports = useMemo(() => {
@@ -167,18 +295,22 @@ export default function ReportsPage({
 
       if (!normalizedSearchQuery) return true
 
-      return (
-        report.driverName.toLowerCase().includes(normalizedSearchQuery) ||
-        report.driverCode.toLowerCase().includes(normalizedSearchQuery) ||
-        report.description.toLowerCase().includes(normalizedSearchQuery) ||
-        (report.plateNo?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
-        (report.routeName?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
-        report.todaName.toLowerCase().includes(normalizedSearchQuery) ||
-        report.barangayName.toLowerCase().includes(normalizedSearchQuery) ||
-        report.reportTypeLabel.toLowerCase().includes(normalizedSearchQuery) ||
-        (report.passengerName?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
-        (report.passengerContact?.toLowerCase().includes(normalizedSearchQuery) ?? false)
-      )
+      return [
+        report.driverName,
+        report.driverCode,
+        report.description,
+        report.plateNo,
+        report.routeName,
+        report.todaName,
+        report.barangayName,
+        report.reportTypeLabel,
+        report.passengerName,
+        report.passengerContact,
+        report.reportId,
+        report.qrId,
+        report.tripId,
+        report.violationId
+      ].some((value) => textMatches(value, normalizedSearchQuery))
     })
   }, [reports, statusFilter, typeFilter, normalizedSearchQuery])
 
@@ -190,17 +322,20 @@ export default function ReportsPage({
 
       if (!normalizedSearchQuery) return true
 
-      return (
-        appeal.driverName.toLowerCase().includes(normalizedSearchQuery) ||
-        appeal.driverCode.toLowerCase().includes(normalizedSearchQuery) ||
-        appeal.violationTypeLabel.toLowerCase().includes(normalizedSearchQuery) ||
-        appeal.appealReason.toLowerCase().includes(normalizedSearchQuery) ||
-        (appeal.appealMessage?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
-        (appeal.plateNo?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
-        (appeal.routeName?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
-        appeal.todaName.toLowerCase().includes(normalizedSearchQuery) ||
-        appeal.barangayName.toLowerCase().includes(normalizedSearchQuery)
-      )
+      return [
+        appeal.driverName,
+        appeal.driverCode,
+        appeal.violationTypeLabel,
+        appeal.appealReason,
+        appeal.appealMessage,
+        appeal.plateNo,
+        appeal.routeName,
+        appeal.todaName,
+        appeal.barangayName,
+        appeal.appealId,
+        appeal.violationId,
+        appeal.tripId
+      ].some((value) => textMatches(value, normalizedSearchQuery))
     })
   }, [appeals, appealStatusFilter, normalizedSearchQuery])
 
@@ -241,7 +376,19 @@ export default function ReportsPage({
     [appeals]
   )
 
+  const closeModals = () => {
+    setSelectedReport(null)
+    setSelectedAppeal(null)
+  }
+
+  const handleOpenReport = (report: AdminReportRecord) => {
+    setSelectedAppeal(null)
+    setSelectedReport(report)
+  }
+
   const handleOpenAppeal = async (appeal: AdminAppealRecord) => {
+    setSelectedReport(null)
+
     if (!appeal.viewedAt) {
       const optimisticViewedAt = new Date().toISOString()
       const nextAppeal = { ...appeal, viewedAt: optimisticViewedAt }
@@ -275,6 +422,8 @@ export default function ReportsPage({
               }
             : current
         )
+        setError(null)
+        onDataChanged?.()
       } catch (viewError) {
         setAppeals((current) =>
           current.map((item) =>
@@ -308,10 +457,51 @@ export default function ReportsPage({
     if (!selectedAppeal) return
 
     const nextSelectedAppeal = appeals.find((appeal) => appeal.appealId === selectedAppeal.appealId)
-    if (nextSelectedAppeal && nextSelectedAppeal !== selectedAppeal) {
+    if (!nextSelectedAppeal) {
+      setSelectedAppeal(null)
+      return
+    }
+
+    if (nextSelectedAppeal !== selectedAppeal) {
       setSelectedAppeal(nextSelectedAppeal)
     }
   }, [appeals, selectedAppeal])
+
+  useEffect(() => {
+    if (!selectedReport) return
+
+    const nextSelectedReport = reports.find((report) => report.reportId === selectedReport.reportId)
+    if (!nextSelectedReport) {
+      setSelectedReport(null)
+      return
+    }
+
+    if (nextSelectedReport !== selectedReport) {
+      setSelectedReport(nextSelectedReport)
+    }
+  }, [reports, selectedReport])
+
+  const hasOpenModal = selectedReport !== null || selectedAppeal !== null
+
+  useEffect(() => {
+    if (!hasOpenModal) return
+
+    const previousBodyOverflow = document.body.style.overflow
+    document.body.style.overflow = "hidden"
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSelectedReport(null)
+        setSelectedAppeal(null)
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => {
+      document.body.style.overflow = previousBodyOverflow
+      window.removeEventListener("keydown", handleKeyDown)
+    }
+  }, [hasOpenModal])
 
   const handleSaveStatus = async (report: AdminReportRecord) => {
     const nextStatus = draftStatuses[report.reportId] ?? report.status
@@ -322,6 +512,9 @@ export default function ReportsPage({
       const updated = await updateAdminReportStatus(accessToken, report.reportId, nextStatus)
       setReports((current) =>
         current.map((item) => (item.reportId === updated.reportId ? updated : item))
+      )
+      setSelectedReport((current) =>
+        current?.reportId === updated.reportId ? updated : current
       )
       setDraftStatuses((current) => ({
         ...current,
@@ -381,7 +574,7 @@ export default function ReportsPage({
             <div className="reports-toolbar">
               <input
                 className="reports-toolbar__search"
-                placeholder="Search driver, route, plate, TODA..."
+                placeholder="Search report ID, driver, route, plate..."
                 value={searchQuery}
                 onChange={(event) => setSearchQuery(event.target.value)}
                 aria-label="Search reports"
@@ -419,20 +612,18 @@ export default function ReportsPage({
         ) : (
           <>
             <div className="reports-summary">
-              {(["submitted", "under_review", "approved", "denied", "withdrawn"] as AppealStatus[]).map(
-                (status) => (
-                  <article key={status} className="reports-summary__card">
-                    <span>{formatAppealStatus(status)}</span>
-                    <strong>{appealCounts[status]}</strong>
-                  </article>
-                )
-              )}
+              {APPEAL_SUMMARY_STATUS_OPTIONS.map((status) => (
+                <article key={status} className="reports-summary__card">
+                  <span>{formatAppealStatus(status)}</span>
+                  <strong>{appealCounts[status]}</strong>
+                </article>
+              ))}
             </div>
 
             <div className="reports-toolbar">
               <input
                 className="reports-toolbar__search"
-                placeholder="Search driver, violation, route, TODA..."
+                placeholder="Search appeal ID, driver, violation, route..."
                 value={searchQuery}
                 onChange={(event) => setSearchQuery(event.target.value)}
                 aria-label="Search appeals"
@@ -463,6 +654,7 @@ export default function ReportsPage({
         )}
 
         <div className="reports-content">
+          {cacheNotice && <div className="reports-cache-notice">{cacheNotice}</div>}
           {error && <div className="reports-error">{error}</div>}
 
           {loading ? (
@@ -485,11 +677,11 @@ export default function ReportsPage({
                     <article
                       key={report.reportId}
                       className="reports-card reports-card--interactive"
-                      onClick={() => setSelectedReport(report)}
+                      onClick={() => handleOpenReport(report)}
                       onKeyDown={(event) => {
                         if (event.key === "Enter" || event.key === " ") {
                           event.preventDefault()
-                          setSelectedReport(report)
+                          handleOpenReport(report)
                         }
                       }}
                       tabIndex={0}
@@ -511,7 +703,7 @@ export default function ReportsPage({
                         </div>
                         <div className="reports-card__meta">
                           <strong>Report #{report.reportId}</strong>
-                          <span>{new Date(report.reportedAt).toLocaleString()}</span>
+                          <span>{formatDateTime(report.reportedAt)}</span>
                         </div>
                       </div>
 
@@ -522,7 +714,10 @@ export default function ReportsPage({
                         <span className="reports-chip">QR #{report.qrId}</span>
                         {report.violationId && (
                           <span className="reports-chip">
-                            Alert #{report.violationId} {report.violationStatus ? `(${report.violationStatus})` : ""}
+                            Alert #{report.violationId}
+                            {report.violationStatus
+                              ? ` (${formatViolationStatus(report.violationStatus)})`
+                              : ""}
                           </span>
                         )}
                       </div>
@@ -537,9 +732,9 @@ export default function ReportsPage({
                             ? `Passenger: ${report.passengerName}`
                             : "Passenger: Anonymous"}
                         </div>
-                        <button type="button" className="reports-card__button">
+                        <span className="reports-card__button" aria-hidden="true">
                           View report
-                        </button>
+                        </span>
                       </div>
                     </article>
                   )
@@ -558,11 +753,11 @@ export default function ReportsPage({
                 <article
                   key={appeal.appealId}
                   className="reports-card reports-card--interactive"
-                  onClick={() => handleOpenAppeal(appeal)}
+                  onClick={() => void handleOpenAppeal(appeal)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault()
-                      handleOpenAppeal(appeal)
+                      void handleOpenAppeal(appeal)
                     }
                   }}
                   tabIndex={0}
@@ -584,7 +779,7 @@ export default function ReportsPage({
                     </div>
                     <div className="reports-card__meta">
                       <strong>Appeal</strong>
-                      <span>{new Date(appeal.submittedAt).toLocaleString()}</span>
+                      <span>{formatDateTime(appeal.submittedAt)}</span>
                     </div>
                   </div>
 
@@ -592,7 +787,7 @@ export default function ReportsPage({
                     <span className="reports-chip">{appeal.violationTypeLabel}</span>
                     <span className="reports-chip">Appeal: {appeal.appealReason}</span>
                     <span className="reports-chip">
-                      Violation {appeal.violationStatus.replace("_", " ")}
+                      Violation {formatViolationStatus(appeal.violationStatus)}
                     </span>
                     {appeal.tripId && <span className="reports-chip">Trip #{appeal.tripId}</span>}
                   </div>
@@ -601,7 +796,7 @@ export default function ReportsPage({
                     Route: {appeal.routeName ?? "No route attached"}
                   </div>
                   <div className="reports-card__route">
-                    Submitted: {new Date(appeal.submittedAt).toLocaleString()}
+                    Submitted: {formatDateTime(appeal.submittedAt)}
                   </div>
                   <div className="reports-card__description">
                     {truncateText(appeal.appealMessage, 120)}
@@ -609,11 +804,11 @@ export default function ReportsPage({
 
                   <div className="reports-card__actions">
                     <div className="reports-card__appealMeta">
-                      Violation time: {new Date(appeal.violationOccurredAt).toLocaleString()}
+                      Violation time: {formatDateTime(appeal.violationOccurredAt)}
                     </div>
-                    <button type="button" className="reports-card__button">
+                    <span className="reports-card__button" aria-hidden="true">
                       View appeal
-                    </button>
+                    </span>
                   </div>
                 </article>
               ))}
@@ -626,7 +821,7 @@ export default function ReportsPage({
         <div
           className="reports-modal-backdrop"
           role="presentation"
-          onClick={() => setSelectedReport(null)}
+          onClick={closeModals}
         >
           <section
             className="reports-modal"
@@ -643,122 +838,124 @@ export default function ReportsPage({
               <button
                 type="button"
                 className="reports-modal__close"
-                onClick={() => setSelectedReport(null)}
+                onClick={closeModals}
               >
                 Close
               </button>
             </div>
 
-            <div className="reports-card__badges">
-              <span className="reports-chip">{selectedReport.reportTypeLabel}</span>
-              <span className="reports-chip">{formatTripStatus(selectedReport.tripStatus)}</span>
-              <span className={`reports-status reports-status--${selectedReport.status}`}>
-                {formatReportStatus(selectedReport.status)}
-              </span>
-            </div>
+            <div className="reports-modal__body">
+              <div className="reports-card__badges">
+                <span className="reports-chip">{selectedReport.reportTypeLabel}</span>
+                <span className="reports-chip">{formatTripStatus(selectedReport.tripStatus)}</span>
+                <span className={`reports-status reports-status--${selectedReport.status}`}>
+                  {formatReportStatus(selectedReport.status)}
+                </span>
+              </div>
 
-            <div className="reports-modal__grid">
-              <div>
-                <span>Report ID</span>
-                <strong>#{selectedReport.reportId}</strong>
-              </div>
-              <div>
-                <span>Reported at</span>
-                <strong>{new Date(selectedReport.reportedAt).toLocaleString()}</strong>
-              </div>
-              <div>
-                <span>Driver code</span>
-                <strong>{selectedReport.driverCode}</strong>
-              </div>
-              <div>
-                <span>Plate / unit</span>
-                <strong>{selectedReport.plateNo ?? "No tricycle assigned"}</strong>
-              </div>
-              <div>
-                <span>TODA</span>
-                <strong>{selectedReport.todaName}</strong>
-              </div>
-              <div>
-                <span>Barangay</span>
-                <strong>{selectedReport.barangayName}</strong>
-              </div>
-              <div>
-                <span>Route</span>
-                <strong>{selectedReport.routeName ?? "No route attached"}</strong>
-              </div>
-              <div>
-                <span>Passenger</span>
-                <strong>
-                  {selectedReport.passengerName ?? "Anonymous"}
-                  {selectedReport.passengerContact ? ` | ${selectedReport.passengerContact}` : ""}
-                </strong>
-              </div>
-            </div>
-
-            <div className="reports-modal__section">
-              <span className="reports-card__mediaLabel">Description</span>
-              <div className="reports-card__description">{selectedReport.description}</div>
-            </div>
-
-            <div className="reports-modal__section">
-              <span className="reports-card__mediaLabel">Uploaded proof</span>
-              {selectedReport.mediaUrls && selectedReport.mediaUrls.length > 0 ? (
-                <div className="reports-card__mediaGrid">
-                  {selectedReport.mediaUrls.map((mediaUrl, index) => (
-                    <a
-                      key={`${selectedReport.reportId}-${index}`}
-                      className="reports-card__mediaLink"
-                      href={mediaUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <img
-                        className="reports-card__mediaImage"
-                        src={mediaUrl}
-                        alt={`Uploaded proof ${index + 1} for report ${selectedReport.reportId}`}
-                        loading="lazy"
-                      />
-                    </a>
-                  ))}
+              <div className="reports-modal__grid">
+                <div>
+                  <span>Report ID</span>
+                  <strong>#{selectedReport.reportId}</strong>
                 </div>
-              ) : (
-                <div className="reports-card__route">No uploaded proof for this report.</div>
-              )}
-            </div>
+                <div>
+                  <span>Reported at</span>
+                  <strong>{formatDateTime(selectedReport.reportedAt)}</strong>
+                </div>
+                <div>
+                  <span>Driver code</span>
+                  <strong>{selectedReport.driverCode}</strong>
+                </div>
+                <div>
+                  <span>Plate / unit</span>
+                  <strong>{selectedReport.plateNo ?? "No tricycle assigned"}</strong>
+                </div>
+                <div>
+                  <span>TODA</span>
+                  <strong>{selectedReport.todaName}</strong>
+                </div>
+                <div>
+                  <span>Barangay</span>
+                  <strong>{selectedReport.barangayName}</strong>
+                </div>
+                <div>
+                  <span>Route</span>
+                  <strong>{selectedReport.routeName ?? "No route attached"}</strong>
+                </div>
+                <div>
+                  <span>Passenger</span>
+                  <strong>
+                    {selectedReport.passengerName ?? "Anonymous"}
+                    {selectedReport.passengerContact ? ` | ${selectedReport.passengerContact}` : ""}
+                  </strong>
+                </div>
+              </div>
 
-            <div className="reports-modal__section">
-              <span className="reports-card__mediaLabel">Status</span>
-              <div className="reports-modal__actions">
-                <select
-                  className="reports-toolbar__select"
-                  value={draftStatuses[selectedReport.reportId] ?? selectedReport.status}
-                  onChange={(event) =>
-                    setDraftStatuses((current) => ({
-                      ...current,
-                      [selectedReport.reportId]: event.target.value as ReportStatus
-                    }))
-                  }
-                  disabled={busyReportId === selectedReport.reportId}
-                  aria-label={`Update status for report ${selectedReport.reportId}`}
-                >
-                  {REPORT_STATUS_OPTIONS.map((status) => (
-                    <option key={status} value={status}>
-                      {formatReportStatus(status)}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  className="reports-card__button"
-                  onClick={() => void handleSaveStatus(selectedReport)}
-                  disabled={
-                    busyReportId === selectedReport.reportId ||
-                    (draftStatuses[selectedReport.reportId] ?? selectedReport.status) ===
-                      selectedReport.status
-                  }
-                >
-                  {busyReportId === selectedReport.reportId ? "Saving..." : "Save status"}
-                </button>
+              <div className="reports-modal__section">
+                <span className="reports-card__mediaLabel">Description</span>
+                <div className="reports-card__description">{selectedReport.description}</div>
+              </div>
+
+              <div className="reports-modal__section">
+                <span className="reports-card__mediaLabel">Uploaded proof</span>
+                {selectedReport.mediaUrls && selectedReport.mediaUrls.length > 0 ? (
+                  <div className="reports-card__mediaGrid">
+                    {selectedReport.mediaUrls.map((mediaUrl, index) => (
+                      <a
+                        key={`${selectedReport.reportId}-${index}`}
+                        className="reports-card__mediaLink"
+                        href={mediaUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        <img
+                          className="reports-card__mediaImage"
+                          src={mediaUrl}
+                          alt={`Uploaded proof ${index + 1} for report ${selectedReport.reportId}`}
+                          loading="lazy"
+                        />
+                      </a>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="reports-card__route">No uploaded proof for this report.</div>
+                )}
+              </div>
+
+              <div className="reports-modal__section">
+                <span className="reports-card__mediaLabel">Status</span>
+                <div className="reports-modal__actions">
+                  <select
+                    className="reports-toolbar__select"
+                    value={draftStatuses[selectedReport.reportId] ?? selectedReport.status}
+                    onChange={(event) =>
+                      setDraftStatuses((current) => ({
+                        ...current,
+                        [selectedReport.reportId]: event.target.value as ReportStatus
+                      }))
+                    }
+                    disabled={busyReportId === selectedReport.reportId}
+                    aria-label={`Update status for report ${selectedReport.reportId}`}
+                  >
+                    {REPORT_STATUS_OPTIONS.map((status) => (
+                      <option key={status} value={status}>
+                        {formatReportStatus(status)}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="reports-card__button"
+                    onClick={() => void handleSaveStatus(selectedReport)}
+                    disabled={
+                      busyReportId === selectedReport.reportId ||
+                      (draftStatuses[selectedReport.reportId] ?? selectedReport.status) ===
+                        selectedReport.status
+                    }
+                  >
+                    {busyReportId === selectedReport.reportId ? "Saving..." : "Save status"}
+                  </button>
+                </div>
               </div>
             </div>
           </section>
@@ -769,7 +966,7 @@ export default function ReportsPage({
         <div
           className="reports-modal-backdrop"
           role="presentation"
-          onClick={() => setSelectedAppeal(null)}
+          onClick={closeModals}
         >
           <section
             className="reports-modal"
@@ -786,78 +983,80 @@ export default function ReportsPage({
               <button
                 type="button"
                 className="reports-modal__close"
-                onClick={() => setSelectedAppeal(null)}
+                onClick={closeModals}
               >
                 Close
               </button>
             </div>
 
-            <div className="reports-card__badges">
-              <span className="reports-chip">{selectedAppeal.violationTypeLabel}</span>
-              <span className="reports-chip">Appeal: {selectedAppeal.appealReason}</span>
-              <span className={`reports-status reports-status--${selectedAppeal.status}`}>
-                {formatAppealStatus(selectedAppeal.status)}
-              </span>
-            </div>
+            <div className="reports-modal__body">
+              <div className="reports-card__badges">
+                <span className="reports-chip">{selectedAppeal.violationTypeLabel}</span>
+                <span className="reports-chip">Appeal: {selectedAppeal.appealReason}</span>
+                <span className={`reports-status reports-status--${selectedAppeal.status}`}>
+                  {formatAppealStatus(selectedAppeal.status)}
+                </span>
+              </div>
 
-            <div className="reports-modal__grid">
-              <div>
-                <span>Driver Code</span>
-                <strong>{selectedAppeal.driverCode}</strong>
-              </div>
-              <div>
-                <span>Plate / Unit</span>
-                <strong>{selectedAppeal.plateNo ?? "No tricycle assigned"}</strong>
-              </div>
-              <div>
-                <span>Submitted</span>
-                <strong>{new Date(selectedAppeal.submittedAt).toLocaleString()}</strong>
-              </div>
-              <div>
-                <span>Violation Status</span>
-                <strong>{selectedAppeal.violationStatus.replace("_", " ")}</strong>
-              </div>
-              <div>
-                <span>TODA</span>
-                <strong>{selectedAppeal.todaName}</strong>
-              </div>
-              <div>
-                <span>Route</span>
-                <strong>{selectedAppeal.routeName ?? "No route attached"}</strong>
-              </div>
-            </div>
-
-            <div className="reports-modal__section">
-              <span className="reports-card__mediaLabel">Appeal message</span>
-              <div className="reports-card__description">
-                {selectedAppeal.appealMessage ?? "No appeal message provided."}
-              </div>
-            </div>
-
-            <div className="reports-modal__section">
-              <span className="reports-card__mediaLabel">Proof image</span>
-              {selectedAppeal.proofImageUrls.length > 0 ? (
-                <div className="reports-card__mediaGrid">
-                  {selectedAppeal.proofImageUrls.map((proofUrl, index) => (
-                    <a
-                      key={`${selectedAppeal.appealId}-${index}`}
-                      className="reports-card__mediaLink"
-                      href={proofUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <img
-                        className="reports-card__mediaImage"
-                        src={proofUrl}
-                        alt={`Proof ${index + 1} for ${selectedAppeal.driverName}`}
-                        loading="lazy"
-                      />
-                    </a>
-                  ))}
+              <div className="reports-modal__grid">
+                <div>
+                  <span>Driver Code</span>
+                  <strong>{selectedAppeal.driverCode}</strong>
                 </div>
-              ) : (
-                <div className="reports-card__route">No proof image uploaded for this appeal.</div>
-              )}
+                <div>
+                  <span>Plate / Unit</span>
+                  <strong>{selectedAppeal.plateNo ?? "No tricycle assigned"}</strong>
+                </div>
+                <div>
+                  <span>Submitted</span>
+                  <strong>{formatDateTime(selectedAppeal.submittedAt)}</strong>
+                </div>
+                <div>
+                  <span>Violation Status</span>
+                  <strong>{formatViolationStatus(selectedAppeal.violationStatus)}</strong>
+                </div>
+                <div>
+                  <span>TODA</span>
+                  <strong>{selectedAppeal.todaName}</strong>
+                </div>
+                <div>
+                  <span>Route</span>
+                  <strong>{selectedAppeal.routeName ?? "No route attached"}</strong>
+                </div>
+              </div>
+
+              <div className="reports-modal__section">
+                <span className="reports-card__mediaLabel">Appeal message</span>
+                <div className="reports-card__description">
+                  {selectedAppeal.appealMessage ?? "No appeal message provided."}
+                </div>
+              </div>
+
+              <div className="reports-modal__section">
+                <span className="reports-card__mediaLabel">Proof image</span>
+                {selectedAppeal.proofImageUrls?.length > 0 ? (
+                  <div className="reports-card__mediaGrid">
+                    {selectedAppeal.proofImageUrls.map((proofUrl, index) => (
+                      <a
+                        key={`${selectedAppeal.appealId}-${index}`}
+                        className="reports-card__mediaLink"
+                        href={proofUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        <img
+                          className="reports-card__mediaImage"
+                          src={proofUrl}
+                          alt={`Proof ${index + 1} for ${selectedAppeal.driverName}`}
+                          loading="lazy"
+                        />
+                      </a>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="reports-card__route">No proof image uploaded for this appeal.</div>
+                )}
+              </div>
             </div>
           </section>
         </div>

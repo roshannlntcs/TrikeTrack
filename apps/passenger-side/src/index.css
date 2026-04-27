@@ -111,6 +111,49 @@ textarea {
   gap: 14px;
 }
 
+.trip-status-panel,
+.fare-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.trip-status-panel__header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.trip-status-panel__header h2 {
+  font-size: 1.15rem;
+}
+
+.status-pill {
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid #e6e6e6;
+  background: #f7f7f7;
+  color: #666666;
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.8rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.status-pill--active {
+  border-color: #cde7d3;
+  background: #edf9f0;
+  color: #1f7a38;
+}
+
+.status-pill--neutral {
+  border-color: #d7dfe8;
+  background: #f4f7fa;
+  color: #4f6478;
+}
+
 .driver-identity {
   display: flex;
   align-items: center;
@@ -202,6 +245,56 @@ textarea {
   border: 1px solid #efefef;
   display: grid;
   gap: 6px;
+}
+
+.fare-panel__summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.fare-panel__summary div,
+.fare-result {
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid #efefef;
+  background: #fafafa;
+  display: grid;
+  gap: 6px;
+}
+
+.fare-result strong,
+.fare-panel__summary strong {
+  color: #111111;
+}
+
+.fare-result span,
+.fare-panel__summary span {
+  color: #666666;
+  line-height: 1.45;
+}
+
+.fare-result--ok {
+  border-color: #cfe6d5;
+  background: #f2fbf4;
+}
+
+.fare-result--ok strong {
+  color: #1f7a38;
+}
+
+.fare-result--warning {
+  border-color: #efd7b1;
+  background: #fff8eb;
+}
+
+.fare-result--warning strong {
+  color: #9a6508;
+}
+
+.fare-panel__actions {
+  display: grid;
+  gap: 10px;
 }
 
 .field {
@@ -595,6 +688,10 @@ textarea {
   }
 
   .trip-map-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .fare-panel__summary {
     grid-template-columns: 1fr;
   }
 }

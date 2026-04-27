@@ -30,13 +30,15 @@ export default function DeleteConfirmDialog({
         aria-labelledby="delete-dialog-title"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="delete-dialog__icon" aria-hidden="true">
-          !
-        </div>
-        <div className="delete-dialog__content">
-          <h3 id="delete-dialog-title">{title}</h3>
-          <p>{description}</p>
-          <p className="delete-dialog__warning">This action cannot be undone.</p>
+        <div className="delete-dialog__header">
+          <div className="delete-dialog__icon" aria-hidden="true">
+            !
+          </div>
+          <div className="delete-dialog__content">
+            <h3 id="delete-dialog-title">{title}</h3>
+            <p>{description}</p>
+            <p className="delete-dialog__warning">This action cannot be undone.</p>
+          </div>
         </div>
         <div className="delete-dialog__footer">
           <button type="button" className="delete-dialog__secondary" onClick={onClose} disabled={busy}>

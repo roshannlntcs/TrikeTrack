@@ -90,7 +90,7 @@ type AdminReportsResponse = {
   }
 }
 
-type AdminReportsData = NonNullable<AdminReportsResponse["data"]> & {
+export type AdminReportsData = NonNullable<AdminReportsResponse["data"]> & {
   cacheMeta?: {
     fromCache: boolean
     savedAt: string
@@ -106,6 +106,11 @@ const withCacheMeta = <TData extends object>(cached: CachedSnapshot<TData>) => (
     savedAt: new Date(cached.savedAt).toISOString()
   }
 })
+
+export const getCachedAdminReports = async (): Promise<AdminReportsData | null> => {
+  const cached = await getSnapshot<AdminReportsData>(REPORTS_CACHE_KEY)
+  return cached ? withCacheMeta(cached) : null
+}
 
 type AdminReportUpdateResponse = {
   ok?: boolean
@@ -123,7 +128,9 @@ type AdminAppealViewUpdateResponse = {
   }
 }
 
-export const fetchAdminReports = async (accessToken: string) => {
+export const fetchAdminReports = async (
+  accessToken: string
+): Promise<AdminReportsData> => {
   try {
     const response = await fetch("/api/admin/reports", {
       headers: {
@@ -139,10 +146,8 @@ export const fetchAdminReports = async (accessToken: string) => {
     await saveSnapshot(REPORTS_CACHE_KEY, payload.data)
     return payload.data
   } catch (error) {
-    const cached = await getSnapshot<AdminReportsData>(REPORTS_CACHE_KEY)
-    if (cached) {
-      return withCacheMeta(cached)
-    }
+    const cached = await getCachedAdminReports()
+    if (cached) return cached
     throw error
   }
 }

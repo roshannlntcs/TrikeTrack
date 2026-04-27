@@ -69,6 +69,7 @@ const applyCorsHeaders = (response: NextResponse, request: Request) => {
 
   response.headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
   response.headers.set("Access-Control-Allow-Headers", "Content-Type")
+  response.headers.set("Cache-Control", "no-store, no-cache, must-revalidate")
   response.headers.set("Vary", "Origin")
 
   if (allowedOrigin) {

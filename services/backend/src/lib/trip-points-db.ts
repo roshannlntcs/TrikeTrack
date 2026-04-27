@@ -3,7 +3,6 @@ import { ensureDatabaseReady, query } from "./database"
 import { resolveDriverIdFromIdentifier } from "./driver-identifier-db"
 import { upsertDriverLocation } from "./driver-locations-db"
 import { rebuildTripPathForTrip } from "./trip-paths-db"
-import { storeGeofenceDeviationViolation } from "./violations-db"
 
 export type TripPointBatchResult = {
   dedupKey: string
@@ -24,16 +23,6 @@ type TripPointRow = {
   created_at: Date
 }
 
-type TripRouteContextRow = {
-  trip_id: number
-  driver_id: number
-  tricycle_id: number | null
-  route_id: number
-  origin: string
-  destination: string
-  geofence_geojson: unknown | null
-}
-
 export type StoredTripPoint = {
   dedupKey: string
   driverId: string
@@ -46,22 +35,6 @@ export type StoredTripPoint = {
   accuracy?: number
   storedAt: string
 }
-
-type PolygonGeometry = {
-  type: "Polygon"
-  coordinates: number[][][]
-}
-
-type MultiPolygonGeometry = {
-  type: "MultiPolygon"
-  coordinates: number[][][][]
-}
-
-type GeoJsonLike =
-  | { type: "Feature"; geometry?: GeoJsonLike | null }
-  | { type: "FeatureCollection"; features?: GeoJsonLike[] }
-  | PolygonGeometry
-  | MultiPolygonGeometry
 
 declare global {
   // eslint-disable-next-line no-var
@@ -111,130 +84,6 @@ const ensureTripPointSchemaReady = async () => {
   if (!result.rows[0]?.regclass) {
     throw new Error("Required table is missing: public.trip_points")
   }
-}
-
-const isCoordinate = (value: unknown): value is [number, number] =>
-  Array.isArray(value) &&
-  value.length >= 2 &&
-  typeof value[0] === "number" &&
-  Number.isFinite(value[0]) &&
-  typeof value[1] === "number" &&
-  Number.isFinite(value[1])
-
-const isRing = (value: unknown): value is Array<[number, number]> =>
-  Array.isArray(value) && value.length >= 4 && value.every(isCoordinate)
-
-const isPolygonCoordinates = (value: unknown): value is Array<Array<[number, number]>> =>
-  Array.isArray(value) && value.length > 0 && value.every(isRing)
-
-const isMultiPolygonCoordinates = (
-  value: unknown
-): value is Array<Array<Array<[number, number]>>> =>
-  Array.isArray(value) && value.length > 0 && value.every(isPolygonCoordinates)
-
-const extractPolygons = (geojson: unknown): Array<Array<Array<[number, number]>>> => {
-  if (!geojson || typeof geojson !== "object") return []
-  const candidate = geojson as GeoJsonLike
-
-  if (candidate.type === "Feature") {
-    return extractPolygons(candidate.geometry)
-  }
-
-  if (candidate.type === "FeatureCollection") {
-    return (candidate.features ?? []).flatMap(extractPolygons)
-  }
-
-  if (candidate.type === "Polygon" && isPolygonCoordinates(candidate.coordinates)) {
-    return [candidate.coordinates]
-  }
-
-  if (
-    candidate.type === "MultiPolygon" &&
-    isMultiPolygonCoordinates(candidate.coordinates)
-  ) {
-    return candidate.coordinates
-  }
-
-  return []
-}
-
-const isPointInRing = (lng: number, lat: number, ring: Array<[number, number]>) => {
-  let inside = false
-  for (let current = 0, previous = ring.length - 1; current < ring.length; previous = current++) {
-    const [currentLng, currentLat] = ring[current]
-    const [previousLng, previousLat] = ring[previous]
-    const intersects =
-      currentLat > lat !== previousLat > lat &&
-      lng <
-        ((previousLng - currentLng) * (lat - currentLat)) /
-          (previousLat - currentLat) +
-          currentLng
-
-    if (intersects) inside = !inside
-  }
-  return inside
-}
-
-const isPointInPolygon = (
-  lng: number,
-  lat: number,
-  polygon: Array<Array<[number, number]>>
-) => {
-  const [outerRing, ...holes] = polygon
-  if (!outerRing || !isPointInRing(lng, lat, outerRing)) return false
-  return holes.every((hole) => !isPointInRing(lng, lat, hole))
-}
-
-const getTripRouteContext = async (tripId: number, driverId: number) => {
-  const result = await query<TripRouteContextRow>(
-    `
-      SELECT
-        t.trip_id,
-        t.driver_id,
-        t.tricycle_id,
-        r.route_id,
-        r.origin,
-        r.destination,
-        r.geofence_geojson
-      FROM public.trips t
-      JOIN public.routes r
-        ON r.route_id = t.route_id
-      WHERE t.trip_id = $1
-        AND t.driver_id = $2
-      LIMIT 1
-    `,
-    [tripId, driverId]
-  )
-
-  return result.rows[0] ?? null
-}
-
-const maybeStoreGeofenceViolation = async (
-  point: TripPointEvent,
-  driverId: number,
-  tripId: number,
-  routeContext: TripRouteContextRow
-) => {
-  const polygons = extractPolygons(routeContext.geofence_geojson)
-  if (polygons.length === 0) return
-
-  const insideAnyPolygon = polygons.some((polygon) =>
-    isPointInPolygon(point.lng, point.lat, polygon)
-  )
-  if (insideAnyPolygon) return
-
-  const minuteBucket = Math.floor(point.ts / 60000)
-  await storeGeofenceDeviationViolation({
-    dedupeKey: `geofence:${tripId}:${driverId}:${minuteBucket}`,
-    driverId,
-    tripId,
-    routeId: routeContext.route_id,
-    tricycleId: routeContext.tricycle_id,
-    ts: point.ts,
-    lng: point.lng,
-    lat: point.lat,
-    routeLabel: `${routeContext.origin} -> ${routeContext.destination}`
-  })
 }
 
 export const ensureTripPointStorageReady = () => {
@@ -353,7 +202,6 @@ export const storeTripPointBatch = async (points: TripPointEvent[]) => {
 
   const results: TripPointBatchResult[] = []
   const affectedTripIds = new Set<number>()
-  const tripRouteContexts = new Map<number, TripRouteContextRow | null>()
 
   for (const point of points) {
     const result = await insertTripPoint(point)
@@ -379,13 +227,6 @@ export const storeTripPointBatch = async (points: TripPointEvent[]) => {
 
       if (tripId) {
         affectedTripIds.add(tripId)
-        if (!tripRouteContexts.has(tripId)) {
-          tripRouteContexts.set(tripId, await getTripRouteContext(tripId, driverId))
-        }
-        const routeContext = tripRouteContexts.get(tripId)
-        if (routeContext) {
-          await maybeStoreGeofenceViolation(point, driverId, tripId, routeContext)
-        }
       }
     }
   }

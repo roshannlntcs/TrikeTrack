@@ -32,11 +32,28 @@ export type PassengerReportContext = {
   todaName: string
   barangayId: number
   barangayName: string
+  routeId?: number
   tripId?: number
   tripStatus?: "scheduled" | "ongoing" | "completed" | "cancelled"
   tripStartedAt?: string
   tripEndedAt?: string
   routeName?: string
+  latestDriverLocation?: {
+    latitude: number
+    longitude: number
+    speed?: number
+    heading?: number
+    accuracy?: number
+    recordedAt: string
+    updatedAt?: string
+    isOnline: boolean
+  }
+  fare?: {
+    amount?: number
+    currency: "PHP"
+    label: string
+    source: "trip" | "route" | "unavailable"
+  }
   reportingAvailable: boolean
   availabilityMessage?: string
 }
@@ -104,11 +121,22 @@ type PassengerReportContextRow = {
   toda_name: string
   barangay_id: number
   barangay_name: string
+  route_id: number | null
   trip_id: number | null
   trip_status: "scheduled" | "ongoing" | "completed" | "cancelled" | null
   trip_start: Date | null
   trip_end: Date | null
   route_name: string | null
+  fare_amount: string | null
+  default_fare_amount: string | null
+  latest_latitude: number | null
+  latest_longitude: number | null
+  latest_speed: number | null
+  latest_heading: number | null
+  latest_accuracy: number | null
+  latest_recorded_at: Date | null
+  latest_updated_at: Date | null
+  latest_is_online: boolean | null
 }
 
 type AdminReportRow = {
@@ -182,11 +210,22 @@ const PASSENGER_CONTEXT_SQL = `
     td.toda_name,
     b.barangay_id,
     b.barangay_name,
+    recent_trip.route_id,
     recent_trip.trip_id,
     recent_trip.trip_status,
     recent_trip.trip_start,
     recent_trip.trip_end,
-    recent_trip.route_name
+    recent_trip.route_name,
+    recent_trip.fare_amount,
+    recent_trip.default_fare_amount,
+    dl.latitude AS latest_latitude,
+    dl.longitude AS latest_longitude,
+    dl.speed AS latest_speed,
+    dl.heading AS latest_heading,
+    dl.accuracy AS latest_accuracy,
+    dl.recorded_at AS latest_recorded_at,
+    dl.updated_at AS latest_updated_at,
+    dl.is_online AS latest_is_online
   FROM public.qr_codes qr
   JOIN public.drivers d
     ON d.driver_id = qr.driver_id
@@ -198,10 +237,13 @@ const PASSENGER_CONTEXT_SQL = `
     ON b.barangay_id = td.barangay_id
   LEFT JOIN LATERAL (
     SELECT
+      tp.route_id,
       tp.trip_id,
       tp.trip_status,
       tp.trip_start,
       tp.trip_end,
+      tp.fare_amount,
+      r.default_fare_amount,
       r.origin || ' -> ' || r.destination AS route_name
     FROM public.trips tp
     LEFT JOIN public.routes r
@@ -215,6 +257,8 @@ const PASSENGER_CONTEXT_SQL = `
     LIMIT 1
   ) recent_trip
     ON TRUE
+  LEFT JOIN public.driver_locations dl
+    ON dl.driver_id = d.driver_id
   WHERE qr.qr_token = $1
     AND qr.status = 'active'
     AND (qr.expires_at IS NULL OR qr.expires_at > NOW())
@@ -269,11 +313,48 @@ const mapPassengerReportContext = (
     todaName: row.toda_name,
     barangayId: Number(row.barangay_id),
     barangayName: row.barangay_name,
+    routeId: row.route_id === null ? undefined : Number(row.route_id),
     tripId: row.trip_id === null ? undefined : Number(row.trip_id),
     tripStatus: row.trip_status ?? undefined,
     tripStartedAt: row.trip_start?.toISOString(),
     tripEndedAt: row.trip_end?.toISOString(),
     routeName: row.route_name ?? undefined,
+    latestDriverLocation:
+      row.latest_latitude === null ||
+      row.latest_longitude === null ||
+      row.latest_recorded_at === null ||
+      row.latest_is_online === null
+        ? undefined
+        : {
+            latitude: Number(row.latest_latitude),
+            longitude: Number(row.latest_longitude),
+            speed: row.latest_speed ?? undefined,
+            heading: row.latest_heading ?? undefined,
+            accuracy: row.latest_accuracy ?? undefined,
+            recordedAt: row.latest_recorded_at.toISOString(),
+            updatedAt: row.latest_updated_at?.toISOString(),
+            isOnline: row.latest_is_online
+          },
+    fare:
+      row.fare_amount !== null && Number(row.fare_amount) > 0
+        ? {
+            amount: Number(row.fare_amount),
+            currency: "PHP",
+            label: "Encoded trip fare",
+            source: "trip"
+          }
+        : row.default_fare_amount !== null && Number(row.default_fare_amount) > 0
+          ? {
+              amount: Number(row.default_fare_amount),
+              currency: "PHP",
+              label: "Route default fare",
+              source: "route"
+            }
+        : {
+            currency: "PHP",
+            label: "No encoded fare is available for this trip yet.",
+            source: "unavailable"
+          },
     reportingAvailable: true
   }
 }

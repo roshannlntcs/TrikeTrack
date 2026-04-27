@@ -463,7 +463,9 @@
 .superadmin-modal {
   width: min(100%, 640px);
   max-height: min(92vh, 760px);
-  overflow: auto;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
   border-radius: 8px;
   border: 1px solid #e2e8f0;
   background: #ffffff;
@@ -472,6 +474,7 @@
 
 .superadmin-modal__header,
 .superadmin-modal__footer {
+  flex: 0 0 auto;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -510,6 +513,8 @@
 .superadmin-modal__body {
   display: grid;
   gap: 14px;
+  min-height: 0;
+  overflow: auto;
   padding: 20px;
 }
 

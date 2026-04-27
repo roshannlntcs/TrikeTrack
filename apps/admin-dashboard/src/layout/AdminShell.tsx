@@ -7,6 +7,8 @@ import type { AdminProfile } from "../lib/admin-profile"
 import { markAdminAppealViewed } from "../lib/reports"
 import {
   fetchDashboardData,
+  getCachedDashboardData,
+  getCachedTripPath,
   type DashboardDataSnapshot,
   type DashboardDriverRecord,
   type DashboardEmergencyRecord,
@@ -168,6 +170,18 @@ const TODA_NAV_ITEMS: NavItem[] = [
   { key: "trip-logs", label: "Trip Logs" }
 ]
 
+const PAGE_SEARCH_PLACEHOLDERS: Record<NavKey, string> = {
+  home: "Search drivers, alerts, trips...",
+  "live-map": "Search driver ID, route, GPS point...",
+  drivers: "Search driver ID, name, tricycle, QR...",
+  tricycles: "Search tricycle ID, plate, registration...",
+  alerts: "Search driver ID, violation, plate, route...",
+  reports: "Search report ID, driver, route, plate...",
+  "trip-logs": "Search trip ID, driver ID, plate, route...",
+  superadmin: "Search admins, barangays, TODAs, routes...",
+  "toda-admin": "Search driver ID, tricycle ID, plate..."
+}
+
 const RECENT_POINTS_PER_DRIVER = 8
 const OBRERO_CENTER: [number, number] = [125.6128, 7.0848]
 const DEFAULT_CITY_ZOOM = 11
@@ -211,6 +225,17 @@ const formatLastSeen = (lastSeenTs: number, nowTs: number) => {
 
 const formatPoint = (point: DriverLocationEvent) =>
   `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`
+
+const textMatchesSearch = (
+  normalizedSearchQuery: string,
+  ...values: Array<string | number | boolean | undefined | null>
+) =>
+  values.some(
+    (value) =>
+      value !== undefined &&
+      value !== null &&
+      String(value).toLowerCase().includes(normalizedSearchQuery)
+  )
 
 const getAlertPriority = (alert: { reason: string }) => {
   const normalizedReason = alert.reason.toUpperCase()
@@ -491,6 +516,40 @@ const getDriverPresenceMeta = (
   }
 }
 
+const driverMatchesSearch = (
+  driver: DriverDirectoryRow,
+  normalizedSearchQuery: string
+) => {
+  const latestPoint = driver.liveState?.latestPoint
+  const presenceLabel = getDriverPresenceMeta(driver, Date.now(), true).label
+
+  return textMatchesSearch(
+    normalizedSearchQuery,
+    driver.driverId,
+    driver.driverCode,
+    `${driver.firstName} ${driver.lastName}`,
+    driver.firstName,
+    driver.lastName,
+    driver.contactNo,
+    driver.tricycleId,
+    driver.tricycleNo,
+    driver.qrId,
+    driver.todaId,
+    driver.todaName,
+    driver.barangayId,
+    driver.barangayName,
+    driver.status,
+    driver.passwordSet ? "password set" : "password pending",
+    presenceLabel,
+    latestPoint?.tripId,
+    latestPoint ? formatPoint(latestPoint) : undefined,
+    driver.operationalState?.activeTripId,
+    driver.operationalState?.activeRouteId,
+    driver.operationalState?.activeRouteName,
+    driver.operationalState?.operationalStatus
+  )
+}
+
 type AlertListItem = {
   key: string
   source: "violation" | "emergency"
@@ -758,8 +817,14 @@ export default function AdminShell({
   const driversByIdRef = useRef<Record<string, DriverStreamState>>({})
   const [dashboardData, setDashboardData] = useState<DashboardDataSnapshot | null>(null)
   const [dashboardError, setDashboardError] = useState<string | null>(null)
+  const [dashboardNotice, setDashboardNotice] = useState<string | null>(null)
+  const [lastDashboardSyncAt, setLastDashboardSyncAt] = useState<string | null>(null)
+  const [dashboardDataSource, setDashboardDataSource] = useState<
+    "live" | "cache" | "none"
+  >("none")
   const [clockTs, setClockTs] = useState<number>(Date.now())
   const [searchQuery, setSearchQuery] = useState<string>("")
+  const [childSearchPlaceholder, setChildSearchPlaceholder] = useState<string | null>(null)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [isRefreshingNotifications, setIsRefreshingNotifications] = useState(false)
   const [notificationCategoryFilter, setNotificationCategoryFilter] =
@@ -788,6 +853,7 @@ export default function AdminShell({
     useState<ViolationAlertDetails | null>(null)
   const [violationAlertQueue, setViolationAlertQueue] = useState<ViolationAlertDetails[]>([])
   const dashboardDataRef = useRef<DashboardDataSnapshot | null>(null)
+  const lastDashboardSyncAtRef = useRef<string | null>(null)
   const dashboardRefreshInFlightRef = useRef<Promise<void> | null>(null)
   const dashboardRefreshQueuedRef = useRef(false)
   const visibleDriverIdentifiersRef = useRef<Set<string>>(new Set())
@@ -892,13 +958,29 @@ export default function AdminShell({
       try {
         const snapshot = await fetchDashboardData(accessToken)
         setDashboardData(snapshot)
-        setDashboardError(
+        const syncedAt = snapshot.cacheMeta?.savedAt ?? new Date().toISOString()
+        setLastDashboardSyncAt(syncedAt)
+        lastDashboardSyncAtRef.current = syncedAt
+        setDashboardDataSource(snapshot.cacheMeta ? "cache" : "live")
+        setDashboardNotice(
           snapshot.cacheMeta
             ? `Showing cached dashboard data from ${formatDateTime(snapshot.cacheMeta.savedAt)}.`
             : null
         )
+        setDashboardError(null)
       } catch (error) {
-        setDashboardError(String(error))
+        if (dashboardDataRef.current) {
+          const fallbackTimestamp = lastDashboardSyncAtRef.current
+          setDashboardDataSource("cache")
+          setDashboardNotice(
+            fallbackTimestamp
+              ? `Unable to refresh live dashboard data. Showing last synced data from ${formatDateTime(fallbackTimestamp)}.`
+              : "Unable to refresh live dashboard data. Showing the last synced snapshot."
+          )
+          setDashboardError(null)
+        } else {
+          setDashboardError(String(error))
+        }
       } finally {
         dashboardRefreshInFlightRef.current = null
         if (dashboardRefreshQueuedRef.current) {
@@ -928,21 +1010,54 @@ export default function AdminShell({
   }, [])
 
   useEffect(() => {
+    setChildSearchPlaceholder(null)
+  }, [activePage])
+
+  useEffect(() => {
     let active = true
 
     void (async () => {
       try {
+        const cachedSnapshot = await getCachedDashboardData()
+        if (active && cachedSnapshot) {
+          setDashboardData(cachedSnapshot)
+          setDashboardNotice(
+            cachedSnapshot.cacheMeta
+              ? `Offline-ready snapshot loaded from ${formatDateTime(cachedSnapshot.cacheMeta.savedAt)}.`
+              : null
+          )
+          setLastDashboardSyncAt(cachedSnapshot.cacheMeta?.savedAt ?? null)
+          lastDashboardSyncAtRef.current = cachedSnapshot.cacheMeta?.savedAt ?? null
+          setDashboardDataSource("cache")
+        }
+
         const snapshot = await fetchDashboardData(accessToken)
         if (!active) return
         setDashboardData(snapshot)
-        setDashboardError(
+        const syncedAt = snapshot.cacheMeta?.savedAt ?? new Date().toISOString()
+        setLastDashboardSyncAt(syncedAt)
+        lastDashboardSyncAtRef.current = syncedAt
+        setDashboardDataSource(snapshot.cacheMeta ? "cache" : "live")
+        setDashboardNotice(
           snapshot.cacheMeta
             ? `Showing cached dashboard data from ${formatDateTime(snapshot.cacheMeta.savedAt)}.`
             : null
         )
+        setDashboardError(null)
       } catch (error) {
         if (!active) return
-        setDashboardError(String(error))
+        if (dashboardDataRef.current) {
+          const fallbackTimestamp = lastDashboardSyncAtRef.current
+          setDashboardDataSource("cache")
+          setDashboardNotice(
+            fallbackTimestamp
+              ? `Unable to refresh live dashboard data. Showing last synced data from ${formatDateTime(fallbackTimestamp)}.`
+              : "Unable to refresh live dashboard data. Showing the last synced snapshot."
+          )
+          setDashboardError(null)
+        } else {
+          setDashboardError(String(error))
+        }
       }
     })()
 
@@ -950,6 +1065,32 @@ export default function AdminShell({
       active = false
       dashboardRefreshInFlightRef.current = null
       dashboardRefreshQueuedRef.current = false
+    }
+  }, [accessToken])
+
+  useEffect(() => {
+    const refreshOnResume = () => {
+      if (document.visibilityState === "hidden" || !navigator.onLine) return
+      void refreshDashboardData()
+      refreshLiveLocationsRef.current?.()
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshOnResume()
+      }
+    }
+
+    window.addEventListener("focus", refreshOnResume)
+    window.addEventListener("pageshow", refreshOnResume)
+    window.addEventListener("online", refreshOnResume)
+    document.addEventListener("visibilitychange", handleVisibilityChange)
+
+    return () => {
+      window.removeEventListener("focus", refreshOnResume)
+      window.removeEventListener("pageshow", refreshOnResume)
+      window.removeEventListener("online", refreshOnResume)
+      document.removeEventListener("visibilitychange", handleVisibilityChange)
     }
   }, [accessToken])
 
@@ -1043,6 +1184,18 @@ export default function AdminShell({
     setTripPathLoading(true)
     setTripPathError(null)
     setTripPathData(null)
+
+    void (async () => {
+      const cachedPath = await getCachedTripPath(selectedTripForPath.tripId)
+      if (!active || !cachedPath) return
+      setTripPathData(cachedPath)
+      setTripPathError(
+        cachedPath.cacheMeta
+          ? `Offline-ready trip path loaded from ${formatDateTime(cachedPath.cacheMeta.savedAt)}.`
+          : null
+      )
+      setTripPathLoading(false)
+    })()
 
     void fetchTripPath(accessToken, selectedTripForPath.tripId)
       .then((path) => {
@@ -2027,40 +2180,16 @@ export default function AdminShell({
 
   const filteredAllDriverRows = useMemo(() => {
     if (!hasSearchQuery) return driverDirectoryRows
-    return driverDirectoryRows.filter((driver) => {
-      const tripId = driver.liveState?.latestPoint.tripId ?? ""
-      const driverName = `${driver.firstName} ${driver.lastName}`.toLowerCase()
-      return (
-        String(driver.driverId).toLowerCase().includes(normalizedSearchQuery) ||
-        driver.driverCode.toLowerCase().includes(normalizedSearchQuery) ||
-        driverName.includes(normalizedSearchQuery) ||
-        driver.todaName.toLowerCase().includes(normalizedSearchQuery) ||
-        driver.barangayName.toLowerCase().includes(normalizedSearchQuery) ||
-        tripId.toLowerCase().includes(normalizedSearchQuery) ||
-        (driver.liveState
-          ? formatPoint(driver.liveState.latestPoint).toLowerCase().includes(normalizedSearchQuery)
-          : false)
-      )
-    })
+    return driverDirectoryRows.filter((driver) =>
+      driverMatchesSearch(driver, normalizedSearchQuery)
+    )
   }, [driverDirectoryRows, hasSearchQuery, normalizedSearchQuery])
 
   const filteredActiveDriverRows = useMemo(() => {
     if (!hasSearchQuery) return activeDriverRows
-    return activeDriverRows.filter((driver) => {
-      const tripId = driver.liveState?.latestPoint.tripId ?? ""
-      const driverName = `${driver.firstName} ${driver.lastName}`.toLowerCase()
-      return (
-        String(driver.driverId).toLowerCase().includes(normalizedSearchQuery) ||
-        driver.driverCode.toLowerCase().includes(normalizedSearchQuery) ||
-        driverName.includes(normalizedSearchQuery) ||
-        driver.todaName.toLowerCase().includes(normalizedSearchQuery) ||
-        driver.barangayName.toLowerCase().includes(normalizedSearchQuery) ||
-        tripId.toLowerCase().includes(normalizedSearchQuery) ||
-        (driver.liveState
-          ? formatPoint(driver.liveState.latestPoint).toLowerCase().includes(normalizedSearchQuery)
-          : false)
-      )
-    })
+    return activeDriverRows.filter((driver) =>
+      driverMatchesSearch(driver, normalizedSearchQuery)
+    )
   }, [activeDriverRows, hasSearchQuery, normalizedSearchQuery])
 
   const alertRows = useMemo<AlertListItem[]>(() => {
@@ -2079,13 +2208,22 @@ export default function AdminShell({
           ? `${alert.lat.toFixed(5)}, ${alert.lng.toFixed(5)}`
           : ""
       return (
-        alert.driverId.toLowerCase().includes(normalizedSearchQuery) ||
-        (alert.driverName?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
-        alert.reason.toLowerCase().includes(normalizedSearchQuery) ||
-        (alert.description?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
-        (alert.plateNo?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
-        (alert.routeName?.toLowerCase().includes(normalizedSearchQuery) ?? false) ||
-        point.toLowerCase().includes(normalizedSearchQuery)
+        textMatchesSearch(
+          normalizedSearchQuery,
+          alert.key,
+          alert.driverId,
+          alert.driverName,
+          alert.reason,
+          alert.description,
+          alert.plateNo,
+          alert.routeName,
+          alert.todaName,
+          alert.barangayName,
+          alert.status,
+          alert.source,
+          alert.emergencyId,
+          point
+        )
       )
     })
   }, [alertRows, hasSearchQuery, normalizedSearchQuery])
@@ -2406,17 +2544,27 @@ export default function AdminShell({
   const filteredTripRows = useMemo(() => {
     if (!hasSearchQuery) return tripRows
     return tripRows.filter((trip) => {
-      return (
-        String(trip.tripId).includes(trimmedSearchQuery) ||
-        String(trip.driverId).includes(trimmedSearchQuery) ||
-        trip.driverName.toLowerCase().includes(normalizedSearchQuery) ||
-        trip.plateNo.toLowerCase().includes(normalizedSearchQuery) ||
-        trip.routeName.toLowerCase().includes(normalizedSearchQuery) ||
-        trip.todaName.toLowerCase().includes(normalizedSearchQuery) ||
-        trip.barangayName.toLowerCase().includes(normalizedSearchQuery)
+      return textMatchesSearch(
+        normalizedSearchQuery,
+        trip.tripId,
+        trip.driverId,
+        trip.driverCode,
+        trip.driverName,
+        trip.tricycleId,
+        trip.plateNo,
+        trip.routeId,
+        trip.routeName,
+        trip.todaName,
+        trip.barangayName,
+        trip.tripStatus,
+        trip.durationMinutes,
+        trip.fareAmount,
+        trip.distanceKm,
+        trip.violationCount,
+        trip.hasPath ? "has path" : "no saved path"
       )
     })
-  }, [tripRows, hasSearchQuery, trimmedSearchQuery, normalizedSearchQuery])
+  }, [tripRows, hasSearchQuery, normalizedSearchQuery])
 
   const homeTripLogSummary = useMemo(() => {
     return filteredTripRows
@@ -2495,6 +2643,27 @@ export default function AdminShell({
         : adminProfile.barangayName
           ? `${adminProfile.role.replace("_", " ")} - ${adminProfile.barangayName}`
         : adminProfile.role.replace("_", " ")
+  const dashboardStateLabel = !online
+    ? dashboardData
+      ? "Offline snapshot"
+      : "Offline"
+    : dashboardDataSource === "cache"
+      ? "Cached snapshot"
+      : syncStatus === "connected"
+        ? "Live sync"
+        : "Syncing"
+  const dashboardStateTone = !online
+    ? "offline"
+    : dashboardDataSource === "cache"
+      ? "cached"
+      : syncStatus === "connected"
+        ? "live"
+        : "pending"
+  const dashboardSyncSummary = lastDashboardSyncAt
+    ? `Last synced ${formatDateTime(lastDashboardSyncAt)}`
+    : "Waiting for first sync"
+  const pageSearchPlaceholder =
+    childSearchPlaceholder ?? PAGE_SEARCH_PLACEHOLDERS[activePage]
 
   const openDriverModal = (driver: DriverDirectoryRow) => {
     setSelectedDriverId(driver.driverId)
@@ -2626,11 +2795,21 @@ export default function AdminShell({
           <div className="admin-topbar__controls">
             <input
               className="topbar-search"
-              placeholder="Search unit ID..."
+              placeholder={pageSearchPlaceholder}
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
-              aria-label="Search by unit ID"
+              aria-label={pageSearchPlaceholder.replace("...", "")}
             />
+            {activePage !== "superadmin" && activePage !== "toda-admin" && (
+              <div className="admin-topbar__status" aria-live="polite">
+                <span
+                  className={`admin-topbar__status-pill admin-topbar__status-pill--${dashboardStateTone}`}
+                >
+                  {dashboardStateLabel}
+                </span>
+                <span className="admin-topbar__status-text">{dashboardSyncSummary}</span>
+              </div>
+            )}
             <div className="topbar-notifications" ref={notificationPanelRef}>
               <button
                 type="button"
@@ -2862,12 +3041,21 @@ export default function AdminShell({
             activePage === "live-map" ? "admin-content--live-map" : ""
           } ${shouldLockPageScroll ? "admin-content--table-page" : ""}`}
         >
-          {dashboardError &&
+          {(dashboardNotice || dashboardError) &&
             activePage !== "superadmin" &&
             activePage !== "toda-admin" &&
             activePage !== "live-map" && (
-            <div className="page-panel" style={{ padding: "12px 14px", marginBottom: "14px" }}>
-              <div className="muted">Dashboard data sync issue: {dashboardError}</div>
+            <div
+              className={`page-panel dashboard-sync-banner${
+                dashboardError ? " dashboard-sync-banner--error" : ""
+              }`}
+              style={{ padding: "12px 14px", marginBottom: "14px" }}
+            >
+              <div className="muted">
+                {dashboardError
+                  ? `Dashboard data sync issue: ${dashboardError}`
+                  : dashboardNotice}
+              </div>
             </div>
           )}
 
@@ -2875,6 +3063,8 @@ export default function AdminShell({
             <SuperadminPage
               accessToken={accessToken}
               mode="superadmin"
+              searchQuery={searchQuery}
+              onSearchPlaceholderChange={setChildSearchPlaceholder}
               onDataChanged={() => void refreshDashboardData()}
             />
           )}
@@ -2885,6 +3075,8 @@ export default function AdminShell({
               mode="toda-admin"
               lockedTodaId={adminProfile.todaId}
               lockedTodaLabel={adminProfile.todaName}
+              searchQuery={searchQuery}
+              onSearchPlaceholderChange={setChildSearchPlaceholder}
               onDataChanged={() => void refreshDashboardData()}
             />
           )}
@@ -3050,6 +3242,8 @@ export default function AdminShell({
                   <div className="meta-grid">
                     <div>Network</div>
                     <div>{online ? "Online" : "Offline"}</div>
+                    <div>Data source</div>
+                    <div>{dashboardStateLabel}</div>
                     <div>Realtime</div>
                     <div>{syncStatus}</div>
                     <div>Active Drivers</div>
@@ -3062,6 +3256,8 @@ export default function AdminShell({
                     <div>{dashboardData?.counts.openAlerts ?? alertRows.length}</div>
                     <div>Last data update</div>
                     <div>{lastUpdateTs ? new Date(lastUpdateTs).toLocaleTimeString() : "-"}</div>
+                    <div>Last sync</div>
+                    <div>{lastDashboardSyncAt ? formatDateTime(lastDashboardSyncAt) : "-"}</div>
                   </div>
                 </section>
 
@@ -3150,6 +3346,8 @@ export default function AdminShell({
                 page="drivers"
                 lockedTodaId={adminProfile.todaId}
                 lockedTodaLabel={adminProfile.todaName}
+                searchQuery={searchQuery}
+                onSearchQueryChange={setSearchQuery}
                 onDataChanged={() => void refreshDashboardData()}
               />
             ) : (
@@ -3294,7 +3492,7 @@ export default function AdminShell({
             )
           )}
 
-          {selectedDriver && (
+          {selectedDriver && !driverTripHistoryOpen && (
             <div
               className="driver-modal-backdrop"
               role="presentation"
@@ -3366,17 +3564,6 @@ export default function AdminShell({
                       </strong>
                     </div>
                   </section>
-
-                  <div className="driver-modal__tabs" aria-label="Driver detail sections">
-                    <span className="driver-modal__tab driver-modal__tab--active">Personal</span>
-                    <button
-                      type="button"
-                      className="driver-modal__tab"
-                      onClick={() => setDriverTripHistoryOpen(true)}
-                    >
-                      Trip History
-                    </button>
-                  </div>
 
                   <section className="driver-modal__section">
                     <div className="driver-modal__section-head">
@@ -3454,7 +3641,6 @@ export default function AdminShell({
             <div
               className="driver-modal-backdrop driver-modal-backdrop--stacked"
               role="presentation"
-              onClick={() => setDriverTripHistoryOpen(false)}
             >
               <div
                 className="driver-modal driver-modal--history"
@@ -3470,13 +3656,22 @@ export default function AdminShell({
                       {selectedDriver.firstName} {selectedDriver.lastName} | {selectedDriver.driverCode}
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    className="driver-modal__close"
-                    onClick={() => setDriverTripHistoryOpen(false)}
-                  >
-                    Close
-                  </button>
+                  <div className="driver-modal__header-actions">
+                    <button
+                      type="button"
+                      className="driver-modal__secondary"
+                      onClick={() => setDriverTripHistoryOpen(false)}
+                    >
+                      Back
+                    </button>
+                    <button
+                      type="button"
+                      className="driver-modal__close"
+                      onClick={closeDriverModal}
+                    >
+                      Close
+                    </button>
+                  </div>
                 </div>
                 <div className="driver-modal__body">
                   <section className="driver-modal__section">
@@ -3654,6 +3849,8 @@ export default function AdminShell({
               page="tricycles"
               lockedTodaId={adminProfile.todaId}
               lockedTodaLabel={adminProfile.todaName}
+              searchQuery={searchQuery}
+              onSearchQueryChange={setSearchQuery}
               onDataChanged={() => void refreshDashboardData()}
             />
           )}
@@ -3733,6 +3930,9 @@ export default function AdminShell({
             <ReportsPage
               accessToken={accessToken}
               initialSection={reportsPageSection}
+              searchQuery={searchQuery}
+              onSearchQueryChange={setSearchQuery}
+              onSearchPlaceholderChange={setChildSearchPlaceholder}
               onDataChanged={() => void refreshDashboardData()}
             />
           )}
@@ -3853,40 +4053,42 @@ export default function AdminShell({
                 </button>
               </div>
 
-              <div className="trip-path-modal__meta">
-                <div>
-                  <span>Start</span>
-                  <strong>{formatDateTime(selectedTripForPath.tripStart)}</strong>
+              <div className="trip-path-modal__body">
+                <div className="trip-path-modal__meta">
+                  <div>
+                    <span>Start</span>
+                    <strong>{formatDateTime(selectedTripForPath.tripStart)}</strong>
+                  </div>
+                  <div>
+                    <span>End</span>
+                    <strong>{formatDateTime(selectedTripForPath.tripEnd)}</strong>
+                  </div>
+                  <div>
+                    <span>Points</span>
+                    <strong>{tripPathData?.pointCount ?? selectedTripForPath.pathPointCount ?? "-"}</strong>
+                  </div>
+                  <div>
+                    <span>Alerts</span>
+                    <strong>{selectedTripForPath.violationCount}</strong>
+                  </div>
                 </div>
-                <div>
-                  <span>End</span>
-                  <strong>{formatDateTime(selectedTripForPath.tripEnd)}</strong>
-                </div>
-                <div>
-                  <span>Points</span>
-                  <strong>{tripPathData?.pointCount ?? selectedTripForPath.pathPointCount ?? "-"}</strong>
-                </div>
-                <div>
-                  <span>Alerts</span>
-                  <strong>{selectedTripForPath.violationCount}</strong>
-                </div>
+
+                {tripPathError && (
+                  <div className="trip-path-modal__notice" role="status">
+                    {tripPathError.replace(/^Error:\s*/, "")}
+                  </div>
+                )}
+
+                {tripPathLoading ? (
+                  <div className="trip-path-modal__empty">Loading saved trip path...</div>
+                ) : tripPathData ? (
+                  <TripPathMap tripPath={tripPathData} />
+                ) : (
+                  <div className="trip-path-modal__empty">
+                    No saved path is available for this trip yet.
+                  </div>
+                )}
               </div>
-
-              {tripPathError && (
-                <div className="trip-path-modal__notice" role="status">
-                  {tripPathError.replace(/^Error:\s*/, "")}
-                </div>
-              )}
-
-              {tripPathLoading ? (
-                <div className="trip-path-modal__empty">Loading saved trip path...</div>
-              ) : tripPathData ? (
-                <TripPathMap tripPath={tripPathData} />
-              ) : (
-                <div className="trip-path-modal__empty">
-                  No saved path is available for this trip yet.
-                </div>
-              )}
             </section>
           </div>
         )}
@@ -3916,102 +4118,104 @@ export default function AdminShell({
                   className="violation-modal__close"
                   onClick={closeViolationAlert}
                   aria-label="Dismiss violation alert"
-                >
-                  Close
-                </button>
+              >
+                Close
+              </button>
               </div>
 
-              {violationAlertQueue.length > 0 && (
-                <div className="violation-modal__queue">
-                  {violationAlertQueue.length} more violation
-                  {violationAlertQueue.length === 1 ? " is" : "s are"} waiting.
-                </div>
-              )}
+              <div className="violation-modal__body">
+                {violationAlertQueue.length > 0 && (
+                  <div className="violation-modal__queue">
+                    {violationAlertQueue.length} more violation
+                    {violationAlertQueue.length === 1 ? " is" : "s are"} waiting.
+                  </div>
+                )}
 
-              <div className="violation-modal__driver">
-                <div className="violation-modal__avatar" aria-hidden="true">
-                  {activeViolationAlert.profileImageUrl ? (
-                    <img src={activeViolationAlert.profileImageUrl} alt="" />
-                  ) : (
-                    activeViolationInitials
-                  )}
+                <div className="violation-modal__driver">
+                  <div className="violation-modal__avatar" aria-hidden="true">
+                    {activeViolationAlert.profileImageUrl ? (
+                      <img src={activeViolationAlert.profileImageUrl} alt="" />
+                    ) : (
+                      activeViolationInitials
+                    )}
+                  </div>
+                  <div>
+                    <strong>{activeViolationDriverLabel}</strong>
+                    <span>{activeViolationAlert.driverCode ?? "No driver code"}</span>
+                  </div>
                 </div>
-                <div>
-                  <strong>{activeViolationDriverLabel}</strong>
-                  <span>{activeViolationAlert.driverCode ?? "No driver code"}</span>
-                </div>
-              </div>
 
-              <div className="violation-modal__details">
-                <div>
-                  <span>Plate Number</span>
-                  <strong>{activeViolationAlert.plateNo ?? "Not available"}</strong>
+                <div className="violation-modal__details">
+                  <div>
+                    <span>Plate Number</span>
+                    <strong>{activeViolationAlert.plateNo ?? "Not available"}</strong>
+                  </div>
+                  <div>
+                    <span>Tricycle Number</span>
+                    <strong>
+                      {activeViolationAlert.tricycleNo ??
+                        (activeViolationAlert.tricycleId
+                          ? `Tricycle #${activeViolationAlert.tricycleId}`
+                          : "Not available")}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Trip ID</span>
+                    <strong>
+                      {activeViolationAlert.tripId
+                        ? `TRIP-${String(activeViolationAlert.tripId).replace(/^TRIP-/i, "")}`
+                        : "No active trip"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Violation Type</span>
+                    <strong>{activeViolationAlert.violationType}</strong>
+                  </div>
+                  <div>
+                    <span>Timestamp</span>
+                    <strong>{formatDateTime(activeViolationAlert.timestamp)}</strong>
+                  </div>
+                  <div>
+                    <span>Current Location</span>
+                    <strong>
+                      {activeViolationAlert.locationLabel ??
+                        activeViolationCoordinates ??
+                        "Location not available"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Coordinates</span>
+                    <strong>{activeViolationCoordinates ?? "Not available"}</strong>
+                  </div>
+                  <div>
+                    <span>Route</span>
+                    <strong>{activeViolationAlert.routeName ?? "No route context"}</strong>
+                  </div>
                 </div>
-                <div>
-                  <span>Tricycle Number</span>
-                  <strong>
-                    {activeViolationAlert.tricycleNo ??
-                      (activeViolationAlert.tricycleId
-                        ? `Tricycle #${activeViolationAlert.tricycleId}`
-                        : "Not available")}
-                  </strong>
-                </div>
-                <div>
-                  <span>Trip ID</span>
-                  <strong>
-                    {activeViolationAlert.tripId
-                      ? `TRIP-${String(activeViolationAlert.tripId).replace(/^TRIP-/i, "")}`
-                      : "No active trip"}
-                  </strong>
-                </div>
-                <div>
-                  <span>Violation Type</span>
-                  <strong>{activeViolationAlert.violationType}</strong>
-                </div>
-                <div>
-                  <span>Timestamp</span>
-                  <strong>{formatDateTime(activeViolationAlert.timestamp)}</strong>
-                </div>
-                <div>
-                  <span>Current Location</span>
-                  <strong>
-                    {activeViolationAlert.locationLabel ??
-                      activeViolationCoordinates ??
-                      "Location not available"}
-                  </strong>
-                </div>
-                <div>
-                  <span>Coordinates</span>
-                  <strong>{activeViolationCoordinates ?? "Not available"}</strong>
-                </div>
-                <div>
-                  <span>Route</span>
-                  <strong>{activeViolationAlert.routeName ?? "No route context"}</strong>
-                </div>
-              </div>
 
-              {activeViolationAlert.description && (
-                <p className="violation-modal__description">
-                  {activeViolationAlert.description}
-                </p>
-              )}
+                {activeViolationAlert.description && (
+                  <p className="violation-modal__description">
+                    {activeViolationAlert.description}
+                  </p>
+                )}
 
-              <div className="violation-modal__actions">
-                <button
-                  type="button"
-                  className="violation-modal__button violation-modal__button--secondary"
-                  onClick={closeViolationAlert}
-                >
-                  Dismiss
-                </button>
-                <button
-                  type="button"
-                  className="violation-modal__button violation-modal__button--primary"
-                  onClick={() => focusViolationOnMap(activeViolationAlert)}
-                  disabled={!hasViolationCoordinates(activeViolationAlert)}
-                >
-                  View Map
-                </button>
+                <div className="violation-modal__actions">
+                  <button
+                    type="button"
+                    className="violation-modal__button violation-modal__button--secondary"
+                    onClick={closeViolationAlert}
+                  >
+                    Dismiss
+                  </button>
+                  <button
+                    type="button"
+                    className="violation-modal__button violation-modal__button--primary"
+                    onClick={() => focusViolationOnMap(activeViolationAlert)}
+                    disabled={!hasViolationCoordinates(activeViolationAlert)}
+                  >
+                    View Map
+                  </button>
+                </div>
               </div>
             </section>
           </div>
@@ -4024,60 +4228,64 @@ export default function AdminShell({
               aria-modal="true"
               aria-labelledby="admin-emergency-modal-title"
             >
-              <div className="emergency-modal__badge">Passenger Emergency</div>
-              <h2 id="admin-emergency-modal-title">Immediate attention required</h2>
-              <p className="emergency-modal__message">
-                A passenger triggered the emergency action from the QR reporting page.
-              </p>
-              {emergencyQueue.length > 0 && (
+              <div className="emergency-modal__header">
+                <div className="emergency-modal__badge">Passenger Emergency</div>
+                <h2 id="admin-emergency-modal-title">Immediate attention required</h2>
                 <p className="emergency-modal__message">
-                  {emergencyQueue.length} more emergency
-                  {emergencyQueue.length === 1 ? " is" : "ies are"} waiting in the queue.
+                  A passenger triggered the emergency action from the QR reporting page.
                 </p>
-              )}
-
-              <div className="emergency-modal__details">
-                <div>
-                  <span>Driver</span>
-                  <strong>{activeEmergencyModal.driverName}</strong>
-                </div>
-                <div>
-                  <span>Plate / Unit</span>
-                  <strong>{activeEmergencyModal.plateNo ?? "No tricycle assigned"}</strong>
-                </div>
-                <div>
-                  <span>Time</span>
-                  <strong>{new Date(activeEmergencyModal.createdAt).toLocaleString()}</strong>
-                </div>
-                <div>
-                  <span>Route</span>
-                  <strong>{activeEmergencyModal.routeName ?? "No route context"}</strong>
-                </div>
+                {emergencyQueue.length > 0 && (
+                  <p className="emergency-modal__message">
+                    {emergencyQueue.length} more emergency
+                    {emergencyQueue.length === 1 ? " is" : "ies are"} waiting in the queue.
+                  </p>
+                )}
               </div>
 
-              <div className="emergency-modal__meta">
-                {[activeEmergencyModal.barangayName, activeEmergencyModal.todaName, activeEmergencyModal.status]
-                  .filter(Boolean)
-                  .join(" | ")}
-              </div>
-
-              {dashboardError && (
-                <div className="emergency-modal__error" role="alert">
-                  {dashboardError.replace(/^Error:\s*/, "")}
+              <div className="emergency-modal__body">
+                <div className="emergency-modal__details">
+                  <div>
+                    <span>Driver</span>
+                    <strong>{activeEmergencyModal.driverName}</strong>
+                  </div>
+                  <div>
+                    <span>Plate / Unit</span>
+                    <strong>{activeEmergencyModal.plateNo ?? "No tricycle assigned"}</strong>
+                  </div>
+                  <div>
+                    <span>Time</span>
+                    <strong>{new Date(activeEmergencyModal.createdAt).toLocaleString()}</strong>
+                  </div>
+                  <div>
+                    <span>Route</span>
+                    <strong>{activeEmergencyModal.routeName ?? "No route context"}</strong>
+                  </div>
                 </div>
-              )}
 
-              <div className="emergency-modal__actions">
-                <button
-                  type="button"
-                  className="emergency-modal__button"
-                  disabled={emergencyActionBusyId === activeEmergencyModal.emergencyId}
-                  onClick={() => void handleEmergencyResponse(activeEmergencyModal)}
-                >
-                  {emergencyActionBusyId === activeEmergencyModal.emergencyId
-                    ? "Confirming..."
-                    : "Confirm Response"}
-                </button>
+                <div className="emergency-modal__meta">
+                  {[activeEmergencyModal.barangayName, activeEmergencyModal.todaName, activeEmergencyModal.status]
+                    .filter(Boolean)
+                    .join(" | ")}
+                </div>
+
+                {dashboardError && (
+                  <div className="emergency-modal__error" role="alert">
+                    {dashboardError.replace(/^Error:\s*/, "")}
+                  </div>
+                )}
+
+                <div className="emergency-modal__actions">
+                  <button
+                    type="button"
+                    className="emergency-modal__button"
+                    disabled={emergencyActionBusyId === activeEmergencyModal.emergencyId}
+                    onClick={() => void handleEmergencyResponse(activeEmergencyModal)}
+                  >
+                    {emergencyActionBusyId === activeEmergencyModal.emergencyId
+                      ? "Confirming..."
+                      : "Confirm Response"}
+                  </button>
+                </div>
               </div>
             </section>
           </div>

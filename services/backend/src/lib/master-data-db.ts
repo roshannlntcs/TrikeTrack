@@ -82,6 +82,7 @@ export type RouteRecord = {
   barangayName: string
   origin: string
   destination: string
+  defaultFareAmount?: number
   geofenceGeojson?: unknown
   status: EntityStatus
   createdAt: string
@@ -152,6 +153,7 @@ export type CreateRouteInput = {
   todaId: number
   origin: string
   destination: string
+  defaultFareAmount?: number
   geofenceGeojson?: unknown
 }
 
@@ -249,6 +251,7 @@ type RouteRow = {
   barangay_name: string
   origin: string
   destination: string
+  default_fare_amount: string | null
   geofence_geojson: unknown | null
   status: EntityStatus
   created_at: Date
@@ -329,6 +332,8 @@ const mapRoute = (row: RouteRow): RouteRecord => ({
   barangayName: row.barangay_name,
   origin: row.origin,
   destination: row.destination,
+  defaultFareAmount:
+    row.default_fare_amount === null ? undefined : Number(row.default_fare_amount),
   geofenceGeojson: row.geofence_geojson ?? undefined,
   status: row.status,
   createdAt: row.created_at.toISOString()
@@ -647,6 +652,7 @@ const R_ROUTE_SELECT = `
     b.barangay_name,
     r.origin,
     r.destination,
+    r.default_fare_amount,
     r.geofence_geojson,
     r.status,
     r.created_at
@@ -1502,14 +1508,21 @@ export const createRoute = async (input: CreateRouteInput) => {
 
   const result = await query<{ route_id: number }>(
     `
-      INSERT INTO public.routes (toda_id, origin, destination, geofence_geojson)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO public.routes (
+        toda_id,
+        origin,
+        destination,
+        default_fare_amount,
+        geofence_geojson
+      )
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING route_id
     `,
     [
       input.todaId,
       input.origin,
       input.destination,
+      input.defaultFareAmount ?? null,
       input.geofenceGeojson === undefined ? null : JSON.stringify(input.geofenceGeojson)
     ]
   )
@@ -1526,11 +1539,15 @@ export const updateRoute = async (routeId: number, input: UpdateRouteInput) => {
       SET toda_id = COALESCE($2, toda_id),
           origin = COALESCE($3, origin),
           destination = COALESCE($4, destination),
+          default_fare_amount = CASE
+            WHEN $5 THEN $6::numeric
+            ELSE default_fare_amount
+          END,
           geofence_geojson = CASE
-            WHEN $5 THEN $6::jsonb
+            WHEN $7 THEN $8::jsonb
             ELSE geofence_geojson
           END,
-          status = COALESCE($7, status)
+          status = COALESCE($9, status)
       WHERE route_id = $1
     `,
     [
@@ -1538,6 +1555,8 @@ export const updateRoute = async (routeId: number, input: UpdateRouteInput) => {
       input.todaId ?? null,
       input.origin ?? null,
       input.destination ?? null,
+      hasOwn(input, "defaultFareAmount"),
+      input.defaultFareAmount ?? null,
       hasOwn(input, "geofenceGeojson"),
       input.geofenceGeojson === undefined || input.geofenceGeojson === null
         ? null
