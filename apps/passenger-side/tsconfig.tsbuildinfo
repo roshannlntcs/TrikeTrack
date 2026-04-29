@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/emergency-api.ts","./src/main.tsx","../../common/types.ts","../../common/maps/basemaps.ts","../../common/maps/index.ts","../../common/maps/livelocation.ts","../../common/maps/markers.ts","../../common/maps/triketrackmap.tsx"],"version":"5.9.3"}
+{"root":["./src/app.tsx","./src/active-trip-api.ts","./src/emergency-api.ts","./src/main.tsx","../../common/types.ts","../../common/maps/basemaps.ts","../../common/maps/index.ts","../../common/maps/livelocation.ts","../../common/maps/markers.ts","../../common/maps/triketrackmap.tsx"],"version":"5.9.3"}

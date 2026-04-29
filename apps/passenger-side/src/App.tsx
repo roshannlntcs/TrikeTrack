@@ -1,5 +1,10 @@
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react"
 import {
+  connectPassengerTripStream,
+  getPassengerTripView,
+  type PassengerTripView
+} from "./active-trip-api"
+import {
   connectPassengerEmergencyStream,
   createPassengerEmergency,
   getPassengerEmergency,
@@ -74,6 +79,7 @@ type EvidenceImage = {
 
 type CategoryTone = "danger" | "info" | "warning" | "neutral"
 type FareCheckState = "ok" | "warning" | "neutral"
+type TripTrackingState = "idle" | "loading" | "ready" | "error"
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"])
 const PRIVATE_IPV4_PATTERN =
@@ -234,6 +240,27 @@ const formatCurrency = (amount?: number, currency = "PHP") => {
   }).format(amount)
 }
 
+const formatDuration = (totalSeconds: number) => {
+  const safeSeconds = Math.max(0, Math.round(totalSeconds))
+  const hours = Math.floor(safeSeconds / 3600)
+  const minutes = Math.floor((safeSeconds % 3600) / 60)
+  const seconds = safeSeconds % 60
+
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, "0")}m`
+  }
+
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`
+}
+
+const formatDistance = (distanceKilometers?: number) => {
+  if (typeof distanceKilometers !== "number" || !Number.isFinite(distanceKilometers) || distanceKilometers < 0) {
+    return "Not available"
+  }
+
+  return `${distanceKilometers.toFixed(2)} km`
+}
+
 const parseFareValue = (value: string) => {
   const normalized = value.replace(/[^0-9.]/g, "")
   if (!normalized) return null
@@ -369,6 +396,37 @@ const CheckIcon = () => (
   </svg>
 )
 
+const TripViewIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <path
+      d="M4.5 18.25h15m-11.25-4.5 3.25-3.25 2.5 2.5 4-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.8"
+    />
+    <path
+      d="M6 7.75A2.25 2.25 0 1 1 6 3.25a2.25 2.25 0 0 1 0 4.5Zm12 12A2.25 2.25 0 1 1 18 15.25a2.25 2.25 0 0 1 0 4.5Z"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+    />
+  </svg>
+)
+
+const CloseIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <path
+      d="M6.75 6.75l10.5 10.5m0-10.5-10.5 10.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeWidth="1.8"
+    />
+  </svg>
+)
+
 const CategoryIcon = ({ tone }: { tone: CategoryTone }) => {
   if (tone === "danger") {
     return (
@@ -468,7 +526,10 @@ export default function App() {
   const [emergencyAlert, setEmergencyAlert] = useState<EmergencyAlertRecord | null>(null)
   const [emergencyBusy, setEmergencyBusy] = useState(false)
   const [emergencyResponseOpen, setEmergencyResponseOpen] = useState(false)
-  const [passengerLocation, setPassengerLocation] = useState<TriketrackMapCoordinate | null>(null)
+  const [tripViewOpen, setTripViewOpen] = useState(false)
+  const [tripTrackingState, setTripTrackingState] = useState<TripTrackingState>("idle")
+  const [tripTrackingError, setTripTrackingError] = useState<string | null>(null)
+  const [tripView, setTripView] = useState<PassengerTripView | null>(null)
 
   useEffect(() => {
     let active = true
@@ -656,6 +717,65 @@ export default function App() {
     )
   }, [emergencyAlert, qrToken])
 
+  useEffect(() => {
+    if (!tripViewOpen || !qrToken || reportingApi.apiBaseUrl === null) {
+      return
+    }
+
+    let active = true
+    setTripTrackingState("loading")
+    setTripTrackingError(null)
+
+    void getPassengerTripView(reportingApi.apiBaseUrl, qrToken)
+      .then((view) => {
+        if (!active) return
+        setTripView(view)
+        setTripTrackingState("ready")
+      })
+      .catch((error) => {
+        if (!active) return
+        setTripTrackingError(
+          error instanceof Error ? error.message : "Unable to load the active trip."
+        )
+        setTripTrackingState("error")
+      })
+
+    return () => {
+      active = false
+    }
+  }, [qrToken, reportingApi.apiBaseUrl, tripViewOpen])
+
+  useEffect(() => {
+    if (!tripViewOpen || !qrToken || reportingApi.apiBaseUrl === null || !tripView?.trip?.tripId) {
+      return
+    }
+
+    const closeStream = connectPassengerTripStream(
+      reportingApi.apiBaseUrl,
+      qrToken,
+      tripView.trip.tripId,
+      {
+        onSnapshot: (view) => {
+          setTripView(view)
+          setTripTrackingState("ready")
+          setTripTrackingError(null)
+        },
+        onTrip: (view) => {
+          setTripView(view)
+          setTripTrackingState("ready")
+          setTripTrackingError(null)
+        },
+        onError: () => {
+          setTripTrackingError("Live trip updates are reconnecting.")
+        }
+      }
+    )
+
+    return () => {
+      closeStream()
+    }
+  }, [qrToken, reportingApi.apiBaseUrl, tripView?.trip?.tripId, tripViewOpen])
+
   const canSubmit =
     Boolean(data?.context.reportingAvailable) &&
     reportTypeCode.length > 0 &&
@@ -791,6 +911,15 @@ export default function App() {
     }
   }
 
+  const openTripView = () => {
+    setTripViewOpen(true)
+    setTripTrackingError(null)
+  }
+
+  const closeTripView = () => {
+    setTripViewOpen(false)
+  }
+
   if (loading) {
     return (
       <main className="page">
@@ -843,7 +972,6 @@ export default function App() {
         heading: context.latestDriverLocation.heading
       }
     : null
-  const tripMapCurrentPoint = latestDriverPoint ?? passengerLocation
   const fareCheckResult = getFareCheckResult(context.fare, fareCharged)
   const isDriverLocationFresh =
     context.latestDriverLocation?.recordedAt !== undefined &&
@@ -854,6 +982,28 @@ export default function App() {
     context.fare?.source !== "unavailable" && context.fare?.amount
       ? formatCurrency(context.fare.amount, context.fare.currency)
       : context.fare?.label ?? "No fare reference yet"
+  const activeTripAvailable = Boolean(context.tripId && context.tripStatus === "ongoing")
+  const tripViewTrip = tripView?.trip
+  const tripViewCurrentPoint = tripViewTrip?.location
+    ? {
+        latitude: tripViewTrip.location.latitude,
+        longitude: tripViewTrip.location.longitude,
+        accuracy: tripViewTrip.location.accuracy,
+        heading: tripViewTrip.location.heading
+      }
+    : null
+  const tripViewBreadcrumbs = tripViewTrip?.breadcrumbs.map((point) => ({
+    latitude: point.latitude,
+    longitude: point.longitude
+  })) ?? []
+  const tripViewStatusLabel =
+    tripViewTrip?.tripStatus === "completed"
+      ? "Trip has ended"
+      : tripViewTrip?.trackingStatus === "live"
+        ? "Live tracking active"
+        : tripViewTrip?.trackingStatus === "last_known"
+          ? "Driver offline, showing last known location"
+          : "Waiting for live updates"
 
   const prefillFareReport = () => {
     if (!fareReportType) return
@@ -950,6 +1100,18 @@ export default function App() {
                   <strong>{context.todaName}</strong>
                 </div>
               </div>
+              <div className="driver-trip-action">
+                <button
+                  type="button"
+                  className="trip-view-button"
+                  onClick={openTripView}
+                  disabled={!activeTripAvailable}
+                  aria-disabled={!activeTripAvailable}
+                >
+                  <TripViewIcon />
+                  <span>{activeTripAvailable ? "View Active Trip" : "No active trip right now"}</span>
+                </button>
+              </div>
             </section>
 
             <section className="panel trip-status-panel">
@@ -997,25 +1159,15 @@ export default function App() {
             <section className="panel panel--map">
               <p className="kicker">Trip tracking</p>
               <p className="muted">
-                This map shows the latest known driver location from the shared trip data. The page refreshes automatically while it stays open.
+                Open the active trip view to see the live marker, trip status, timer, and route updates without exposing noisy raw GPS lines on this page.
               </p>
-              <div className="trip-map-shell">
-                <TriketrackMap
-                  currentLocation={tripMapCurrentPoint}
-                  destination={emergencyMapPoint}
-                  mapStyle="street"
-                  showControls
-                  showLocateButton={!latestDriverPoint}
-                  onLocationUpdate={!latestDriverPoint ? setPassengerLocation : undefined}
-                />
-              </div>
               <div className="trip-map-meta">
                 <div>
                   <span>Driver location</span>
                   <strong>
                     {latestDriverPoint
                       ? formatCoordinateLabel(latestDriverPoint)
-                      : formatCoordinateLabel(passengerLocation)}
+                      : "Waiting for driver telemetry"}
                   </strong>
                 </div>
                 <div>
@@ -1232,6 +1384,168 @@ export default function App() {
           </form>
         )}
       </div>
+
+      {tripViewOpen && (
+        <div className="modal-backdrop" role="presentation" onClick={closeTripView}>
+          <section
+            className="confirm-modal trip-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="trip-view-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="trip-modal__close"
+              onClick={closeTripView}
+              aria-label="Close active trip view"
+            >
+              <CloseIcon />
+            </button>
+            <div className="trip-modal__header">
+              <p className="kicker">Active trip</p>
+              <h2 id="trip-view-title">{tripViewTrip ? tripViewStatusLabel : "Loading trip view"}</h2>
+              <p className="muted">
+                {tripViewTrip?.tripStatus === "completed"
+                  ? "Live tracking has stopped for this trip."
+                  : "The map stays focused on the driver marker with short breadcrumb dots only."}
+              </p>
+            </div>
+
+            {tripTrackingState === "loading" && (
+              <div className="trip-modal__empty">
+                <strong>Loading active trip...</strong>
+                <span>Fetching the driver’s live trip data.</span>
+              </div>
+            )}
+
+            {tripTrackingState === "error" && (
+              <div className="trip-modal__empty trip-modal__empty--error">
+                <strong>Unable to load the trip view</strong>
+                <span>{tripTrackingError ?? "Please try again in a moment."}</span>
+              </div>
+            )}
+
+            {tripTrackingState === "ready" && !tripViewTrip && (
+              <div className="trip-modal__empty">
+                <strong>No active trip right now</strong>
+                <span>The driver does not have an ongoing trip at the moment.</span>
+              </div>
+            )}
+
+            {tripTrackingState === "ready" && tripViewTrip && (
+              <>
+                <div className="trip-modal__summary">
+                  <div>
+                    <span>Driver</span>
+                    <strong>{tripView.driverName}</strong>
+                  </div>
+                  <div>
+                    <span>Plate / Unit</span>
+                    <strong>{tripViewTrip.plateOrBodyNumber}</strong>
+                  </div>
+                  <div>
+                    <span>Trip status</span>
+                    <strong>{formatTripStatus(tripViewTrip.tripStatus)}</strong>
+                  </div>
+                  <div>
+                    <span>Live status</span>
+                    <strong>{tripViewStatusLabel}</strong>
+                  </div>
+                  <div>
+                    <span>Trip timer</span>
+                    <strong>{formatDuration(tripViewTrip.timerSeconds)}</strong>
+                  </div>
+                  <div>
+                    <span>Distance traveled</span>
+                    <strong>{formatDistance(tripViewTrip.distanceKilometers)}</strong>
+                  </div>
+                  <div>
+                    <span>Current speed</span>
+                    <strong>{formatSpeedLabel(tripViewTrip.speedKph)}</strong>
+                  </div>
+                  <div>
+                    <span>Last updated</span>
+                    <strong>{formatTimestamp(tripViewTrip.lastUpdatedAt)}</strong>
+                  </div>
+                </div>
+
+                <div className="trip-map-shell trip-map-shell--modal">
+                  <TriketrackMap
+                    currentLocation={tripViewCurrentPoint}
+                    breadcrumbPoints={
+                      tripViewTrip.tripStatus === "ongoing" ? tripViewBreadcrumbs : []
+                    }
+                    routeCoordinates={
+                      tripViewTrip.tripStatus === "completed" &&
+                      tripViewTrip.finalRoute.status === "ready"
+                        ? tripViewTrip.finalRoute.coordinates
+                        : []
+                    }
+                    mapStyle="street"
+                    showControls
+                    showLocateButton={false}
+                  />
+                </div>
+
+                <div className="trip-map-meta">
+                  <div>
+                    <span>Driver marker</span>
+                    <strong>
+                      {tripViewCurrentPoint
+                        ? formatCoordinateLabel(tripViewCurrentPoint)
+                        : "Waiting for location"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Tracking status</span>
+                    <strong>{tripViewStatusLabel}</strong>
+                  </div>
+                  <div>
+                    <span>Route</span>
+                    <strong>{tripViewTrip.routeName ?? "No route assigned yet"}</strong>
+                  </div>
+                  <div>
+                    <span>Trip state</span>
+                    <strong>
+                      {tripViewTrip.tripStatus === "completed"
+                        ? tripViewTrip.finalRoute.status === "ready"
+                          ? "Trip has ended"
+                          : "Final route is being processed"
+                        : tripTrackingError ?? "Live trip updates connected"}
+                    </strong>
+                  </div>
+                </div>
+
+                <div className="trip-modal__actions">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => {
+                      closeTripView()
+                      window.scrollTo({ top: document.body.scrollHeight * 0.45, behavior: "smooth" })
+                    }}
+                  >
+                    Report while viewing
+                  </button>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={handleEmergencyRequest}
+                    disabled={emergencyBusy || emergencyIsActive}
+                  >
+                    {emergencyBusy
+                      ? "Sending emergency..."
+                      : emergencyIsActive
+                        ? emergencyStatusLabel
+                        : "Emergency / Report"}
+                  </button>
+                </div>
+              </>
+            )}
+          </section>
+        </div>
+      )}
 
       {confirmOpen && !submission && selectedCategory && (
         <div

@@ -111,6 +111,10 @@ textarea {
   gap: 14px;
 }
 
+.driver-trip-action {
+  display: grid;
+}
+
 .trip-status-panel,
 .fare-panel {
   display: grid;
@@ -230,6 +234,10 @@ textarea {
 
 .trip-map-shell {
   min-height: 340px;
+}
+
+.trip-map-shell--modal {
+  min-height: 360px;
 }
 
 .trip-map-meta {
@@ -511,6 +519,7 @@ textarea {
   gap: 10px;
 }
 
+.trip-view-button,
 .primary-button,
 .secondary-button,
 .danger-button {
@@ -519,6 +528,29 @@ textarea {
   padding: 0 16px;
   font-weight: 600;
   cursor: pointer;
+}
+
+.trip-view-button {
+  border: 1px solid #d6e4f5;
+  background: linear-gradient(180deg, #f4f9ff 0%, #eef5fd 100%);
+  color: #0f3d67;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 0 18px;
+}
+
+.trip-view-button svg {
+  width: 18px;
+  height: 18px;
+}
+
+.trip-view-button:disabled {
+  border-color: #ececec;
+  background: #f7f7f7;
+  color: #8b8b8b;
+  cursor: not-allowed;
 }
 
 .primary-button {
@@ -618,6 +650,65 @@ textarea {
   box-shadow: 0 22px 48px rgba(0, 0, 0, 0.12);
 }
 
+.trip-modal {
+  width: min(100%, 460px);
+  max-height: min(92vh, 860px);
+  overflow: auto;
+  position: relative;
+}
+
+.trip-modal__close {
+  position: sticky;
+  top: 0;
+  justify-self: end;
+  width: 38px;
+  height: 38px;
+  border: 1px solid #ececec;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #111111;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.trip-modal__close svg {
+  width: 18px;
+  height: 18px;
+}
+
+.trip-modal__header,
+.trip-modal__actions {
+  display: grid;
+  gap: 10px;
+}
+
+.trip-modal__summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.trip-modal__summary div,
+.trip-modal__empty {
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid #efefef;
+  background: #fafafa;
+  display: grid;
+  gap: 6px;
+}
+
+.trip-modal__empty {
+  text-align: center;
+}
+
+.trip-modal__empty--error {
+  border-color: #f0d0d0;
+  background: #fff5f5;
+  color: #8f2929;
+}
+
 .confirm-modal h2 {
   font-size: 1.25rem;
 }
@@ -692,6 +783,10 @@ textarea {
   }
 
   .fare-panel__summary {
+    grid-template-columns: 1fr;
+  }
+
+  .trip-modal__summary {
     grid-template-columns: 1fr;
   }
 }
