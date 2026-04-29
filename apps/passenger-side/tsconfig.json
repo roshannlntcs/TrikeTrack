@@ -4,6 +4,11 @@
     "useDefineForClassFields": true,
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "module": "ESNext",
+    "baseUrl": ".",
+    "paths": {
+      "maplibre-gl": ["./node_modules/maplibre-gl"],
+      "maplibre-gl/*": ["./node_modules/maplibre-gl/*"]
+    },
     "skipLibCheck": true,
     "moduleResolution": "Bundler",
     "allowImportingTsExtensions": false,

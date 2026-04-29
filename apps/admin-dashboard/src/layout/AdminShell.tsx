@@ -26,6 +26,14 @@ import {
 import geofenceRaw from "../data/geofence.geojson?raw"
 import { supabase } from "../lib/supabase"
 import ReportsPage from "../components/ReportsPage"
+import ViolatorProfileStack from "../components/live-map/ViolatorProfileStack"
+import ViolationPopup from "../components/live-map/ViolationPopup"
+import {
+  getViolatorTimestampMs,
+  sortViolatorsByRecency,
+  type LiveMapViolator,
+  type ViolationPopupPosition
+} from "../components/live-map/violator-types"
 import SuperadminPage from "../superadmin/SuperadminPage"
 import TodaManagementPage from "../toda/TodaManagementPage"
 import {
@@ -198,13 +206,6 @@ const DRIVER_PRESENCE_STALE_MS = 2 * 60 * 1000
 type NotificationCategoryFilter = "all" | NotificationItem["kind"]
 type NotificationRecencyFilter = "all" | "24h" | "7d" | "30d"
 type NotificationReadFilter = "all" | "unread" | "read"
-type AdminMapLocation = {
-  latitude: number
-  longitude: number
-  accuracy?: number
-  heading?: number | null
-  timestamp?: number
-}
 
 const ALERT_REASON_PRIORITY: Record<string, number> = {
   EMERGENCY: 100,
@@ -213,6 +214,25 @@ const ALERT_REASON_PRIORITY: Record<string, number> = {
   SPEED: 80,
   OUTSIDE_ROUTE_CORRIDOR: 60
 }
+
+const FRESH_VIOLATION_WINDOW_MS = 30 * 60 * 1000
+const VIOLATOR_DISMISSALS_STORAGE_KEY_PREFIX = "triketrack-admin-violator-dismissals"
+const ACTIVE_VIOLATION_STATUSES = new Set([
+  "active",
+  "unresolved",
+  "pending",
+  "open",
+  "under_review"
+])
+const CLOSED_VIOLATION_STATUSES = new Set(["resolved", "dismissed", "cleared"])
+const OUTSIDE_GEOFENCE_HINTS = [
+  "outside_geofence",
+  "geofence_exit",
+  "geofence",
+  "outside geofence",
+  "outside route corridor",
+  "geofence deviation"
+]
 
 const formatLastSeen = (lastSeenTs: number, nowTs: number) => {
   const diffSeconds = Math.max(0, Math.floor((nowTs - lastSeenTs) / 1000))
@@ -298,38 +318,16 @@ const formatDateTime = (value?: string) => (value ? new Date(value).toLocaleStri
 const formatTripStatus = (value: DashboardTripRecord["tripStatus"]) =>
   value.charAt(0).toUpperCase() + value.slice(1)
 
-const getGeolocationErrorMessage = (error: GeolocationPositionError) => {
-  switch (error.code) {
-    case error.PERMISSION_DENIED:
-      return "Location access was denied."
-    case error.POSITION_UNAVAILABLE:
-      return "Current location is unavailable."
-    case error.TIMEOUT:
-      return "Location request timed out."
-    default:
-      return "Unable to get the current location."
-  }
-}
-
-const createAdminCurrentLocationMarker = () => {
+const createViolationMarkerElement = () => {
   const markerEl = document.createElement("div")
-  markerEl.className = "admin-map-current-location-marker"
-  markerEl.setAttribute("aria-label", "Current location")
+  markerEl.className = "violation-map-focus-marker"
+  markerEl.setAttribute("aria-label", "Outside geofence violation")
+  markerEl.innerHTML = `
+    <span class="violation-map-focus-marker__pulse" aria-hidden="true"></span>
+    <span class="violation-map-focus-marker__core" aria-hidden="true">!</span>
+  `
   return markerEl
 }
-
-const LocateMeIcon = () => (
-  <svg viewBox="0 0 24 24" aria-hidden="true">
-    <path
-      d="M12 3.75v3m0 10.5v3m8.25-8.25h-3M6.75 12h-3m12.45 0a5.2 5.2 0 1 1-10.4 0 5.2 5.2 0 0 1 10.4 0Z"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.8"
-    />
-  </svg>
-)
 
 const isLngLatPair = (value: unknown): value is [number, number] =>
   Array.isArray(value) &&
@@ -451,6 +449,73 @@ const formatViolationCoordinates = (
   alert: Pick<ViolationAlertDetails, "lat" | "lng">
 ) => (hasViolationCoordinates(alert) ? `${alert.lat.toFixed(6)}, ${alert.lng.toFixed(6)}` : undefined)
 
+const normalizeDriverToken = (value?: string | number | null) => {
+  if (value === undefined || value === null) return null
+  const normalized = String(value).trim().toUpperCase()
+  return normalized.length > 0 ? normalized : null
+}
+
+const getViolatorDriverKey = ({
+  driverCode,
+  driverId
+}: {
+  driverCode?: string | null
+  driverId?: string | number | null
+}) => {
+  const normalizedCode = normalizeDriverToken(driverCode)
+  if (normalizedCode) return `code:${normalizedCode}`
+  const normalizedId = normalizeDriverToken(driverId)
+  return normalizedId ? `id:${normalizedId}` : null
+}
+
+const buildDriverTokens = (...values: Array<string | number | null | undefined>) =>
+  [...new Set(values.map((value) => normalizeDriverToken(value)).filter(Boolean))] as string[]
+
+const isOutsideGeofenceViolation = (violation: DashboardViolationRecord) => {
+  const haystack = [
+    violation.violationTypeCode,
+    violation.violationTypeLabel,
+    violation.description
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase()
+
+  return OUTSIDE_GEOFENCE_HINTS.some((hint) => haystack.includes(hint))
+}
+
+const isSameLocalCalendarDay = (leftTs: number, rightTs: number) => {
+  const left = new Date(leftTs)
+  const right = new Date(rightTs)
+  return (
+    left.getFullYear() === right.getFullYear() &&
+    left.getMonth() === right.getMonth() &&
+    left.getDate() === right.getDate()
+  )
+}
+
+const isViolatorActive = (violator: Pick<MapViolatorRecord, "status" | "resolvedAt">) => {
+  const normalizedStatus = violator.status.trim().toLowerCase()
+  if (CLOSED_VIOLATION_STATUSES.has(normalizedStatus)) return false
+  if (!ACTIVE_VIOLATION_STATUSES.has(normalizedStatus)) return false
+  return !violator.resolvedAt
+}
+
+const qualifiesForFreshViolatorStack = (
+  timestamp: string,
+  nowTs: number,
+  hasAnyTodayViolation: boolean
+) => {
+  const violationTs = new Date(timestamp).getTime()
+  if (!Number.isFinite(violationTs)) return false
+  if (isSameLocalCalendarDay(violationTs, nowTs)) return true
+  if (hasAnyTodayViolation) return false
+  return Math.max(0, nowTs - violationTs) <= FRESH_VIOLATION_WINDOW_MS
+}
+
+const getViolatorDismissalKey = (violator: Pick<LiveMapViolator, "source" | "violationId">) =>
+  `${violator.source}:${violator.violationId}`
+
 type AdminShellProps = {
   onLogout: () => void
   adminProfile: AdminProfile
@@ -473,6 +538,15 @@ type LiveDriverLocationRow = {
 type DriverDirectoryRow = DashboardDriverRecord & {
   liveState?: DriverStreamState
   operationalState?: DashboardOperationalDriverRecord
+}
+
+type MapViolatorRecord = LiveMapViolator & {
+  driverTokens: string[]
+}
+
+type DismissedViolatorRecord = {
+  dismissalKey: string
+  dismissedAt: number
 }
 
 const isDriverOnlineNow = (
@@ -795,16 +869,12 @@ export default function AdminShell({
   const ensureGeofenceLayersRef = useRef<((fitToBounds?: boolean) => void) | null>(null)
   const appliedMapStyleRef = useRef<TriketrackMapStyleId>("street")
   const violationFocusMarkerRef = useRef<maplibregl.Marker | null>(null)
-  const currentLocationMarkerRef = useRef<maplibregl.Marker | null>(null)
   const [activePage, setActivePage] = useState<NavKey>(
     adminProfile.role === "superadmin"
       ? "superadmin"
       : "home"
   )
   const [selectedMapStyle, setSelectedMapStyle] = useState<TriketrackMapStyleId>("street")
-  const [currentMapLocation, setCurrentMapLocation] = useState<AdminMapLocation | null>(null)
-  const [mapLocationError, setMapLocationError] = useState<string | null>(null)
-  const [isLocatingMap, setIsLocatingMap] = useState(false)
 
   const [syncStatus, setSyncStatus] = useState<
     "connecting" | "connected" | "disconnected"
@@ -852,6 +922,18 @@ export default function AdminShell({
   const [activeViolationAlert, setActiveViolationAlert] =
     useState<ViolationAlertDetails | null>(null)
   const [violationAlertQueue, setViolationAlertQueue] = useState<ViolationAlertDetails[]>([])
+  const [liveViolatorsByKey, setLiveViolatorsByKey] = useState<Record<string, MapViolatorRecord>>(
+    {}
+  )
+  const [storedViolatorsByKey, setStoredViolatorsByKey] = useState<
+    Record<string, MapViolatorRecord>
+  >({})
+  const [selectedViolatorKey, setSelectedViolatorKey] = useState<string | null>(null)
+  const [selectedViolationPopupPosition, setSelectedViolationPopupPosition] =
+    useState<ViolationPopupPosition | null>(null)
+  const [dismissedViolatorsByDriver, setDismissedViolatorsByDriver] = useState<
+    Record<string, DismissedViolatorRecord>
+  >({})
   const dashboardDataRef = useRef<DashboardDataSnapshot | null>(null)
   const lastDashboardSyncAtRef = useRef<string | null>(null)
   const dashboardRefreshInFlightRef = useRef<Promise<void> | null>(null)
@@ -869,6 +951,139 @@ export default function AdminShell({
   const normalizedSearchQuery = trimmedSearchQuery.toLowerCase()
   const hasSearchQuery = normalizedSearchQuery.length > 0
   const showLiveMapView = activePage === "home" || activePage === "live-map"
+  const showViolatorOverlay = activePage === "live-map"
+  const violatorDismissalsStorageKey = `${VIOLATOR_DISMISSALS_STORAGE_KEY_PREFIX}:${adminProfile.adminId}`
+  const activeViolators = useMemo<MapViolatorRecord[]>(() => {
+    const newestByDriver = new Map<string, MapViolatorRecord>()
+    const candidates = [
+      ...Object.values(liveViolatorsByKey),
+      ...Object.values(storedViolatorsByKey)
+    ].filter((violator) => isViolatorActive(violator) && !violator.uiDismissedByAdmin)
+
+    for (const violator of candidates) {
+      const existing = newestByDriver.get(violator.driverKey)
+      if (!existing) {
+        newestByDriver.set(violator.driverKey, violator)
+        continue
+      }
+
+      const existingTs = getViolatorTimestampMs(existing)
+      const incomingTs = getViolatorTimestampMs(violator)
+      const latest = incomingTs >= existingTs ? violator : existing
+      const fallback = latest === violator ? existing : violator
+
+      newestByDriver.set(violator.driverKey, {
+        ...fallback,
+        ...latest,
+        avatarUrl: latest.avatarUrl ?? fallback.avatarUrl ?? null,
+        locationLabel: latest.locationLabel ?? fallback.locationLabel,
+        driverTokens: [...new Set([...existing.driverTokens, ...violator.driverTokens])]
+      })
+    }
+
+    return [...newestByDriver.values()]
+      .filter((violator) => {
+        const dismissed = dismissedViolatorsByDriver[violator.driverKey]
+        return !dismissed || dismissed.dismissalKey !== getViolatorDismissalKey(violator)
+      })
+      .sort(sortViolatorsByRecency)
+  }, [dismissedViolatorsByDriver, liveViolatorsByKey, storedViolatorsByKey])
+
+  const selectedViolator = useMemo(
+    () => activeViolators.find((violator) => violator.driverKey === selectedViolatorKey) ?? null,
+    [activeViolators, selectedViolatorKey]
+  )
+
+  const upsertStoredViolator = (violator: MapViolatorRecord) => {
+    setStoredViolatorsByKey((current) => ({
+      ...current,
+      [violator.driverKey]: violator
+    }))
+  }
+
+  const upsertLiveViolator = (violator: MapViolatorRecord) => {
+    setLiveViolatorsByKey((current) => {
+      const existing = current[violator.driverKey]
+      if (
+        existing &&
+        existing.violationId === violator.violationId &&
+        existing.latitude === violator.latitude &&
+        existing.longitude === violator.longitude &&
+        existing.timestamp === violator.timestamp
+      ) {
+        return current
+      }
+
+      return {
+        ...current,
+        [violator.driverKey]: violator
+      }
+    })
+  }
+
+  const updateViolatorsByTokens = (
+    tokens: string[],
+    updater: (violator: MapViolatorRecord) => MapViolatorRecord | null
+  ) => {
+    if (tokens.length === 0) return
+    const tokenSet = new Set(tokens.map((token) => token.trim().toUpperCase()))
+
+    const applyUpdate = (current: Record<string, MapViolatorRecord>) => {
+      let changed = false
+      const next: Record<string, MapViolatorRecord> = {}
+
+      for (const [driverKey, violator] of Object.entries(current)) {
+        const matches = violator.driverTokens.some((token) => tokenSet.has(token))
+        if (!matches) {
+          next[driverKey] = violator
+          continue
+        }
+
+        const updated = updater(violator)
+        if (!updated) {
+          changed = true
+          continue
+        }
+
+        changed = changed || updated !== violator
+        next[driverKey] = updated
+      }
+
+      return changed ? next : current
+    }
+
+    setLiveViolatorsByKey(applyUpdate)
+    setStoredViolatorsByKey(applyUpdate)
+  }
+
+  const dismissViolatorProfile = (violator: LiveMapViolator) => {
+    const dismissalKey = getViolatorDismissalKey(violator)
+    setDismissedViolatorsByDriver((current) => ({
+      ...current,
+      [violator.driverKey]: {
+        dismissalKey,
+        dismissedAt: Date.now()
+      }
+    }))
+
+    const removeByDriverKey = (current: Record<string, MapViolatorRecord>) => {
+      const next = { ...current }
+      for (const [driverKey, item] of Object.entries(current)) {
+        if (driverKey === violator.driverKey || item.driverKey === violator.driverKey) {
+          delete next[driverKey]
+        }
+      }
+      return next
+    }
+
+    setLiveViolatorsByKey(removeByDriverKey)
+    setStoredViolatorsByKey(removeByDriverKey)
+
+    if (selectedViolatorKey === violator.driverKey) {
+      setSelectedViolatorKey(null)
+      setSelectedViolationPopupPosition(null)
+    }
+  }
 
   const getDashboardDriverByIdentifier = (driverIdentifier: string | number) => {
     const normalizedIdentifier = String(driverIdentifier).trim().toUpperCase()
@@ -919,32 +1134,63 @@ export default function AdminShell({
 
   const focusViolationOnMap = (alert: ViolationAlertDetails) => {
     if (!hasViolationCoordinates(alert)) return
-    setActivePage("live-map")
     closeViolationAlert()
+    const driverLookupToken = alert.driverCode ?? alert.driverId
+    const driverRecord = driverLookupToken
+      ? getDashboardDriverByIdentifier(driverLookupToken)
+      : undefined
+    const liveState = driverRecord
+      ? driversByIdRef.current[driverRecord.driverCode] ??
+        driversByIdRef.current[String(driverRecord.driverId)]
+      : undefined
+    const driverKey =
+      getViolatorDriverKey({
+        driverCode: alert.driverCode,
+        driverId: alert.driverId
+      }) ?? `alert:${alert.key}`
+    const nextViolator: MapViolatorRecord = {
+      driverKey,
+      driverId:
+        normalizeDriverToken(alert.driverCode) ??
+        (alert.driverId !== undefined ? String(alert.driverId) : "Unknown driver"),
+      driverName: alert.driverName ?? alert.driverCode ?? "Unknown driver",
+      avatarUrl: alert.profileImageUrl ?? null,
+      latitude: alert.lat,
+      longitude: alert.lng,
+      violationType: "Outside geofence",
+      timestamp: alert.timestamp,
+      status: "active",
+      violationId: alert.key,
+      source: alert.source,
+      locationLabel: alert.locationLabel,
+      tripId: alert.tripId,
+      routeName: alert.routeName,
+      resolvedAt: null,
+      driverOnlineStatus: liveState ? "online" : "offline",
+      lastSeenTs: liveState?.lastSeenTs ?? null,
+      uiDismissedByAdmin: false,
+      driverTokens: buildDriverTokens(alert.driverCode, alert.driverId)
+    }
+
+    if (alert.source === "live_geofence") {
+      upsertLiveViolator(nextViolator)
+    } else {
+      upsertStoredViolator(nextViolator)
+    }
+
+    setSelectedViolatorKey(driverKey)
+    setActivePage("live-map")
 
     window.setTimeout(() => {
       const map = mapRef.current
-      if (!map || !hasViolationCoordinates(alert)) return
+      if (!map) return
 
       map.resize()
       map.flyTo({
-        center: [alert.lng, alert.lat],
-        zoom: Math.max(map.getZoom(), 16),
+        center: [nextViolator.longitude, nextViolator.latitude],
+        zoom: Math.max(map.getZoom(), 16.2),
         essential: true
       })
-
-      violationFocusMarkerRef.current?.remove()
-      const markerEl = document.createElement("div")
-      markerEl.className = "violation-map-focus-marker"
-      markerEl.setAttribute("aria-label", "Violation location")
-      violationFocusMarkerRef.current = new maplibregl.Marker({ element: markerEl })
-        .setLngLat([alert.lng, alert.lat])
-        .setPopup(
-          new maplibregl.Popup({ offset: 16 }).setText(
-            `${alert.violationType} | ${alert.driverName ?? alert.driverCode ?? "Unknown driver"}`
-          )
-        )
-        .addTo(map)
     }, 80)
   }
 
@@ -1103,6 +1349,56 @@ export default function AdminShell({
   }, [dashboardData])
 
   useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(violatorDismissalsStorageKey)
+      if (!raw) {
+        setDismissedViolatorsByDriver({})
+        return
+      }
+
+      const parsed = JSON.parse(raw) as Record<
+        string,
+        string | DismissedViolatorRecord
+      >
+      if (!parsed || typeof parsed !== "object") {
+        setDismissedViolatorsByDriver({})
+        return
+      }
+
+      const normalized: Record<string, DismissedViolatorRecord> = {}
+      for (const [driverKey, value] of Object.entries(parsed)) {
+        if (typeof value === "string") {
+          normalized[driverKey] = {
+            dismissalKey: value,
+            dismissedAt: Date.now()
+          }
+          continue
+        }
+
+        if (
+          value &&
+          typeof value === "object" &&
+          typeof value.dismissalKey === "string" &&
+          typeof value.dismissedAt === "number"
+        ) {
+          normalized[driverKey] = value
+        }
+      }
+
+      setDismissedViolatorsByDriver(normalized)
+    } catch {
+      setDismissedViolatorsByDriver({})
+    }
+  }, [violatorDismissalsStorageKey])
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      violatorDismissalsStorageKey,
+      JSON.stringify(dismissedViolatorsByDriver)
+    )
+  }, [dismissedViolatorsByDriver, violatorDismissalsStorageKey])
+
+  useEffect(() => {
     dashboardDriversRef.current = dashboardData?.drivers ?? []
     const identifiers = new Set<string>()
     for (const driver of dashboardData?.drivers ?? []) {
@@ -1218,43 +1514,6 @@ export default function AdminShell({
       active = false
     }
   }, [accessToken, selectedTripForPath])
-
-  useEffect(() => {
-    if (!("geolocation" in navigator)) {
-      setMapLocationError("Geolocation is not supported on this device.")
-      return
-    }
-
-    const watchId = navigator.geolocation.watchPosition(
-      (position) => {
-        setCurrentMapLocation({
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude,
-          accuracy: position.coords.accuracy,
-          heading:
-            typeof position.coords.heading === "number" && Number.isFinite(position.coords.heading)
-              ? position.coords.heading
-              : null,
-          timestamp: position.timestamp
-        })
-        setMapLocationError(null)
-        setIsLocatingMap(false)
-      },
-      (error) => {
-        setMapLocationError(getGeolocationErrorMessage(error))
-        setIsLocatingMap(false)
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 15000,
-        maximumAge: 10000
-      }
-    )
-
-    return () => {
-      navigator.geolocation.clearWatch(watchId)
-    }
-  }, [])
 
   useEffect(() => {
     if (!mapEl.current) return
@@ -1615,7 +1874,20 @@ export default function AdminShell({
       markers.delete(driverIdentifier)
     }
 
-    const removeDriverLivePresence = (identifiers: string[]) => {
+    const updateViolatorPresence = (
+      identifiers: string[],
+      driverOnlineStatus: "online" | "offline",
+      lastSeenTs?: number
+    ) => {
+      updateViolatorsByTokens(identifiers, (violator) => ({
+        ...violator,
+        driverOnlineStatus,
+        lastSeenTs: lastSeenTs ?? violator.lastSeenTs ?? null
+      }))
+    }
+
+    const removeDriverLivePresence = (identifiers: string[], lastSeenTs?: number) => {
+      updateViolatorPresence(identifiers, "offline", lastSeenTs)
       for (const identifier of identifiers) {
         removeDriverMarker(identifier)
         removeDriverState(identifier)
@@ -1699,10 +1971,40 @@ export default function AdminShell({
           activeTripId !== undefined ||
           operationalState?.operationalStatus === "on_trip" ||
           trip?.tripStatus === "ongoing"
+        const driverTokens = buildDriverTokens(driver?.driverCode ?? event.driverId, driver?.driverId)
+        const driverKey = getViolatorDriverKey({
+          driverCode: driver?.driverCode ?? event.driverId,
+          driverId: driver?.driverId
+        })
+        const previousInside = driverInsideStateRef.current[event.driverId]
         updateMarker(event, inside)
         upsertDriverState(event, !inside && hasActiveTrip)
+        updateViolatorPresence(driverTokens, "online", event.ts)
 
-        const previousInside = driverInsideStateRef.current[event.driverId]
+        if (!inside && hasActiveTrip && driverKey && previousInside !== false) {
+          upsertLiveViolator({
+            driverKey,
+            driverId: driver?.driverCode ?? event.driverId,
+            driverName: driver ? `${driver.firstName} ${driver.lastName}` : event.driverId,
+            avatarUrl: driver?.avatarUrl ?? null,
+            latitude: event.lat,
+            longitude: event.lng,
+            violationType: "Outside geofence",
+            timestamp: new Date(event.ts).toISOString(),
+            status: "active",
+            violationId: `live-${event.driverId}-${activeTripId ?? "no-trip"}-${event.ts}`,
+            source: "live_geofence",
+            locationLabel: formatViolationCoordinates({ lat: event.lat, lng: event.lng }),
+            tripId: activeTripId,
+            routeName: trip?.routeName ?? operationalState?.activeRouteName,
+            resolvedAt: null,
+            driverOnlineStatus: "online",
+            lastSeenTs: event.ts,
+            uiDismissedByAdmin: false,
+            driverTokens
+          })
+        }
+
         driverInsideStateRef.current[event.driverId] = inside
         if (inside || previousInside === false || !hasActiveTrip) return
 
@@ -1748,8 +2050,9 @@ export default function AdminShell({
 
       const applyLocationRow = async (row: LiveDriverLocationRow) => {
         const identifiers = [row.driver_code.trim().toUpperCase(), String(row.driver_id)]
+        const lastSeenTs = new Date(row.recorded_at ?? row.updated_at).getTime()
         if (!isLiveLocationRowOnline(row)) {
-          removeDriverLivePresence(identifiers)
+          removeDriverLivePresence(identifiers, lastSeenTs)
           return
         }
 
@@ -1998,8 +2301,6 @@ export default function AdminShell({
       for (const marker of markers.values()) {
         marker.remove()
       }
-      currentLocationMarkerRef.current?.remove()
-      currentLocationMarkerRef.current = null
       violationFocusMarkerRef.current?.remove()
       violationFocusMarkerRef.current = null
       map.remove()
@@ -2033,64 +2334,69 @@ export default function AdminShell({
 
   useEffect(() => {
     const map = mapRef.current
-    if (!map || !currentMapLocation) return
+    if (!map || !selectedViolator || !showLiveMapView) {
+      if (!selectedViolator) {
+        violationFocusMarkerRef.current?.remove()
+        violationFocusMarkerRef.current = null
+      }
+      setSelectedViolationPopupPosition(null)
+      return
+    }
 
-    const lngLat: [number, number] = [
-      currentMapLocation.longitude,
-      currentMapLocation.latitude
-    ]
-
-    if (!currentLocationMarkerRef.current) {
-      currentLocationMarkerRef.current = new maplibregl.Marker({
-        element: createAdminCurrentLocationMarker()
+    const lngLat: [number, number] = [selectedViolator.longitude, selectedViolator.latitude]
+    if (!violationFocusMarkerRef.current) {
+      violationFocusMarkerRef.current = new maplibregl.Marker({
+        element: createViolationMarkerElement()
       })
         .setLngLat(lngLat)
-        .setPopup(new maplibregl.Popup({ offset: 16 }).setText("Your current location"))
         .addTo(map)
+    } else {
+      violationFocusMarkerRef.current.setLngLat(lngLat)
+    }
+
+    const syncPopupPosition = () => {
+      const point = map.project(lngLat)
+      const container = map.getContainer()
+      const align = point.x > container.clientWidth - 280 ? "left" : "right"
+      setSelectedViolationPopupPosition({
+        x: Math.round(point.x),
+        y: Math.round(point.y),
+        align
+      })
+    }
+
+    syncPopupPosition()
+    map.on("move", syncPopupPosition)
+    map.on("zoom", syncPopupPosition)
+    map.on("resize", syncPopupPosition)
+
+    return () => {
+      map.off("move", syncPopupPosition)
+      map.off("zoom", syncPopupPosition)
+      map.off("resize", syncPopupPosition)
+    }
+  }, [selectedViolator, showLiveMapView])
+
+  const handleViolatorSelect = (violator: LiveMapViolator) => {
+    if (selectedViolatorKey === violator.driverKey) {
+      setSelectedViolatorKey(null)
       return
     }
 
-    currentLocationMarkerRef.current.setLngLat(lngLat)
-  }, [currentMapLocation])
-
-  const handleLocateMap = () => {
-    if (!("geolocation" in navigator)) {
-      setMapLocationError("Geolocation is not supported on this device.")
-      return
-    }
-
-    setIsLocatingMap(true)
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const nextLocation = {
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude,
-          accuracy: position.coords.accuracy,
-          heading:
-            typeof position.coords.heading === "number" && Number.isFinite(position.coords.heading)
-              ? position.coords.heading
-              : null,
-          timestamp: position.timestamp
-        }
-        setCurrentMapLocation(nextLocation)
-        setMapLocationError(null)
-        setIsLocatingMap(false)
-        mapRef.current?.flyTo({
-          center: [nextLocation.longitude, nextLocation.latitude],
-          zoom: Math.max(mapRef.current.getZoom(), 15.5),
-          essential: true
-        })
-      },
-      (error) => {
-        setMapLocationError(getGeolocationErrorMessage(error))
-        setIsLocatingMap(false)
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 15000,
-        maximumAge: 5000
-      }
-    )
+    setSelectedViolatorKey(violator.driverKey)
+    setActivePage("live-map")
+    window.setTimeout(() => {
+      const map = mapRef.current
+      if (!map) return
+      map.resize()
+      map.flyTo({
+        center: [violator.longitude, violator.latitude],
+        zoom: Math.max(map.getZoom(), 16.2),
+        speed: 0.95,
+        curve: 1.3,
+        essential: true
+      })
+    }, 80)
   }
 
   const operationalDriversById = useMemo(() => {
@@ -2310,6 +2616,141 @@ export default function AdminShell({
 
   useEffect(() => {
     const violations = dashboardData?.recentViolations ?? []
+    const outsideGeofenceViolations = violations
+      .filter((violation) => isOutsideGeofenceViolation(violation))
+      .map((violation) => {
+        const resolvedAt =
+          (violation as DashboardViolationRecord & { resolvedAt?: string; resolved_at?: string })
+            .resolvedAt ??
+          (violation as DashboardViolationRecord & { resolvedAt?: string; resolved_at?: string })
+            .resolved_at ??
+          null
+
+        return {
+          violation,
+          resolvedAt,
+          active: isViolatorActive({ status: violation.status, resolvedAt })
+        }
+      })
+
+    const hasAnyTodayViolation = outsideGeofenceViolations.some(
+      ({ violation, active }) =>
+        active && isSameLocalCalendarDay(new Date(violation.detectedAt).getTime(), clockTs)
+    )
+    const closedStoredDismissalKeys = new Set(
+      outsideGeofenceViolations
+        .filter(({ active }) => !active)
+        .map(({ violation }) =>
+          getViolatorDismissalKey({
+            source: violation.alertSource,
+            violationId: String(violation.violationId)
+          })
+        )
+    )
+
+    setStoredViolatorsByKey((current) => {
+      const next = { ...current }
+      let changed = false
+
+      for (const [driverKey, violator] of Object.entries(current)) {
+        if (
+          (violator.source === "system_violation" || violator.source === "driver_violation") &&
+          closedStoredDismissalKeys.has(getViolatorDismissalKey(violator))
+        ) {
+          delete next[driverKey]
+          changed = true
+        }
+      }
+
+      for (const { violation, resolvedAt, active } of outsideGeofenceViolations) {
+        if (!active) continue
+
+        const driver = violation.driverId
+          ? dashboardData?.drivers.find((item) => item.driverId === violation.driverId)
+          : undefined
+        const operationalState = violation.driverId
+          ? dashboardData?.operationalDrivers.find((item) => item.driverId === violation.driverId)
+          : undefined
+        const liveState = driver
+          ? driversByIdRef.current[driver.driverCode] ??
+            driversByIdRef.current[String(driver.driverId)]
+          : undefined
+        const latitude =
+          violation.latitude ?? operationalState?.latitude ?? liveState?.latestPoint.lat
+        const longitude =
+          violation.longitude ?? operationalState?.longitude ?? liveState?.latestPoint.lng
+        if (typeof latitude !== "number" || typeof longitude !== "number") continue
+
+        const driverKey = getViolatorDriverKey({
+          driverCode: violation.driverCode ?? driver?.driverCode,
+          driverId: violation.driverId
+        })
+        if (!driverKey) continue
+
+        const nextViolator: MapViolatorRecord = {
+          driverKey,
+          driverId:
+            violation.driverCode ?? driver?.driverCode ?? String(violation.driverId ?? "N/A"),
+          driverName:
+            violation.driverName ??
+            (driver ? `${driver.firstName} ${driver.lastName}` : "Unknown driver"),
+          avatarUrl: driver?.avatarUrl ?? null,
+          latitude,
+          longitude,
+          violationType: "Outside geofence",
+          timestamp: violation.detectedAt,
+          status: violation.status,
+          violationId: String(violation.violationId),
+          source: violation.alertSource,
+          locationLabel:
+            violation.locationLabel ?? formatViolationCoordinates({ lat: latitude, lng: longitude }),
+          tripId: violation.tripId,
+          routeName: violation.routeName ?? operationalState?.activeRouteName,
+          resolvedAt,
+          driverOnlineStatus: liveState ? "online" : "offline",
+          lastSeenTs: liveState?.lastSeenTs ?? null,
+          uiDismissedByAdmin: false,
+          driverTokens: buildDriverTokens(
+            violation.driverCode ?? driver?.driverCode,
+            violation.driverId
+          )
+        }
+
+        const dismissalKey = getViolatorDismissalKey(nextViolator)
+        const existing = current[driverKey]
+        const keepExistingViolation =
+          existing && getViolatorDismissalKey(existing) === dismissalKey
+        const qualifiesNow =
+          keepExistingViolation ||
+          qualifiesForFreshViolatorStack(nextViolator.timestamp, clockTs, hasAnyTodayViolation)
+        const dismissedState = dismissedViolatorsByDriver[driverKey]
+        const isCurrentViolationDismissed =
+          dismissedState?.dismissalKey === dismissalKey
+
+        if (!qualifiesNow || isCurrentViolationDismissed) {
+          continue
+        }
+
+        const existingByDriver = next[driverKey]
+        if (
+          existingByDriver &&
+          existingByDriver.violationId === nextViolator.violationId &&
+          existingByDriver.timestamp === nextViolator.timestamp &&
+          existingByDriver.latitude === nextViolator.latitude &&
+          existingByDriver.longitude === nextViolator.longitude &&
+          existingByDriver.driverOnlineStatus === nextViolator.driverOnlineStatus &&
+          existingByDriver.lastSeenTs === nextViolator.lastSeenTs
+        ) {
+          continue
+        }
+
+        next[driverKey] = nextViolator
+        changed = true
+      }
+
+      return changed ? next : current
+    })
+
     const nextKnownKeys = new Set(
       violations.map((item) => getStoredViolationKey(item.alertSource, item.violationId))
     )
@@ -2380,7 +2821,21 @@ export default function AdminShell({
       })
       shownViolationPopupKeysRef.current.add(violationKey)
     }
-  }, [dashboardData?.recentViolations, dashboardData?.drivers, dashboardData?.operationalDrivers, dashboardData?.recentTrips])
+  }, [
+    clockTs,
+    dashboardData?.recentViolations,
+    dashboardData?.drivers,
+    dashboardData?.operationalDrivers,
+    dashboardData?.recentTrips,
+    dismissedViolatorsByDriver,
+    driversById
+  ])
+
+  useEffect(() => {
+    if (!selectedViolatorKey) return
+    if (activeViolators.some((violator) => violator.driverKey === selectedViolatorKey)) return
+    setSelectedViolatorKey(null)
+  }, [activeViolators, selectedViolatorKey])
 
   useEffect(() => {
     const closeStream = connectAdminEmergencyStream(accessToken, {
@@ -3219,19 +3674,22 @@ export default function AdminShell({
                     )
                   })}
                 </div>
-                <button
-                  type="button"
-                  className="admin-map-locate-button"
-                  onClick={handleLocateMap}
-                  aria-label="Center map on current location"
-                >
-                  <LocateMeIcon />
-                  <span>{isLocatingMap ? "Locating..." : "Locate me"}</span>
-                </button>
               </div>
               <div className="admin-map" ref={mapEl} />
-              {mapLocationError && (
-                <div className="admin-map-status admin-map-status--error">{mapLocationError}</div>
+              {showViolatorOverlay && (
+                <ViolatorProfileStack
+                  violators={activeViolators}
+                  selectedDriverKey={selectedViolatorKey}
+                  onSelect={handleViolatorSelect}
+                  onDismiss={dismissViolatorProfile}
+                />
+              )}
+              {showViolatorOverlay && selectedViolator && selectedViolationPopupPosition && (
+                <ViolationPopup
+                  violator={selectedViolator}
+                  position={selectedViolationPopupPosition}
+                  onClose={() => setSelectedViolatorKey(null)}
+                />
               )}
             </section>
 
@@ -4139,7 +4597,7 @@ export default function AdminShell({
                       activeViolationInitials
                     )}
                   </div>
-                  <div>
+                  <div className="violation-modal__driver-copy">
                     <strong>{activeViolationDriverLabel}</strong>
                     <span>{activeViolationAlert.driverCode ?? "No driver code"}</span>
                   </div>

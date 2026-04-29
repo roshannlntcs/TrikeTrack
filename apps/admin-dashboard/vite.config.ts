@@ -57,6 +57,14 @@ const mockLocationsPlugin = (): Plugin => ({
 })
 
 export default defineConfig({
+  resolve: {
+    alias: [
+      {
+        find: /^maplibre-gl$/,
+        replacement: path.resolve(__dirname, "node_modules/maplibre-gl/dist/maplibre-gl.js")
+      }
+    ]
+  },
   server: {
     proxy: {
       "/api/auth": {
