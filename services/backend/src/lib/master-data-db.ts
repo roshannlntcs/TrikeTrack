@@ -433,6 +433,7 @@ const T_TODA_SELECT = `
     ON b.barangay_id = t.barangay_id
   LEFT JOIN public.drivers d
     ON d.toda_id = t.toda_id
+    AND d.deleted_at IS NULL
   LEFT JOIN public.tricycles tr
     ON tr.toda_id = t.toda_id
 `
@@ -473,6 +474,12 @@ type DriverQrStateRow = {
   qr_id: number | null
   qr_status: QrStatus | null
 }
+
+const driverNeedsActiveQr = (row: {
+  qr_id: number | null
+  qr_token: string | null
+  qr_status: QrStatus | null
+}) => row.qr_id === null || row.qr_token === null || row.qr_status !== "active"
 
 const generateDriverQrToken = () => randomBytes(DRIVER_QR_TOKEN_BYTES).toString("base64url")
 
@@ -539,7 +546,8 @@ const ensureDriverQrCode = async (
     throw new Error("Driver not found.")
   }
 
-  let nextQrId = state.qr_id === null || state.qr_status === null ? null : Number(state.qr_id)
+  let nextQrId =
+    state.qr_id === null || state.qr_status !== "active" ? null : Number(state.qr_id)
   if (nextQrId === null) {
     nextQrId = await createDriverQrCode(client, driverId, tricycleId)
   } else {
@@ -610,7 +618,7 @@ const regenerateDriverQrCode = async (
 }
 
 const backfillDriverQrCodes = async (rows: DriverRow[]) => {
-  const missingRows = rows.filter((row) => row.qr_id === null || row.qr_token === null)
+  const missingRows = rows.filter(driverNeedsActiveQr)
   if (missingRows.length === 0) return false
 
   await withTransaction(async (client) => {
@@ -718,17 +726,36 @@ const getTodaById = async (todaId: number) => {
 }
 
 export const getDriverById = async (driverId: number) => {
-  const result = await query<DriverRow>(
-    `
-      ${D_DRIVER_SELECT}
-      WHERE d.driver_id = $1
-      LIMIT 1
-    `,
-    [driverId]
-  )
+  const loadDriver = async () => {
+    const result = await query<DriverRow>(
+      `
+        ${D_DRIVER_SELECT}
+        WHERE d.driver_id = $1
+          AND d.deleted_at IS NULL
+        LIMIT 1
+      `,
+      [driverId]
+    )
 
-  const row = result.rows[0]
+    return result.rows[0]
+  }
+
+  let row = await loadDriver()
   if (!row) throw new Error("Driver not found.")
+
+  if (driverNeedsActiveQr(row)) {
+    await withTransaction(async (client) => {
+      await ensureDriverQrCode(
+        client,
+        Number(row.driver_id),
+        row.tricycle_id === null ? null : Number(row.tricycle_id)
+      )
+    })
+
+    row = await loadDriver()
+    if (!row) throw new Error("Driver not found.")
+  }
+
   return mapDriver(row)
 }
 
@@ -804,6 +831,7 @@ export const listMasterData = async (): Promise<MasterDataSnapshot> => {
     query<DriverRow>(
       `
         ${D_DRIVER_SELECT}
+        WHERE d.deleted_at IS NULL
         ORDER BY b.barangay_name ASC, t.toda_name ASC, d.last_name ASC, d.first_name ASC
       `
     ),
@@ -826,6 +854,7 @@ export const listMasterData = async (): Promise<MasterDataSnapshot> => {
         await query<DriverRow>(
           `
             ${D_DRIVER_SELECT}
+            WHERE d.deleted_at IS NULL
             ORDER BY b.barangay_name ASC, t.toda_name ASC, d.last_name ASC, d.first_name ASC
           `
         )
@@ -868,6 +897,9 @@ const buildScopeClause = (
   return { clause: "WHERE 1 = 0", params: [] as unknown[] }
 }
 
+const appendSqlCondition = (clause: string, condition: string) =>
+  clause ? `${clause} AND ${condition}` : `WHERE ${condition}`
+
 export const listMasterDataForAdmin = async (
   profile: AdminProfile
 ): Promise<MasterDataSnapshot> => {
@@ -890,6 +922,7 @@ export const listMasterDataForAdmin = async (
   const driverScope = buildScopeClause(profile, "d.toda_id", "b.barangay_id")
   const tricycleScope = buildScopeClause(profile, "tr.toda_id", "b.barangay_id")
   const routeScope = buildScopeClause(profile, "r.toda_id", "b.barangay_id")
+  const activeDriverScope = appendSqlCondition(driverScope.clause, "d.deleted_at IS NULL")
 
   const [administrators, barangays, todas, initialDrivers, tricycles, routes] = await Promise.all([
     query<AdministratorRow>(
@@ -921,7 +954,7 @@ export const listMasterDataForAdmin = async (
     query<DriverRow>(
       `
         ${D_DRIVER_SELECT}
-        ${driverScope.clause}
+        ${activeDriverScope}
         ORDER BY b.barangay_name ASC, t.toda_name ASC, d.last_name ASC, d.first_name ASC
       `,
       driverScope.params
@@ -949,7 +982,7 @@ export const listMasterDataForAdmin = async (
         await query<DriverRow>(
           `
             ${D_DRIVER_SELECT}
-            ${driverScope.clause}
+            ${activeDriverScope}
             ORDER BY b.barangay_name ASC, t.toda_name ASC, d.last_name ASC, d.first_name ASC
           `,
           driverScope.params
@@ -1253,6 +1286,7 @@ export const deleteToda = async (todaId: number) => {
         SELECT COUNT(*)::text AS count
         FROM public.drivers
         WHERE toda_id = $1
+          AND deleted_at IS NULL
       `,
       [todaId]
     ),
@@ -1428,13 +1462,55 @@ export const updateDriver = async (driverId: number, input: UpdateDriverInput) =
 export const deleteDriver = async (driverId: number) => {
   await ensureDatabaseReady()
 
-  await query(
-    `
-      DELETE FROM public.drivers
-      WHERE driver_id = $1
-    `,
-    [driverId]
-  )
+  await withTransaction(async (client) => {
+    const existing = await client.query<{ driver_id: number }>(
+      `
+        SELECT driver_id
+        FROM public.drivers
+        WHERE driver_id = $1
+          AND deleted_at IS NULL
+        LIMIT 1
+      `,
+      [driverId]
+    )
+
+    if (!existing.rows[0]) {
+      throw new Error("Driver not found.")
+    }
+
+    await client.query(
+      `
+        UPDATE public.qr_codes
+        SET
+          status = 'revoked',
+          expires_at = COALESCE(expires_at, NOW())
+        WHERE driver_id = $1
+          AND status = 'active'
+      `,
+      [driverId]
+    )
+
+    await client.query(
+      `
+        DELETE FROM public.driver_locations
+        WHERE driver_id = $1
+      `,
+      [driverId]
+    )
+
+    await client.query(
+      `
+        UPDATE public.drivers
+        SET
+          deleted_at = NOW(),
+          status = 'inactive',
+          tricycle_id = NULL,
+          qr_id = NULL
+        WHERE driver_id = $1
+      `,
+      [driverId]
+    )
+  })
 }
 
 export const createTricycle = async (input: CreateTricycleInput) => {
