@@ -11,7 +11,8 @@ const isNonEmptyString = (value: unknown): value is string =>
 const ALLOWED_EVIDENCE_MIME_TYPES = new Set([
   "image/jpeg",
   "image/png",
-  "image/webp"
+  "image/webp",
+  "application/pdf"
 ])
 const MAX_EVIDENCE_BYTES = 5 * 1024 * 1024
 
@@ -170,24 +171,24 @@ export async function POST(request: Request) {
 
   if (rawEvidenceImage) {
     if (!isNonEmptyString(rawEvidenceImage.dataUrl) || !isNonEmptyString(rawEvidenceImage.mimeType)) {
-      return invalid(request, "evidenceImage must include a valid image payload.")
+      return invalid(request, "evidenceImage must include a valid file payload.")
     }
 
     const mimeType = rawEvidenceImage.mimeType.trim().toLowerCase()
     if (!ALLOWED_EVIDENCE_MIME_TYPES.has(mimeType)) {
-      return invalid(request, "Only JPG, PNG, or WEBP evidence images are supported.")
+      return invalid(request, "Only JPG, PNG, WEBP, or PDF evidence files are supported.")
     }
 
     const dataUrl = rawEvidenceImage.dataUrl.trim()
     const prefix = `data:${mimeType};base64,`
     if (!dataUrl.startsWith(prefix)) {
-      return invalid(request, "Evidence image payload is invalid.")
+      return invalid(request, "Evidence file payload is invalid.")
     }
 
     const base64Payload = dataUrl.slice(prefix.length)
     const estimatedBytes = Math.floor((base64Payload.length * 3) / 4)
     if (!base64Payload || estimatedBytes <= 0 || estimatedBytes > MAX_EVIDENCE_BYTES) {
-      return invalid(request, "Evidence image must be 5MB or smaller.")
+      return invalid(request, "Evidence file must be 5MB or smaller.")
     }
 
     evidenceImage = {

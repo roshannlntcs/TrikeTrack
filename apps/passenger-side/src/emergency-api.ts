@@ -85,7 +85,12 @@ const buildEmergencyBaseUrl = (apiBaseUrl: string) =>
 
 export const createPassengerEmergency = async (
   apiBaseUrl: string,
-  qrToken: string
+  qrToken: string,
+  location: {
+    latitude: number
+    longitude: number
+    accuracy?: number
+  }
 ) => {
   const response = await fetch(buildEmergencyBaseUrl(apiBaseUrl), {
     method: "POST",
@@ -94,6 +99,9 @@ export const createPassengerEmergency = async (
     },
     body: JSON.stringify({
       qrToken,
+      latitude: location.latitude,
+      longitude: location.longitude,
+      accuracy: location.accuracy,
       deviceInfo: {
         submittedAt: new Date().toISOString(),
         userAgent: navigator.userAgent,

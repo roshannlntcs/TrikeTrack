@@ -5,12 +5,11 @@
     "useDefineForClassFields": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
-    "baseUrl": ".",
     "paths": {
       "maplibre-gl": ["./node_modules/maplibre-gl"],
       "maplibre-gl/*": ["./node_modules/maplibre-gl/*"]
     },
-    "types": ["vite/client"],
+    "types": ["vite/client", "vite-plugin-pwa/client"],
     "skipLibCheck": true,
 
     /* Bundler mode */

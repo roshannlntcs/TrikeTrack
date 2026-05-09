@@ -1,0 +1,18 @@
+{
+  "name": "TRIKETRACK Passenger",
+  "short_name": "TRIKETRACK",
+  "description": "Passenger live trip tracking and reporting for TRIKETRACK.",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#0b7cff",
+  "background_color": "#ffffff",
+  "start_url": "/",
+  "icons": [
+    {
+      "src": "/triketrack-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

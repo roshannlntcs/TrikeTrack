@@ -125,6 +125,24 @@ export async function POST(request: Request) {
     return invalid(request, "qrToken is required.")
   }
 
+  const latitude = Number(payload.latitude)
+  const longitude = Number(payload.longitude)
+  const accuracy =
+    payload.accuracy === undefined || payload.accuracy === null
+      ? undefined
+      : Number(payload.accuracy)
+
+  if (
+    !Number.isFinite(latitude) ||
+    latitude < -90 ||
+    latitude > 90 ||
+    !Number.isFinite(longitude) ||
+    longitude < -180 ||
+    longitude > 180
+  ) {
+    return invalid(request, "Passenger location is required to send an emergency alert.")
+  }
+
   const deviceInfo =
     payload.deviceInfo && typeof payload.deviceInfo === "object" && !Array.isArray(payload.deviceInfo)
       ? {
@@ -142,6 +160,9 @@ export async function POST(request: Request) {
   try {
     const emergency = await createPassengerEmergencyAlert({
       qrToken: payload.qrToken.trim(),
+      latitude,
+      longitude,
+      accuracy: Number.isFinite(accuracy) ? accuracy : undefined,
       deviceInfo
     })
 

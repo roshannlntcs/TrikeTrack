@@ -48,6 +48,9 @@ export type EmergencyAlertRealtimeEvent = {
 
 export type CreatePassengerEmergencyAlertInput = {
   qrToken: string
+  latitude: number
+  longitude: number
+  accuracy?: number
   deviceInfo?: Record<string, unknown>
 }
 
@@ -419,6 +422,8 @@ export const createPassengerEmergencyAlert = async (
           source,
           alert_type,
           status,
+          latitude,
+          longitude,
           location_label,
           device_info,
           updated_at
@@ -438,6 +443,8 @@ export const createPassengerEmergencyAlert = async (
           'pending_admin',
           $10,
           $11,
+          $12,
+          $13,
           NOW()
         )
         RETURNING emergency_id
@@ -452,8 +459,13 @@ export const createPassengerEmergencyAlert = async (
         context.route_id,
         context.toda_id,
         context.barangay_id,
-        context.route_name,
-        input.deviceInfo ?? {}
+        input.latitude,
+        input.longitude,
+        `${input.latitude.toFixed(5)}, ${input.longitude.toFixed(5)}`,
+        {
+          ...(input.deviceInfo ?? {}),
+          locationAccuracyMeters: input.accuracy
+        }
       ]
     )
 

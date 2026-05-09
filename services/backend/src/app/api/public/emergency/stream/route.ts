@@ -2,7 +2,7 @@ import {
   getEmergencyAlertsChannelName,
   getPassengerEmergencyAlertByTrackingKey
 } from "../../../../../lib/emergency-alerts-db"
-import { getPool } from "../../../../../lib/database"
+import { getListenPool } from "../../../../../lib/database"
 
 export const dynamic = "force-dynamic"
 export const runtime = "nodejs"
@@ -85,7 +85,7 @@ export async function GET(request: Request) {
     })
   }
 
-  const client = await getPool().connect()
+  const client = await getListenPool().connect()
   await client.query(`LISTEN ${getEmergencyAlertsChannelName()}`)
 
   let keepAliveTimer: ReturnType<typeof setInterval> | null = null

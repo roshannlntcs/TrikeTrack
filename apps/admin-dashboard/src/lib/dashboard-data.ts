@@ -145,16 +145,33 @@ export type DashboardTripRecord = {
 
 export type DashboardNotificationRecord = {
   notificationKey: string
-  kind: "violation" | "trip" | "driver" | "emergency" | "appeal"
+  kind: "violation" | "trip" | "driver" | "emergency" | "appeal" | "password_reset"
   page: "alerts" | "trip-logs" | "drivers" | "reports"
   title: string
   body: string
   timestamp: string
   priority: number
   tone: "danger" | "warn" | "info"
-  sourceEntityType: "alert" | "trip" | "driver" | "emergency" | "appeal"
+  sourceEntityType: "alert" | "trip" | "driver" | "emergency" | "appeal" | "password_reset"
   sourceEntityId: string
   isRead: boolean
+}
+
+export type DriverPasswordResetRequestRecord = {
+  requestId: number
+  driverId: number
+  driverCode: string
+  driverName: string
+  todaId: number
+  todaName: string
+  barangayId: number
+  barangayName: string
+  status: "pending" | "approved" | "denied" | "completed" | "expired"
+  requestedAt: string
+  approvedAt?: string
+  approvedBy?: number
+  expiresAt?: string
+  resolvedAt?: string
 }
 
 export type DashboardDataSnapshot = {
@@ -164,6 +181,7 @@ export type DashboardDataSnapshot = {
   recentViolations: DashboardViolationRecord[]
   recentEmergencies: DashboardEmergencyRecord[]
   recentTrips: DashboardTripRecord[]
+  passwordResetRequests: DriverPasswordResetRequestRecord[]
   notifications: DashboardNotificationRecord[]
   counts: {
     drivers: number
@@ -205,6 +223,22 @@ type TripPathResponse = {
   ok?: boolean
   message?: string
   data?: TripPathRecord | null
+}
+
+type ViolationStatusUpdateResponse = {
+  ok?: boolean
+  message?: string
+}
+
+type PasswordResetDecisionResponse = {
+  ok?: boolean
+  message?: string
+  data?: {
+    request: DriverPasswordResetRequestRecord
+    temporaryPassword?: string
+    pushNotificationSent?: boolean
+    pushNotificationError?: string
+  }
 }
 
 const DASHBOARD_CACHE_KEY = "dashboard-data"
@@ -303,4 +337,54 @@ export const markDashboardNotificationsRead = async (
       payload.message ?? `Notification API returned HTTP ${response.status}.`
     )
   }
+}
+
+export const updateViolationAlertStatus = async (
+  accessToken: string,
+  alertSource: DashboardViolationRecord["alertSource"],
+  violationId: DashboardViolationRecord["violationId"],
+  status: Extract<DashboardViolationRecord["status"], "open" | "under_review" | "resolved">
+) => {
+  const response = await fetch("/api/admin/violations", {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`
+    },
+    body: JSON.stringify({
+      alertSource,
+      violationId,
+      status
+    })
+  })
+
+  const payload = (await response.json().catch(() => ({}))) as ViolationStatusUpdateResponse
+  if (!response.ok) {
+    throw new Error(payload.message ?? `Violation API returned HTTP ${response.status}.`)
+  }
+}
+
+export const decideDriverPasswordResetRequest = async (
+  accessToken: string,
+  requestId: number,
+  decision: "approve" | "deny"
+) => {
+  const response = await fetch("/api/admin/driver-password-resets", {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`
+    },
+    body: JSON.stringify({
+      requestId,
+      decision
+    })
+  })
+
+  const payload = (await response.json().catch(() => ({}))) as PasswordResetDecisionResponse
+  if (!response.ok || !payload.data) {
+    throw new Error(payload.message ?? `Password reset API returned HTTP ${response.status}.`)
+  }
+
+  return payload.data
 }

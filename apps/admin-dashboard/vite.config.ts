@@ -5,6 +5,9 @@ import fs from "node:fs"
 import path from "node:path"
 
 const API_PROXY_TARGET = process.env.VITE_PROXY_TARGET || "http://127.0.0.1:4000"
+const VERCEL_URL = process.env.VITE_VERCEL_URL ?? process.env.VERCEL_URL
+const VERCEL_PROJECT_PRODUCTION_URL =
+  process.env.VITE_VERCEL_PROJECT_PRODUCTION_URL ?? process.env.VERCEL_PROJECT_PRODUCTION_URL
 
 const mockLocationsPlugin = (): Plugin => ({
   name: "mock-tricycle-locations",
@@ -57,7 +60,14 @@ const mockLocationsPlugin = (): Plugin => ({
 })
 
 export default defineConfig({
+  define: {
+    "import.meta.env.VITE_VERCEL_URL": JSON.stringify(VERCEL_URL),
+    "import.meta.env.VITE_VERCEL_PROJECT_PRODUCTION_URL": JSON.stringify(
+      VERCEL_PROJECT_PRODUCTION_URL
+    )
+  },
   resolve: {
+    extensions: [".mjs", ".mts", ".ts", ".tsx", ".js", ".jsx", ".json"],
     alias: [
       {
         find: /^maplibre-gl$/,
@@ -90,7 +100,7 @@ export default defineConfig({
     mockLocationsPlugin(),
     VitePWA({
       registerType: "autoUpdate",
-      includeAssets: ["favicon.ico", "pwa-192.png", "pwa-512.png", "vite.svg"],
+      includeAssets: ["pwa-192.png", "pwa-512.png", "triketrack_logo.png"],
       manifest: {
         name: "TrikeTrack Admin",
         short_name: "TrikeTrack",
@@ -105,7 +115,28 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ["**/*.{js,css,html,ico,png,svg,webmanifest}"],
-        maximumFileSizeToCacheInBytes: 3 * 1024 * 1024
+        maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
+        navigateFallback: "/index.html",
+        runtimeCaching: [
+          {
+            urlPattern: ({ url }) => url.pathname.startsWith("/api/"),
+            handler: "NetworkOnly",
+            options: {
+              cacheName: "triketrack-admin-api"
+            }
+          },
+          {
+            urlPattern: ({ request }) => request.destination === "image",
+            handler: "CacheFirst",
+            options: {
+              cacheName: "triketrack-admin-images",
+              expiration: {
+                maxEntries: 80,
+                maxAgeSeconds: 60 * 60 * 24 * 30
+              }
+            }
+          }
+        ]
       }
     })
   ]

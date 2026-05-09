@@ -81,6 +81,7 @@ const getDriverAuthRow = async (driverIdentifier: string) => {
       LEFT JOIN public.tricycles tr
         ON tr.tricycle_id = d.tricycle_id
       WHERE d.driver_id = $1
+        AND d.deleted_at IS NULL
       LIMIT 1
     `,
     [driverId]

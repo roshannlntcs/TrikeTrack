@@ -20,6 +20,7 @@ type ReportsPageProps = {
   onSearchQueryChange?: (query: string) => void
   onSearchPlaceholderChange?: (placeholder: string) => void
   onDataChanged?: () => void
+  readOnly?: boolean
 }
 
 type ReportsSection = "reports" | "appeals"
@@ -100,7 +101,8 @@ export default function ReportsPage({
   searchQuery: controlledSearchQuery,
   onSearchQueryChange,
   onSearchPlaceholderChange,
-  onDataChanged
+  onDataChanged,
+  readOnly = false
 }: ReportsPageProps) {
   const [reports, setReports] = useState<AdminReportRecord[]>([])
   const [appeals, setAppeals] = useState<AdminAppealRecord[]>([])
@@ -157,7 +159,12 @@ export default function ReportsPage({
     const load = async () => {
       setLoading(true)
       try {
-        const data = await fetchAdminReports(accessToken)
+        const data = readOnly
+          ? await getCachedAdminReports()
+          : await fetchAdminReports(accessToken)
+        if (!data) {
+          throw new Error("No cached reports are available for offline viewer mode.")
+        }
         if (!active) return
         setReports(data.reports)
         setAppeals(data.appeals)
@@ -190,10 +197,11 @@ export default function ReportsPage({
     return () => {
       active = false
     }
-  }, [accessToken, reloadTick])
+  }, [accessToken, reloadTick, readOnly])
 
   useEffect(() => {
     const refreshOnResume = () => {
+      if (readOnly) return
       if (document.visibilityState === "hidden" || !navigator.onLine) return
       setReloadTick((current) => current + 1)
     }
@@ -215,9 +223,11 @@ export default function ReportsPage({
       window.removeEventListener("online", refreshOnResume)
       document.removeEventListener("visibilitychange", handleVisibilityChange)
     }
-  }, [])
+  }, [readOnly])
 
   useEffect(() => {
+    if (readOnly) return
+
     const reloadReports = (refreshShell = true) => {
       setReloadTick((current) => current + 1)
       if (refreshShell) {
@@ -277,7 +287,7 @@ export default function ReportsPage({
     return () => {
       void supabase.removeChannel(reportsChannel)
     }
-  }, [onDataChanged])
+  }, [onDataChanged, readOnly])
 
   const searchQuery = controlledSearchQuery ?? localSearchQuery
   const setSearchQuery = onSearchQueryChange ?? setLocalSearchQuery
@@ -389,7 +399,7 @@ export default function ReportsPage({
   const handleOpenAppeal = async (appeal: AdminAppealRecord) => {
     setSelectedReport(null)
 
-    if (!appeal.viewedAt) {
+    if (!readOnly && !appeal.viewedAt) {
       const optimisticViewedAt = new Date().toISOString()
       const nextAppeal = { ...appeal, viewedAt: optimisticViewedAt }
 
@@ -504,6 +514,10 @@ export default function ReportsPage({
   }, [hasOpenModal])
 
   const handleSaveStatus = async (report: AdminReportRecord) => {
+    if (readOnly) {
+      setError("Offline viewer mode is read-only. Reconnect to update report status.")
+      return
+    }
     const nextStatus = draftStatuses[report.reportId] ?? report.status
     if (nextStatus === report.status) return
 
@@ -934,7 +948,7 @@ export default function ReportsPage({
                         [selectedReport.reportId]: event.target.value as ReportStatus
                       }))
                     }
-                    disabled={busyReportId === selectedReport.reportId}
+                    disabled={readOnly || busyReportId === selectedReport.reportId}
                     aria-label={`Update status for report ${selectedReport.reportId}`}
                   >
                     {REPORT_STATUS_OPTIONS.map((status) => (
@@ -948,6 +962,7 @@ export default function ReportsPage({
                     className="reports-card__button"
                     onClick={() => void handleSaveStatus(selectedReport)}
                     disabled={
+                      readOnly ||
                       busyReportId === selectedReport.reportId ||
                       (draftStatuses[selectedReport.reportId] ?? selectedReport.status) ===
                         selectedReport.status

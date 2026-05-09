@@ -9,6 +9,11 @@ import {
   type EmergencyAlertRecord
 } from "./emergency-alerts-db"
 import { ensureViolationStorageReady } from "./violations-db"
+import {
+  ensureDriverPasswordResetReady,
+  listDriverPasswordResetRequestsForAdmin,
+  type DriverPasswordResetRequestRecord
+} from "./driver-password-reset-db"
 
 export type DashboardDriverRecord = {
   driverId: number
@@ -136,14 +141,14 @@ export type DashboardTripRecord = {
 
 export type DashboardNotificationRecord = {
   notificationKey: string
-  kind: "violation" | "trip" | "driver" | "emergency" | "appeal"
+  kind: "violation" | "trip" | "driver" | "emergency" | "appeal" | "password_reset"
   page: "alerts" | "trip-logs" | "drivers" | "reports"
   title: string
   body: string
   timestamp: string
   priority: number
   tone: "danger" | "warn" | "info"
-  sourceEntityType: "alert" | "trip" | "driver" | "emergency" | "appeal"
+  sourceEntityType: "alert" | "trip" | "driver" | "emergency" | "appeal" | "password_reset"
   sourceEntityId: string
   isRead: boolean
 }
@@ -155,6 +160,7 @@ export type DashboardDataSnapshot = {
   recentViolations: DashboardViolationRecord[]
   recentEmergencies: DashboardEmergencyRecord[]
   recentTrips: DashboardTripRecord[]
+  passwordResetRequests: DriverPasswordResetRequestRecord[]
   notifications: DashboardNotificationRecord[]
   counts: {
     drivers: number
@@ -350,6 +356,9 @@ const buildScopeClause = (
   return { clause: "WHERE 1 = 0", params: [] as unknown[] }
 }
 
+const appendSqlCondition = (clause: string, condition: string) =>
+  clause ? `${clause} AND ${condition}` : `WHERE ${condition}`
+
 const toIso = (value?: Date | null) => value?.toISOString()
 
 const mapDriver = (row: DashboardDriverRow): DashboardDriverRecord => ({
@@ -496,13 +505,15 @@ const createNotifications = ({
   emergencies,
   trips,
   drivers,
-  appeals
+  appeals,
+  passwordResetRequests
 }: {
   alerts: DashboardViolationRecord[]
   emergencies: DashboardEmergencyRecord[]
   trips: DashboardTripRecord[]
   drivers: DashboardDriverRecord[]
   appeals: AdminViolationAppealRecord[]
+  passwordResetRequests: DriverPasswordResetRequestRecord[]
 }) => {
   const nowTs = Date.now()
 
@@ -721,12 +732,35 @@ const createNotifications = ({
       isRead: false
     }))
 
+  const passwordResetNotifications = passwordResetRequests
+    .filter((request) => request.status === "pending")
+    .slice(0, 8)
+    .map<DashboardNotificationRecord>((request) => ({
+      notificationKey: `password-reset:${request.requestId}:${request.status}`,
+      kind: "password_reset",
+      page: "drivers",
+      title: `Password reset request: ${request.driverName}`,
+      body: [
+        request.driverCode,
+        request.todaName,
+        request.barangayName,
+        "Admin verification required"
+      ].join(" | "),
+      timestamp: request.requestedAt,
+      priority: 92,
+      tone: "warn",
+      sourceEntityType: "password_reset",
+      sourceEntityId: String(request.requestId),
+      isRead: false
+    }))
+
   return [
     ...emergencyNotifications,
     ...violationNotifications,
     ...tripNotifications,
     ...driverNotifications,
-    ...appealNotifications
+    ...appealNotifications,
+    ...passwordResetNotifications
   ]
     .sort(sortNotifications)
     .slice(0, NOTIFICATION_LIMIT)
@@ -786,11 +820,15 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
   await ensureDatabaseReady()
   await ensureNotificationReadsReady()
   await ensureViolationStorageReady()
+  await ensureDriverPasswordResetReady()
 
   const driverScope = buildScopeClause(profile, "d.toda_id", "b.barangay_id")
   const tricycleScope = buildScopeClause(profile, "tr.toda_id", "b.barangay_id")
   const tripScope = buildScopeClause(profile, "td.toda_id", "b.barangay_id")
   const alertScope = buildScopeClause(profile, "td.toda_id", "b.barangay_id")
+  const activeDriverScope = appendSqlCondition(driverScope.clause, "d.deleted_at IS NULL")
+  const mobileMirrorExclusion = "COALESCE(mv.dedupe_key, '') NOT LIKE 'system-violation:%'"
+  const mobileAlertScope = appendSqlCondition(alertScope.clause, mobileMirrorExclusion)
   const driverAvatarSelect = (await hasColumn("public", "drivers", "avatar_url"))
     ? "d.avatar_url"
     : "NULL::text AS avatar_url"
@@ -804,6 +842,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
               mv.driver_id,
               LOWER(mv.status::text) AS status
             FROM public.mobile_violations mv
+            WHERE ${mobileMirrorExclusion}
       `
     : ""
   const mobileViolationsUnion = hasMobileViolations
@@ -847,7 +886,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
             ON td.toda_id = d.toda_id
           JOIN public.barangays b
             ON b.barangay_id = td.barangay_id
-          ${alertScope.clause}
+          ${mobileAlertScope}
       `
     : ""
   const mobileTripAlertsUnion = hasMobileViolations
@@ -861,12 +900,12 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
     : ""
   const tripPathSelect = hasTripPaths
     ? `
-          path.point_count AS path_point_count,
-          path.updated_at AS path_updated_at,
+          COALESCE(NULLIF(tp.matched_point_count, 0), path.point_count) AS path_point_count,
+          COALESCE(path.updated_at, tp.trip_end, tp.created_at) AS path_updated_at,
       `
     : `
-          NULL::integer AS path_point_count,
-          NULL::timestamptz AS path_updated_at,
+          NULLIF(tp.matched_point_count, 0) AS path_point_count,
+          COALESCE(tp.trip_end, tp.created_at) AS path_updated_at,
       `
   const tripPathJoin = hasTripPaths
     ? `
@@ -882,6 +921,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
     violationsResult,
     emergencyAlerts,
     appeals,
+    passwordResetRequests,
     tripsResult,
     aggregateCountsResult
   ] = await Promise.all([
@@ -911,7 +951,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
           ON b.barangay_id = t.barangay_id
         LEFT JOIN public.tricycles tr
           ON tr.tricycle_id = d.tricycle_id
-        ${driverScope.clause}
+        ${activeDriverScope}
         ORDER BY b.barangay_name ASC, t.toda_name ASC, d.last_name ASC, d.first_name ASC
       `,
       driverScope.params
@@ -1019,7 +1059,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
           ON at.driver_id = d.driver_id
         LEFT JOIN alert_counts ac
           ON ac.driver_id = d.driver_id
-        ${driverScope.clause}
+        ${activeDriverScope}
         ORDER BY
           CASE
             WHEN d.status = 'active'
@@ -1092,6 +1132,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
       limit: 50
     }),
     listAppealsForAdmin(profile),
+    listDriverPasswordResetRequestsForAdmin(profile),
     query<DashboardTripRow>(
       `
         SELECT
@@ -1112,7 +1153,10 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
           tp.trip_status::text AS trip_status,
           tp.duration_minutes,
           tp.fare_amount,
-          dist.distance_km,
+          COALESCE(
+            NULLIF(tp.trip_metrics #>> '{routeMatchSummary,distanceMeters}', '')::numeric / 1000.0,
+            dist.distance_km
+          ) AS distance_km,
           ${tripPathSelect}
           COALESCE(violations.violation_count, 0) AS violation_count,
           tp.created_at
@@ -1216,7 +1260,8 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
     emergencies: recentEmergencies,
     trips: recentTrips,
     drivers,
-    appeals
+    appeals,
+    passwordResetRequests
   })
 
   const readKeys = await loadReadNotificationKeys(
@@ -1257,6 +1302,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
     recentViolations,
     recentEmergencies,
     recentTrips,
+    passwordResetRequests,
     notifications: notificationsWithReadState,
     counts: {
       drivers: drivers.length,

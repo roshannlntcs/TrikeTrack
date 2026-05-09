@@ -11,15 +11,18 @@
         "type": "Polygon",
         "coordinates": [
           [
-            [125.624803, 7.0832297],
-            [125.617071, 7.076611],
-            [125.6140047, 7.078821],
-            [125.612905, 7.0817],
-            [125.612594, 7.0835656],
-            [125.611754, 7.0849408],
-            [125.613004, 7.0868171],
-            [125.6177977, 7.09187],
-            [125.624803, 7.0832297]
+            [125.624543, 7.083261],
+            [125.6181, 7.091131],
+            [125.615429, 7.095079],
+            [125.610868, 7.092281],
+            [125.610166, 7.091124],
+            [125.61041, 7.087334],
+            [125.610409, 7.087394],
+            [125.612407, 7.083822],
+            [125.613528, 7.076802],
+            [125.617366, 7.076895],
+            [125.617366, 7.077373],
+            [125.624543, 7.083261]
           ]
         ]
       }
@@ -33,15 +36,18 @@
       "geometry": {
         "type": "LineString",
         "coordinates": [
-          [125.624803, 7.0832297],
-          [125.617071, 7.076611],
-          [125.6140047, 7.078821],
-          [125.612905, 7.0817],
-          [125.612594, 7.0835656],
-          [125.611754, 7.0849408],
-          [125.613004, 7.0868171],
-          [125.6177977, 7.09187],
-          [125.624803, 7.0832297]
+          [125.624543, 7.083261],
+          [125.6181, 7.091131],
+          [125.615429, 7.095079],
+          [125.610868, 7.092281],
+          [125.610166, 7.091124],
+          [125.61041, 7.087334],
+          [125.610409, 7.087394],
+          [125.612407, 7.083822],
+          [125.613528, 7.076802],
+          [125.617366, 7.076895],
+          [125.617366, 7.077373],
+          [125.624543, 7.083261]
         ]
       }
     },
@@ -49,65 +55,89 @@
       "type": "Feature",
       "properties": {
         "pointNumber": 1,
-        "name": "AUB Dacudao Avenue"
+        "name": "Geofence Point 1"
       },
-      "geometry": { "type": "Point", "coordinates": [125.624803, 7.0832297] }
+      "geometry": { "type": "Point", "coordinates": [125.624543, 7.083261] }
     },
     {
       "type": "Feature",
       "properties": {
         "pointNumber": 2,
-        "name": "Sta. Ana Shrine Parish Church"
+        "name": "Geofence Point 2"
       },
-      "geometry": { "type": "Point", "coordinates": [125.617071, 7.076611] }
+      "geometry": { "type": "Point", "coordinates": [125.6181, 7.091131] }
     },
     {
       "type": "Feature",
       "properties": {
         "pointNumber": 3,
-        "name": "De Guzman Street (Starbucks GMall Davao)"
+        "name": "Geofence Point 3"
       },
-      "geometry": { "type": "Point", "coordinates": [125.6140047, 7.078821] }
+      "geometry": { "type": "Point", "coordinates": [125.615429, 7.095079] }
     },
     {
       "type": "Feature",
       "properties": {
         "pointNumber": 4,
-        "name": "Umasi Corp (Polo Street)"
+        "name": "Geofence Point 4"
       },
-      "geometry": { "type": "Point", "coordinates": [125.612905, 7.0817] }
+      "geometry": { "type": "Point", "coordinates": [125.610868, 7.092281] }
     },
     {
       "type": "Feature",
       "properties": {
         "pointNumber": 5,
-        "name": "Bajada Suites (Inigo Street)"
+        "name": "Geofence Point 5"
       },
-      "geometry": { "type": "Point", "coordinates": [125.612594, 7.0835656] }
+      "geometry": { "type": "Point", "coordinates": [125.610166, 7.091124] }
     },
     {
       "type": "Feature",
       "properties": {
         "pointNumber": 6,
-        "name": "McDonald's Bajada (Lacson Street)"
+        "name": "Geofence Point 6"
       },
-      "geometry": { "type": "Point", "coordinates": [125.611754, 7.0849408] }
+      "geometry": { "type": "Point", "coordinates": [125.61041, 7.087334] }
     },
     {
       "type": "Feature",
       "properties": {
         "pointNumber": 7,
-        "name": "Health Center Brgy. 20-B (Veloso Street)"
+        "name": "Geofence Point 7"
       },
-      "geometry": { "type": "Point", "coordinates": [125.613004, 7.0868171] }
+      "geometry": { "type": "Point", "coordinates": [125.610409, 7.087394] }
     },
     {
       "type": "Feature",
       "properties": {
         "pointNumber": 8,
-        "name": "Chick N' Roll (Veloso St. cor Dacudao Ave.)"
+        "name": "Geofence Point 8"
       },
-      "geometry": { "type": "Point", "coordinates": [125.6177977, 7.091870] }
+      "geometry": { "type": "Point", "coordinates": [125.612407, 7.083822] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "pointNumber": 9,
+        "name": "Geofence Point 9"
+      },
+      "geometry": { "type": "Point", "coordinates": [125.613528, 7.076802] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "pointNumber": 10,
+        "name": "Geofence Point 10"
+      },
+      "geometry": { "type": "Point", "coordinates": [125.617366, 7.076895] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "pointNumber": 11,
+        "name": "Geofence Point 11"
+      },
+      "geometry": { "type": "Point", "coordinates": [125.617366, 7.077373] }
     }
   ]
 }

@@ -38,6 +38,8 @@ const resolveFileExtension = (mimeType: string, fileName?: string) => {
       return "png"
     case "image/webp":
       return "webp"
+    case "application/pdf":
+      return "pdf"
     default:
       return "bin"
   }
@@ -106,11 +108,11 @@ export const uploadPassengerReportEvidence = async (params: {
     const message = await buildStorageErrorMessage(response)
     if (/bucket.*not found/i.test(message)) {
       throw new Error(
-        `Passenger proof upload bucket \`${PASSENGER_REPORT_MEDIA_BUCKET}\` was not found. Create it in Supabase Storage before accepting image uploads.`
+        `Passenger proof upload bucket \`${PASSENGER_REPORT_MEDIA_BUCKET}\` was not found. Create it in Supabase Storage before accepting evidence uploads.`
       )
     }
 
-    throw new Error(`Unable to upload passenger proof image. ${message}`)
+    throw new Error(`Unable to upload passenger evidence. ${message}`)
   }
 
   return {

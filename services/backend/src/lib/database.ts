@@ -2,32 +2,63 @@ import { Pool, type PoolClient } from "pg"
 
 const DATABASE_URL =
   process.env.DATABASE_URL ?? "postgresql://postgres:postgres@127.0.0.1:5432/triketrack"
+const DATABASE_LISTEN_URL = process.env.DATABASE_LISTEN_URL ?? DATABASE_URL
 
 const shouldUseSsl = () => {
   const raw = (process.env.DATABASE_SSL ?? "").trim().toLowerCase()
   return raw === "1" || raw === "true" || raw === "require"
 }
 
+const parseNumberEnv = (value: string | undefined, fallback: number) => {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+const getQueryPoolMax = () => parseNumberEnv(process.env.DATABASE_POOL_MAX, 3)
+const getListenPoolMax = () => parseNumberEnv(process.env.DATABASE_LISTEN_POOL_MAX, 2)
+const getConnectionTimeoutMs = () =>
+  parseNumberEnv(process.env.DATABASE_CONNECTION_TIMEOUT_MS, 10_000)
+const getIdleTimeoutMs = () => parseNumberEnv(process.env.DATABASE_IDLE_TIMEOUT_MS, 15_000)
+const getMaxUses = () => parseNumberEnv(process.env.DATABASE_MAX_USES, 750)
+
 declare global {
   // eslint-disable-next-line no-var
   var __triketrackPgPool: Pool | undefined
+  // eslint-disable-next-line no-var
+  var __triketrackPgListenPool: Pool | undefined
   // eslint-disable-next-line no-var
   var __triketrackDatabaseReady: Promise<void> | undefined
   // eslint-disable-next-line no-var
   var __triketrackColumnExistsCache: Map<string, Promise<boolean>> | undefined
 }
 
-const createPool = () =>
+const createPool = (connectionString: string, max: number) =>
   new Pool({
-    connectionString: DATABASE_URL,
-    ssl: shouldUseSsl() ? { rejectUnauthorized: false } : undefined
+    connectionString,
+    ssl: shouldUseSsl() ? { rejectUnauthorized: false } : undefined,
+    max,
+    connectionTimeoutMillis: getConnectionTimeoutMs(),
+    idleTimeoutMillis: getIdleTimeoutMs(),
+    maxUses: getMaxUses(),
+    allowExitOnIdle: true,
+    keepAlive: true
   })
 
 export const getPool = () => {
   if (!globalThis.__triketrackPgPool) {
-    globalThis.__triketrackPgPool = createPool()
+    globalThis.__triketrackPgPool = createPool(DATABASE_URL, getQueryPoolMax())
   }
   return globalThis.__triketrackPgPool
+}
+
+export const getListenPool = () => {
+  if (!globalThis.__triketrackPgListenPool) {
+    globalThis.__triketrackPgListenPool = createPool(
+      DATABASE_LISTEN_URL,
+      getListenPoolMax()
+    )
+  }
+  return globalThis.__triketrackPgListenPool
 }
 
 export const query = <TRow extends Record<string, unknown> = Record<string, unknown>>(
@@ -92,6 +123,11 @@ const ensureSchemaCompatibility = async () => {
   await query(`
     ALTER TABLE IF EXISTS public.routes
     ADD COLUMN IF NOT EXISTS default_fare_amount numeric(10,2)
+  `)
+
+  await query(`
+    ALTER TABLE IF EXISTS public.drivers
+    ADD COLUMN IF NOT EXISTS deleted_at timestamptz
   `)
 
   await query(`

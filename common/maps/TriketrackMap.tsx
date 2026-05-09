@@ -16,10 +16,16 @@ import { createCurrentLocationMarker, createDestinationMarker } from "./markers"
 const DEFAULT_CENTER: [number, number] = [125.6128, 7.0848]
 const DEFAULT_ZOOM = 13
 const FIT_BOUNDS_PADDING = 72
+const BREADCRUMB_SOURCE_ID = "triketrack-breadcrumbs"
+const BREADCRUMB_LAYER_ID = "triketrack-breadcrumbs-layer"
+const ROUTE_SOURCE_ID = "triketrack-route"
+const ROUTE_LAYER_ID = "triketrack-route-layer"
 
 type TriketrackMapProps = {
   currentLocation?: TriketrackMapCoordinate | null
   destination?: TriketrackMapCoordinate | null
+  breadcrumbPoints?: TriketrackMapCoordinate[]
+  routeCoordinates?: Array<[number, number]>
   mapStyle?: TriketrackMapStyleId
   showControls?: boolean
   showLocateButton?: boolean
@@ -45,9 +51,32 @@ const toLngLat = (point: TriketrackMapCoordinate): [number, number] => [
   point.latitude
 ]
 
+const createLineStringFeature = (coordinates: Array<[number, number]>) => ({
+  type: "Feature" as const,
+  properties: {},
+  geometry: {
+    type: "LineString" as const,
+    coordinates
+  }
+})
+
+const createPointFeatureCollection = (points: TriketrackMapCoordinate[]) => ({
+  type: "FeatureCollection" as const,
+  features: points.map((point) => ({
+    type: "Feature" as const,
+    properties: {},
+    geometry: {
+      type: "Point" as const,
+      coordinates: toLngLat(point)
+    }
+  }))
+})
+
 export function TriketrackMap({
   currentLocation,
   destination,
+  breadcrumbPoints = [],
+  routeCoordinates = [],
   mapStyle = DEFAULT_MAP_STYLE,
   showControls = true,
   showLocateButton = true,
@@ -186,10 +215,89 @@ export function TriketrackMap({
     const map = mapRef.current
     if (!map || !mapReady) return
 
+    const existingSource = map.getSource(BREADCRUMB_SOURCE_ID) as maplibregl.GeoJSONSource | undefined
+    const nextData = createPointFeatureCollection(breadcrumbPoints)
+
+    if (!existingSource) {
+      map.addSource(BREADCRUMB_SOURCE_ID, {
+        type: "geojson",
+        data: nextData
+      })
+      map.addLayer({
+        id: BREADCRUMB_LAYER_ID,
+        type: "circle",
+        source: BREADCRUMB_SOURCE_ID,
+        paint: {
+          "circle-radius": 3.5,
+          "circle-color": "#0b5cff",
+          "circle-stroke-width": 1,
+          "circle-stroke-color": "#ffffff",
+          "circle-opacity": 0.9
+        }
+      })
+      return
+    }
+
+    existingSource.setData(nextData)
+  }, [breadcrumbPoints, mapReady])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !mapReady) return
+
+    const existingSource = map.getSource(ROUTE_SOURCE_ID) as maplibregl.GeoJSONSource | undefined
+    const nextData = createLineStringFeature(routeCoordinates)
+
+    if (!existingSource) {
+      map.addSource(ROUTE_SOURCE_ID, {
+        type: "geojson",
+        data: nextData
+      })
+      map.addLayer({
+        id: ROUTE_LAYER_ID,
+        type: "line",
+        source: ROUTE_SOURCE_ID,
+        layout: {
+          "line-cap": "round",
+          "line-join": "round"
+        },
+        paint: {
+          "line-color": "#16a34a",
+          "line-width": 4,
+          "line-opacity": 0.82
+        }
+      })
+      return
+    }
+
+    existingSource.setData(nextData)
+  }, [mapReady, routeCoordinates])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !mapReady) return
+
     if (effectiveCurrentLocation && destination) {
       const bounds = new maplibregl.LngLatBounds()
       bounds.extend(toLngLat(effectiveCurrentLocation))
       bounds.extend(toLngLat(destination))
+      map.fitBounds(bounds, {
+        padding: FIT_BOUNDS_PADDING,
+        maxZoom: 16,
+        duration: 700
+      })
+      hasAutoCenteredRef.current = true
+      return
+    }
+
+    if (routeCoordinates.length > 1) {
+      const bounds = new maplibregl.LngLatBounds()
+      for (const coordinate of routeCoordinates) {
+        bounds.extend(coordinate)
+      }
+      if (effectiveCurrentLocation) {
+        bounds.extend(toLngLat(effectiveCurrentLocation))
+      }
       map.fitBounds(bounds, {
         padding: FIT_BOUNDS_PADDING,
         maxZoom: 16,
@@ -208,7 +316,7 @@ export function TriketrackMap({
       })
       hasAutoCenteredRef.current = true
     }
-  }, [destination, effectiveCurrentLocation, mapReady])
+  }, [destination, effectiveCurrentLocation, mapReady, routeCoordinates])
 
   const handleLocateClick = async () => {
     const location = await liveLocationState.locate()

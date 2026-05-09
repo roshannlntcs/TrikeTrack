@@ -9,6 +9,10 @@ const getErrorMessage = (error: unknown) => {
 const isNetworkFetchError = (message: string) =>
   /failed to fetch|networkerror|load failed/i.test(message)
 
+export const isNetworkError = (error: unknown) => isNetworkFetchError(getErrorMessage(error))
+
+export const isNetworkErrorMessage = (message: string) => isNetworkFetchError(message)
+
 export const toSupabaseAuthErrorMessage = (error: unknown) => {
   const message = getErrorMessage(error)
 

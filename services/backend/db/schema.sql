@@ -1,92 +1,144 @@
 create extension if not exists pgcrypto;
 
-create type admin_role as enum (
-  'superadmin',
-  'barangay_admin',
-  'toda_admin'
-);
+do $$
+begin
+  create type admin_role as enum (
+    'superadmin',
+    'barangay_admin',
+    'toda_admin'
+  );
+exception when duplicate_object then null;
+end $$;
 
-create type entity_status as enum (
-  'active',
-  'inactive',
-  'suspended'
-);
+do $$
+begin
+  create type entity_status as enum (
+    'active',
+    'inactive',
+    'suspended'
+  );
+exception when duplicate_object then null;
+end $$;
 
-create type qr_status as enum (
-  'active',
-  'inactive',
-  'revoked',
-  'expired'
-);
+do $$
+begin
+  create type qr_status as enum (
+    'active',
+    'inactive',
+    'revoked',
+    'expired'
+  );
+exception when duplicate_object then null;
+end $$;
 
-create type trip_status as enum (
-  'scheduled',
-  'ongoing',
-  'completed',
-  'cancelled'
-);
+do $$
+begin
+  create type trip_status as enum (
+    'scheduled',
+    'ongoing',
+    'completed',
+    'cancelled'
+  );
+exception when duplicate_object then null;
+end $$;
 
-create type report_status as enum (
-  'submitted',
-  'under_review',
-  'verified',
-  'resolved',
-  'dismissed'
-);
+do $$
+begin
+  create type report_status as enum (
+    'submitted',
+    'under_review',
+    'verified',
+    'resolved',
+    'dismissed'
+  );
+exception when duplicate_object then null;
+end $$;
 
-create type violation_status as enum (
-  'open',
-  'under_review',
-  'resolved',
-  'dismissed'
-);
+do $$
+begin
+  create type violation_status as enum (
+    'open',
+    'under_review',
+    'resolved',
+    'dismissed'
+  );
+exception when duplicate_object then null;
+end $$;
 
-create type violation_source as enum (
-  'system',
-  'passenger_report',
-  'admin'
-);
+do $$
+begin
+  create type violation_source as enum (
+    'system',
+    'passenger_report',
+    'admin'
+  );
+exception when duplicate_object then null;
+end $$;
 
-create type media_type as enum (
-  'image',
-  'video',
-  'audio',
-  'document'
-);
+do $$
+begin
+  create type media_type as enum (
+    'image',
+    'video',
+    'audio',
+    'document'
+  );
+exception when duplicate_object then null;
+end $$;
 
-create type mobile_violation_type as enum (
-  'GEOFENCE_BOUNDARY',
-  'ROUTE_DEVIATION',
-  'UNAUTHORIZED_STOP'
-);
+do $$
+begin
+  create type mobile_violation_type as enum (
+    'GEOFENCE_BOUNDARY',
+    'ROUTE_DEVIATION',
+    'UNAUTHORIZED_STOP'
+  );
+exception when duplicate_object then null;
+end $$;
 
-create type mobile_violation_status as enum (
-  'OPEN',
-  'UNDER_REVIEW',
-  'RESOLVED'
-);
+do $$
+begin
+  create type mobile_violation_status as enum (
+    'OPEN',
+    'UNDER_REVIEW',
+    'RESOLVED'
+  );
+exception when duplicate_object then null;
+end $$;
 
-create type mobile_violation_priority as enum (
-  'HIGH',
-  'MEDIUM',
-  'LOW'
-);
+do $$
+begin
+  create type mobile_violation_priority as enum (
+    'HIGH',
+    'MEDIUM',
+    'LOW'
+  );
+exception when duplicate_object then null;
+end $$;
 
-create type appeal_status as enum (
-  'SUBMITTED',
-  'UNDER_REVIEW',
-  'APPROVED',
-  'DENIED',
-  'WITHDRAWN'
-);
+do $$
+begin
+  create type appeal_status as enum (
+    'SUBMITTED',
+    'UNDER_REVIEW',
+    'APPROVED',
+    'DENIED',
+    'WITHDRAWN'
+  );
+exception when duplicate_object then null;
+end $$;
 
-create type emergency_alert_status as enum (
-  'created',
-  'pending_admin',
-  'acknowledged',
-  'responding',
-  'resolved'
-);
+do $$
+begin
+  create type emergency_alert_status as enum (
+    'created',
+    'pending_admin',
+    'acknowledged',
+    'responding',
+    'resolved'
+  );
+exception when duplicate_object then null;
+end $$;
 
 create or replace function public.set_updated_at()
 returns trigger
@@ -411,7 +463,7 @@ begin
 end;
 $$;
 
-create table public.barangays (
+create table if not exists public.barangays (
   barangay_id bigint generated always as identity primary key,
   barangay_name text not null,
   district text,
@@ -421,7 +473,7 @@ create table public.barangays (
   unique (barangay_name, city)
 );
 
-create table public.todas (
+create table if not exists public.todas (
   toda_id bigint generated always as identity primary key,
   barangay_id bigint not null references public.barangays(barangay_id) on delete restrict,
   toda_name text not null,
@@ -430,7 +482,7 @@ create table public.todas (
   unique (barangay_id, toda_name)
 );
 
-create table public.admin_accounts (
+create table if not exists public.admin_accounts (
   admin_id bigint generated always as identity primary key,
   auth_user_id uuid not null unique references auth.users(id) on delete cascade,
   admin_role admin_role not null,
@@ -447,7 +499,7 @@ create table public.admin_accounts (
   )
 );
 
-create table public.drivers (
+create table if not exists public.drivers (
   driver_id bigint generated always as identity primary key,
   driver_code text generated always as (
     'D-' || lpad(driver_id::text, 3, '0')
@@ -461,10 +513,63 @@ create table public.drivers (
   avatar_url text,
   password_hash text,
   status entity_status not null default 'active',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  deleted_at timestamptz
+);
+
+alter table public.drivers add column if not exists tricycle_id bigint;
+alter table public.drivers add column if not exists qr_id bigint;
+alter table public.drivers add column if not exists contact_no text;
+alter table public.drivers add column if not exists avatar_url text;
+alter table public.drivers add column if not exists password_hash text;
+alter table public.drivers add column if not exists updated_at timestamptz not null default now();
+alter table public.drivers add column if not exists deleted_at timestamptz;
+
+create table if not exists public.driver_password_reset_requests (
+  request_id bigint generated always as identity primary key,
+  driver_id bigint not null references public.drivers(driver_id) on delete cascade,
+  driver_code text not null,
+  status text not null default 'pending',
+  requested_at timestamptz not null default now(),
+  approved_at timestamptz,
+  approved_by bigint references public.admin_accounts(admin_id) on delete set null,
+  temporary_password_hash text,
+  temporary_password text,
+  temporary_password_used_at timestamptz,
+  expires_at timestamptz,
+  device_push_token text,
+  device_platform text,
+  push_sent_at timestamptz,
+  push_error text,
+  resolved_at timestamptz,
+  constraint driver_password_reset_requests_status_check
+    check (status in ('pending', 'approved', 'denied', 'completed', 'expired'))
+);
+
+alter table public.driver_password_reset_requests add column if not exists approved_at timestamptz;
+alter table public.driver_password_reset_requests add column if not exists approved_by bigint references public.admin_accounts(admin_id) on delete set null;
+alter table public.driver_password_reset_requests add column if not exists temporary_password_hash text;
+alter table public.driver_password_reset_requests add column if not exists temporary_password text;
+alter table public.driver_password_reset_requests add column if not exists temporary_password_used_at timestamptz;
+alter table public.driver_password_reset_requests add column if not exists expires_at timestamptz;
+alter table public.driver_password_reset_requests add column if not exists device_push_token text;
+alter table public.driver_password_reset_requests add column if not exists device_platform text;
+alter table public.driver_password_reset_requests add column if not exists push_sent_at timestamptz;
+alter table public.driver_password_reset_requests add column if not exists push_error text;
+alter table public.driver_password_reset_requests add column if not exists resolved_at timestamptz;
+
+create table if not exists public.admin_audit_logs (
+  audit_id bigint generated always as identity primary key,
+  admin_id bigint references public.admin_accounts(admin_id) on delete set null,
+  action text not null,
+  entity_type text not null,
+  entity_id text not null,
+  details jsonb,
   created_at timestamptz not null default now()
 );
 
-create table public.tricycles (
+create table if not exists public.tricycles (
   tricycle_id bigint generated always as identity primary key,
   toda_id bigint not null references public.todas(toda_id) on delete restrict,
   plate_no text not null unique,
@@ -474,7 +579,7 @@ create table public.tricycles (
   created_at timestamptz not null default now()
 );
 
-create table public.routes (
+create table if not exists public.routes (
   route_id bigint generated always as identity primary key,
   toda_id bigint not null references public.todas(toda_id) on delete restrict,
   origin text not null,
@@ -489,7 +594,7 @@ create table public.routes (
   unique (toda_id, origin, destination)
 );
 
-create table public.qr_codes (
+create table if not exists public.qr_codes (
   qr_id bigint generated always as identity primary key,
   driver_id bigint,
   tricycle_id bigint references public.tricycles(tricycle_id) on delete set null,
@@ -500,19 +605,19 @@ create table public.qr_codes (
   created_at timestamptz not null default now()
 );
 
-create table public.report_types (
+create table if not exists public.report_types (
   report_type_id bigint generated always as identity primary key,
   code text not null unique,
   label text not null
 );
 
-create table public.violation_types (
+create table if not exists public.violation_types (
   violation_type_id bigint generated always as identity primary key,
   code text not null unique,
   label text not null
 );
 
-create table public.trips (
+create table if not exists public.trips (
   trip_id bigint generated always as identity primary key,
   driver_id bigint not null references public.drivers(driver_id) on delete restrict,
   tricycle_id bigint not null references public.tricycles(tricycle_id) on delete restrict,
@@ -551,7 +656,7 @@ create table public.trips (
   )
 );
 
-create table public.trip_points (
+create table if not exists public.trip_points (
   point_id bigint generated always as identity primary key,
   trip_id bigint references public.trips(trip_id) on delete cascade,
   driver_id bigint not null references public.drivers(driver_id) on delete restrict,
@@ -567,7 +672,7 @@ create table public.trip_points (
   created_at timestamptz not null default now()
 );
 
-create table public.driver_locations (
+create table if not exists public.driver_locations (
   driver_id bigint primary key references public.drivers(driver_id) on delete cascade,
   driver_code text not null,
   trip_id bigint references public.trips(trip_id) on delete set null,
@@ -582,7 +687,7 @@ create table public.driver_locations (
   updated_at timestamptz not null default now()
 );
 
-create table public.trip_paths (
+create table if not exists public.trip_paths (
   trip_path_id bigint generated always as identity primary key,
   trip_id bigint not null unique references public.trips(trip_id) on delete cascade,
   point_count integer not null default 0,
@@ -592,7 +697,7 @@ create table public.trip_paths (
   updated_at timestamptz not null default now()
 );
 
-create table public.passenger_scans (
+create table if not exists public.passenger_scans (
   scan_id bigint generated always as identity primary key,
   trip_id bigint references public.trips(trip_id) on delete set null,
   driver_id bigint not null references public.drivers(driver_id) on delete cascade,
@@ -602,7 +707,7 @@ create table public.passenger_scans (
   created_at timestamptz not null default now()
 );
 
-create table public.reports (
+create table if not exists public.reports (
   report_id bigint generated always as identity primary key,
   scan_id bigint not null references public.passenger_scans(scan_id) on delete cascade,
   trip_id bigint references public.trips(trip_id) on delete set null,
@@ -618,7 +723,7 @@ create table public.reports (
   created_at timestamptz not null default now()
 );
 
-create table public.report_media (
+create table if not exists public.report_media (
   media_id bigint generated always as identity primary key,
   report_id bigint not null references public.reports(report_id) on delete cascade,
   media_type media_type not null,
@@ -627,7 +732,7 @@ create table public.report_media (
   created_at timestamptz not null default now()
 );
 
-create table public.violations (
+create table if not exists public.violations (
   violation_id bigint generated always as identity primary key,
   violation_type_id bigint not null references public.violation_types(violation_type_id) on delete restrict,
   trip_id bigint references public.trips(trip_id) on delete set null,
@@ -651,7 +756,7 @@ create table public.violations (
   )
 );
 
-create table public.trip_route_points (
+create table if not exists public.trip_route_points (
   trip_id bigint not null references public.trips(trip_id) on delete cascade,
   idx integer not null check (idx >= 0),
   latitude double precision not null,
@@ -660,7 +765,7 @@ create table public.trip_route_points (
   primary key (trip_id, idx)
 );
 
-create table public.trip_routes (
+create table if not exists public.trip_routes (
   id bigint generated always as identity primary key,
   local_trip_id text not null,
   trip_id bigint references public.trips(trip_id) on delete set null,
@@ -671,7 +776,7 @@ create table public.trip_routes (
   created_at timestamptz not null default now()
 );
 
-create table public.mobile_violations (
+create table if not exists public.mobile_violations (
   id uuid primary key default gen_random_uuid(),
   driver_id bigint not null references public.drivers(driver_id) on delete cascade,
   trip_id bigint references public.trips(trip_id) on delete set null,
@@ -689,7 +794,7 @@ create table public.mobile_violations (
   updated_at timestamptz not null default now()
 );
 
-create table public.violation_appeals (
+create table if not exists public.violation_appeals (
   id uuid primary key default gen_random_uuid(),
   violation_id uuid not null references public.mobile_violations(id) on delete cascade,
   driver_id bigint not null references public.drivers(driver_id) on delete cascade,
@@ -705,7 +810,7 @@ create table public.violation_appeals (
   updated_at timestamptz not null default now()
 );
 
-create table public.violation_proofs (
+create table if not exists public.violation_proofs (
   id uuid primary key default gen_random_uuid(),
   violation_id uuid not null references public.mobile_violations(id) on delete cascade,
   driver_id bigint not null references public.drivers(driver_id) on delete cascade,
@@ -720,7 +825,7 @@ create table public.violation_proofs (
   updated_at timestamptz not null default now()
 );
 
-create table public.emergency_alerts (
+create table if not exists public.emergency_alerts (
   emergency_id bigint generated always as identity primary key,
   passenger_tracking_key uuid not null unique,
   qr_id bigint not null references public.qr_codes(qr_id) on delete restrict,
@@ -745,13 +850,286 @@ create table public.emergency_alerts (
   updated_at timestamptz not null default now()
 );
 
-create table public.admin_notification_reads (
+create table if not exists public.admin_notification_reads (
   admin_id bigint not null references public.admin_accounts(admin_id) on delete cascade,
   notification_key text not null,
   read_at timestamptz not null default now(),
   created_at timestamptz not null default now(),
   primary key (admin_id, notification_key)
 );
+
+drop function if exists public.request_driver_password_reset(text);
+drop function if exists public.request_driver_password_reset(text, text, text);
+create or replace function public.request_driver_password_reset(
+  p_driver_code text,
+  p_device_push_token text default null,
+  p_device_platform text default null
+)
+returns table (
+  request_id bigint,
+  driver_id bigint,
+  driver_code text,
+  status text
+)
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  target_driver_id bigint;
+  target_driver_code text;
+  existing_request_id bigint;
+  existing_request_driver_id bigint;
+  existing_request_driver_code text;
+  existing_request_status text;
+begin
+  select d.driver_id, coalesce(d.driver_code, d.driver_id::text) as driver_code
+    into target_driver_id, target_driver_code
+  from public.drivers d
+  where d.status = 'active'
+    and upper(coalesce(d.driver_code, d.driver_id::text)) = upper(p_driver_code)
+  limit 1;
+
+  if target_driver_id is null then
+    return;
+  end if;
+
+  select r.request_id, r.driver_id, r.driver_code, r.status
+    into existing_request_id, existing_request_driver_id, existing_request_driver_code, existing_request_status
+  from public.driver_password_reset_requests r
+  where r.driver_id = target_driver_id
+    and r.status in ('pending', 'approved')
+    and (r.expires_at is null or r.expires_at >= now())
+  order by r.requested_at desc
+  limit 1;
+
+  if existing_request_id is not null then
+    update public.driver_password_reset_requests
+    set
+      device_push_token = coalesce(nullif(trim(p_device_push_token), ''), device_push_token),
+      device_platform = coalesce(nullif(trim(p_device_platform), ''), device_platform)
+    where request_id = existing_request_id;
+
+    request_id := existing_request_id;
+    driver_id := existing_request_driver_id;
+    driver_code := existing_request_driver_code;
+    status := existing_request_status;
+    return next;
+    return;
+  end if;
+
+  insert into public.driver_password_reset_requests (
+    driver_id,
+    driver_code,
+    device_push_token,
+    device_platform
+  )
+  values (
+    target_driver_id,
+    target_driver_code,
+    nullif(trim(p_device_push_token), ''),
+    nullif(trim(p_device_platform), '')
+  )
+  returning
+    driver_password_reset_requests.request_id,
+    driver_password_reset_requests.driver_id,
+    driver_password_reset_requests.driver_code,
+    driver_password_reset_requests.status
+  into request_id, driver_id, driver_code, status;
+
+  return next;
+end;
+$$;
+
+drop function if exists public.get_driver_password_reset_status(text);
+create or replace function public.get_driver_password_reset_status(p_driver_code text)
+returns table (
+  request_id bigint,
+  driver_id bigint,
+  driver_code text,
+  status text,
+  temporary_password text,
+  requested_at timestamptz,
+  approved_at timestamptz,
+  expires_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  target_driver_id bigint;
+begin
+  select d.driver_id
+    into target_driver_id
+  from public.drivers d
+  where d.status = 'active'
+    and upper(coalesce(d.driver_code, d.driver_id::text)) = upper(p_driver_code)
+  limit 1;
+
+  if target_driver_id is null then
+    return;
+  end if;
+
+  update public.driver_password_reset_requests r
+  set
+    status = 'expired',
+    temporary_password = null,
+    temporary_password_hash = null,
+    resolved_at = coalesce(r.resolved_at, now())
+  where r.driver_id = target_driver_id
+    and r.status = 'approved'
+    and r.expires_at is not null
+    and r.expires_at < now();
+
+  return query
+  select
+    r.request_id,
+    r.driver_id,
+    r.driver_code,
+    r.status,
+    null::text as temporary_password,
+    r.requested_at,
+    r.approved_at,
+    r.expires_at
+  from public.driver_password_reset_requests r
+  where r.driver_id = target_driver_id
+    and r.status in ('pending', 'approved', 'denied', 'expired')
+  order by r.requested_at desc
+  limit 1;
+end;
+$$;
+
+drop function if exists public.complete_driver_password_reset(text, text, text);
+create or replace function public.complete_driver_password_reset(
+  p_driver_code text,
+  p_temporary_password text,
+  p_new_password text
+)
+returns table (
+  id bigint,
+  full_name text,
+  driver_id text,
+  contact_number text,
+  plate_number text,
+  avatar_url text
+)
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  target_driver_id bigint;
+  reset_request_id bigint;
+begin
+  if length(coalesce(p_new_password, '')) < 6 then
+    raise exception 'Password must be at least 6 characters long.';
+  end if;
+
+  select d.driver_id
+    into target_driver_id
+  from public.drivers d
+  where d.status = 'active'
+    and upper(coalesce(d.driver_code, d.driver_id::text)) = upper(p_driver_code)
+  limit 1;
+
+  if target_driver_id is null then
+    return;
+  end if;
+
+  select r.request_id
+    into reset_request_id
+  from public.driver_password_reset_requests r
+  where r.driver_id = target_driver_id
+    and r.status = 'approved'
+    and r.temporary_password_hash is not null
+    and r.temporary_password_used_at is null
+    and (r.expires_at is null or r.expires_at >= now())
+    and r.temporary_password_hash = crypt(p_temporary_password, r.temporary_password_hash)
+  order by r.approved_at desc nulls last, r.requested_at desc
+  limit 1;
+
+  if reset_request_id is null then
+    raise exception 'Invalid or expired temporary reset password.';
+  end if;
+
+  update public.drivers d
+  set
+    password_hash = crypt(p_new_password, gen_salt('bf')),
+    updated_at = now()
+  where d.driver_id = target_driver_id;
+
+update public.driver_password_reset_requests r
+  set
+    status = 'completed',
+    temporary_password = null,
+    temporary_password_hash = null,
+    temporary_password_used_at = now(),
+    resolved_at = now()
+  where r.request_id = reset_request_id;
+
+  return query
+  select
+    d.driver_id as id,
+    trim(concat_ws(' ', d.first_name, d.last_name)) as full_name,
+    coalesce(d.driver_code, d.driver_id::text) as driver_id,
+    coalesce(d.contact_no, '') as contact_number,
+    coalesce(t.plate_no, '') as plate_number,
+    d.avatar_url
+  from public.drivers d
+  left join public.tricycles t on t.tricycle_id = d.tricycle_id
+  where d.driver_id = target_driver_id;
+end;
+$$;
+
+drop function if exists public.verify_driver_temporary_password(text, text);
+create or replace function public.verify_driver_temporary_password(
+  p_driver_code text,
+  p_temporary_password text
+)
+returns table (
+  request_id bigint,
+  driver_id bigint,
+  driver_code text,
+  status text
+)
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  target_driver_id bigint;
+begin
+  select d.driver_id
+    into target_driver_id
+  from public.drivers d
+  where d.status = 'active'
+    and upper(coalesce(d.driver_code, d.driver_id::text)) = upper(p_driver_code)
+  limit 1;
+
+  if target_driver_id is null then
+    return;
+  end if;
+
+  select r.request_id, r.driver_id, r.driver_code, r.status
+    into request_id, driver_id, driver_code, status
+  from public.driver_password_reset_requests r
+  where r.driver_id = target_driver_id
+    and r.status = 'approved'
+    and r.temporary_password_hash is not null
+    and r.temporary_password_used_at is null
+    and (r.expires_at is null or r.expires_at >= now())
+    and r.temporary_password_hash = crypt(p_temporary_password, r.temporary_password_hash)
+  order by r.approved_at desc nulls last, r.requested_at desc
+  limit 1;
+
+  if request_id is null then
+    return;
+  end if;
+
+  return next;
+end;
+$$;
 
 do $$
 begin
@@ -798,118 +1176,132 @@ begin
   end if;
 end $$;
 
+drop trigger if exists trg_driver_locations_updated_at on public.driver_locations;
 create trigger trg_driver_locations_updated_at
 before update on public.driver_locations
 for each row execute function public.set_updated_at();
 
+drop trigger if exists trg_mobile_violations_updated_at on public.mobile_violations;
 create trigger trg_mobile_violations_updated_at
 before update on public.mobile_violations
 for each row execute function public.set_updated_at();
 
+drop trigger if exists trg_violation_appeals_updated_at on public.violation_appeals;
 create trigger trg_violation_appeals_updated_at
 before update on public.violation_appeals
 for each row execute function public.set_updated_at();
 
+drop trigger if exists trg_violation_proofs_updated_at on public.violation_proofs;
 create trigger trg_violation_proofs_updated_at
 before update on public.violation_proofs
 for each row execute function public.set_updated_at();
 
+drop trigger if exists trg_trip_points_geofence_violation on public.trip_points;
 create trigger trg_trip_points_geofence_violation
 after insert on public.trip_points
 for each row execute function public.create_geofence_violation_from_trip_point();
 
-create index idx_todas_barangay_id on public.todas(barangay_id);
+create index if not exists idx_todas_barangay_id on public.todas(barangay_id);
 
-create index idx_admin_accounts_barangay_id on public.admin_accounts(barangay_id);
-create index idx_admin_accounts_toda_id on public.admin_accounts(toda_id);
-create index idx_admin_accounts_role on public.admin_accounts(admin_role);
+create index if not exists idx_admin_accounts_barangay_id on public.admin_accounts(barangay_id);
+create index if not exists idx_admin_accounts_toda_id on public.admin_accounts(toda_id);
+create index if not exists idx_admin_accounts_role on public.admin_accounts(admin_role);
+create index if not exists idx_admin_audit_logs_admin_created_at
+on public.admin_audit_logs(admin_id, created_at desc);
 
-create index idx_drivers_toda_id on public.drivers(toda_id);
-create index idx_drivers_tricycle_id on public.drivers(tricycle_id);
-create index idx_drivers_qr_id on public.drivers(qr_id);
+create index if not exists idx_drivers_toda_id on public.drivers(toda_id);
+create index if not exists idx_drivers_tricycle_id on public.drivers(tricycle_id);
+create index if not exists idx_drivers_qr_id on public.drivers(qr_id);
+create index if not exists idx_driver_password_reset_requests_driver_requested_at_desc
+on public.driver_password_reset_requests(driver_id, requested_at desc);
+create index if not exists idx_driver_password_reset_requests_status_requested_at_desc
+on public.driver_password_reset_requests(status, requested_at desc);
+create unique index if not exists idx_driver_password_reset_requests_one_pending
+on public.driver_password_reset_requests(driver_id)
+where status = 'pending';
 
-create index idx_tricycles_toda_id on public.tricycles(toda_id);
-create index idx_tricycles_permit_expiration_date on public.tricycles(permit_expiration_date);
+create index if not exists idx_tricycles_toda_id on public.tricycles(toda_id);
+create index if not exists idx_tricycles_permit_expiration_date on public.tricycles(permit_expiration_date);
 
-create index idx_routes_toda_id on public.routes(toda_id);
+create index if not exists idx_routes_toda_id on public.routes(toda_id);
 
-create index idx_qr_codes_driver_id on public.qr_codes(driver_id);
-create index idx_qr_codes_tricycle_id on public.qr_codes(tricycle_id);
-create unique index uq_qr_codes_active_per_driver
+create index if not exists idx_qr_codes_driver_id on public.qr_codes(driver_id);
+create index if not exists idx_qr_codes_tricycle_id on public.qr_codes(tricycle_id);
+create unique index if not exists uq_qr_codes_active_per_driver
 on public.qr_codes(driver_id)
 where status = 'active';
 
-create index idx_trips_driver_id on public.trips(driver_id);
-create index idx_trips_tricycle_id on public.trips(tricycle_id);
-create index idx_trips_route_id on public.trips(route_id);
-create index idx_trips_status on public.trips(trip_status);
-create index idx_trips_trip_start on public.trips(trip_start);
+create index if not exists idx_trips_driver_id on public.trips(driver_id);
+create index if not exists idx_trips_tricycle_id on public.trips(tricycle_id);
+create index if not exists idx_trips_route_id on public.trips(route_id);
+create index if not exists idx_trips_status on public.trips(trip_status);
+create index if not exists idx_trips_trip_start on public.trips(trip_start);
 
-create index idx_trip_points_trip_id on public.trip_points(trip_id);
-create index idx_trip_points_driver_id on public.trip_points(driver_id);
-create index idx_trip_points_recorded_at on public.trip_points(recorded_at desc);
-create index idx_driver_locations_trip_id on public.driver_locations(trip_id);
-create index idx_driver_locations_recorded_at on public.driver_locations(recorded_at desc);
-create index idx_driver_locations_driver_code on public.driver_locations(driver_code);
-create index idx_driver_locations_updated_at on public.driver_locations(updated_at desc);
-create index idx_trip_paths_updated_at on public.trip_paths(updated_at desc);
+create index if not exists idx_trip_points_trip_id on public.trip_points(trip_id);
+create index if not exists idx_trip_points_driver_id on public.trip_points(driver_id);
+create index if not exists idx_trip_points_recorded_at on public.trip_points(recorded_at desc);
+create index if not exists idx_driver_locations_trip_id on public.driver_locations(trip_id);
+create index if not exists idx_driver_locations_recorded_at on public.driver_locations(recorded_at desc);
+create index if not exists idx_driver_locations_driver_code on public.driver_locations(driver_code);
+create index if not exists idx_driver_locations_updated_at on public.driver_locations(updated_at desc);
+create index if not exists idx_trip_paths_updated_at on public.trip_paths(updated_at desc);
 
-create index idx_passenger_scans_trip_id on public.passenger_scans(trip_id);
-create index idx_passenger_scans_driver_id on public.passenger_scans(driver_id);
-create index idx_passenger_scans_qr_id on public.passenger_scans(qr_id);
-create index idx_passenger_scans_scanned_at on public.passenger_scans(scanned_at);
+create index if not exists idx_passenger_scans_trip_id on public.passenger_scans(trip_id);
+create index if not exists idx_passenger_scans_driver_id on public.passenger_scans(driver_id);
+create index if not exists idx_passenger_scans_qr_id on public.passenger_scans(qr_id);
+create index if not exists idx_passenger_scans_scanned_at on public.passenger_scans(scanned_at);
 
-create index idx_reports_scan_id on public.reports(scan_id);
-create index idx_reports_trip_id on public.reports(trip_id);
-create index idx_reports_driver_id on public.reports(driver_id);
-create index idx_reports_qr_id on public.reports(qr_id);
-create index idx_reports_report_type_id on public.reports(report_type_id);
-create index idx_reports_reported_at on public.reports(reported_at);
-create index idx_reports_status on public.reports(status);
+create index if not exists idx_reports_scan_id on public.reports(scan_id);
+create index if not exists idx_reports_trip_id on public.reports(trip_id);
+create index if not exists idx_reports_driver_id on public.reports(driver_id);
+create index if not exists idx_reports_qr_id on public.reports(qr_id);
+create index if not exists idx_reports_report_type_id on public.reports(report_type_id);
+create index if not exists idx_reports_reported_at on public.reports(reported_at);
+create index if not exists idx_reports_status on public.reports(status);
 
-create index idx_report_media_report_id on public.report_media(report_id);
+create index if not exists idx_report_media_report_id on public.report_media(report_id);
 
-create index idx_violations_type_id on public.violations(violation_type_id);
-create index idx_violations_trip_id on public.violations(trip_id);
-create index idx_violations_report_id on public.violations(report_id);
-create index idx_violations_driver_id on public.violations(driver_id);
-create index idx_violations_tricycle_id on public.violations(tricycle_id);
-create index idx_violations_status on public.violations(status);
-create index idx_violations_detected_at on public.violations(detected_at);
-create unique index uq_violations_dedupe_key
+create index if not exists idx_violations_type_id on public.violations(violation_type_id);
+create index if not exists idx_violations_trip_id on public.violations(trip_id);
+create index if not exists idx_violations_report_id on public.violations(report_id);
+create index if not exists idx_violations_driver_id on public.violations(driver_id);
+create index if not exists idx_violations_tricycle_id on public.violations(tricycle_id);
+create index if not exists idx_violations_status on public.violations(status);
+create index if not exists idx_violations_detected_at on public.violations(detected_at);
+create unique index if not exists uq_violations_dedupe_key
 on public.violations(dedupe_key)
 where dedupe_key is not null;
 
-create index idx_trip_route_points_trip on public.trip_route_points(trip_id);
-create index idx_trip_routes_local_trip_recorded_at on public.trip_routes(local_trip_id, recorded_at);
-create index idx_trip_routes_driver_recorded_at on public.trip_routes(driver_id, recorded_at desc);
-create unique index uq_trip_routes_local_trip_point
+create index if not exists idx_trip_route_points_trip on public.trip_route_points(trip_id);
+create index if not exists idx_trip_routes_local_trip_recorded_at on public.trip_routes(local_trip_id, recorded_at);
+create index if not exists idx_trip_routes_driver_recorded_at on public.trip_routes(driver_id, recorded_at desc);
+create unique index if not exists uq_trip_routes_local_trip_point
 on public.trip_routes(local_trip_id, driver_id, recorded_at, latitude, longitude);
-create index idx_mobile_violations_driver_occurred_at_desc on public.mobile_violations(driver_id, occurred_at desc);
-create index idx_mobile_violations_status on public.mobile_violations(status);
-create index idx_mobile_violations_type on public.mobile_violations(type);
-create unique index uq_mobile_violations_dedupe_key
+create index if not exists idx_mobile_violations_driver_occurred_at_desc on public.mobile_violations(driver_id, occurred_at desc);
+create index if not exists idx_mobile_violations_status on public.mobile_violations(status);
+create index if not exists idx_mobile_violations_type on public.mobile_violations(type);
+create unique index if not exists uq_mobile_violations_dedupe_key
 on public.mobile_violations(dedupe_key)
 where dedupe_key is not null;
-create index idx_violation_appeals_driver_submitted_at_desc on public.violation_appeals(driver_id, submitted_at desc);
-create index idx_violation_appeals_violation on public.violation_appeals(violation_id);
-create index idx_violation_appeals_admin_viewed_at
+create index if not exists idx_violation_appeals_driver_submitted_at_desc on public.violation_appeals(driver_id, submitted_at desc);
+create index if not exists idx_violation_appeals_violation on public.violation_appeals(violation_id);
+create index if not exists idx_violation_appeals_admin_viewed_at
 on public.violation_appeals(admin_viewed_at desc nulls last);
-create index idx_violation_appeals_admin_viewed_by
+create index if not exists idx_violation_appeals_admin_viewed_by
 on public.violation_appeals(admin_viewed_by_admin_id);
-create unique index ux_active_appeal_per_violation
+create unique index if not exists ux_active_appeal_per_violation
 on public.violation_appeals(violation_id)
 where status in ('SUBMITTED', 'UNDER_REVIEW');
-create index idx_violation_proofs_driver_uploaded_at_desc on public.violation_proofs(driver_id, uploaded_at desc);
-create index idx_violation_proofs_violation on public.violation_proofs(violation_id);
+create index if not exists idx_violation_proofs_driver_uploaded_at_desc on public.violation_proofs(driver_id, uploaded_at desc);
+create index if not exists idx_violation_proofs_violation on public.violation_proofs(violation_id);
 
-create index idx_emergency_alerts_status on public.emergency_alerts(status);
-create index idx_emergency_alerts_created_at on public.emergency_alerts(created_at desc);
-create index idx_emergency_alerts_driver_id on public.emergency_alerts(driver_id);
-create index idx_emergency_alerts_trip_id on public.emergency_alerts(trip_id);
-create index idx_emergency_alerts_toda_id on public.emergency_alerts(toda_id);
-create index idx_emergency_alerts_barangay_id on public.emergency_alerts(barangay_id);
-create index idx_admin_notification_reads_admin_read_at
+create index if not exists idx_emergency_alerts_status on public.emergency_alerts(status);
+create index if not exists idx_emergency_alerts_created_at on public.emergency_alerts(created_at desc);
+create index if not exists idx_emergency_alerts_driver_id on public.emergency_alerts(driver_id);
+create index if not exists idx_emergency_alerts_trip_id on public.emergency_alerts(trip_id);
+create index if not exists idx_emergency_alerts_toda_id on public.emergency_alerts(toda_id);
+create index if not exists idx_emergency_alerts_barangay_id on public.emergency_alerts(barangay_id);
+create index if not exists idx_admin_notification_reads_admin_read_at
 on public.admin_notification_reads(admin_id, read_at desc);
 
 insert into public.report_types (code, label) values
@@ -933,22 +1325,27 @@ alter table public.trip_points enable row level security;
 alter table public.trip_route_points enable row level security;
 alter table public.trip_routes enable row level security;
 alter table public.mobile_violations enable row level security;
+alter table public.driver_password_reset_requests enable row level security;
 alter table public.violation_appeals enable row level security;
 alter table public.violation_proofs enable row level security;
 alter table public.violations enable row level security;
+alter table public.admin_audit_logs enable row level security;
 
+drop policy if exists authenticated_can_read_driver_locations on public.driver_locations;
 create policy authenticated_can_read_driver_locations
 on public.driver_locations
 for select
 to anon, authenticated
 using (true);
 
+drop policy if exists authenticated_can_insert_driver_locations on public.driver_locations;
 create policy authenticated_can_insert_driver_locations
 on public.driver_locations
 for insert
 to anon, authenticated
 with check (true);
 
+drop policy if exists authenticated_can_update_driver_locations on public.driver_locations;
 create policy authenticated_can_update_driver_locations
 on public.driver_locations
 for update
@@ -956,42 +1353,49 @@ to anon, authenticated
 using (true)
 with check (true);
 
+drop policy if exists authenticated_can_read_trips on public.trips;
 create policy authenticated_can_read_trips
 on public.trips
 for select
 to anon, authenticated
 using (true);
 
+drop policy if exists authenticated_can_read_trip_points on public.trip_points;
 create policy authenticated_can_read_trip_points
 on public.trip_points
 for select
 to anon, authenticated
 using (true);
 
+drop policy if exists authenticated_can_insert_trip_points on public.trip_points;
 create policy authenticated_can_insert_trip_points
 on public.trip_points
 for insert
 to anon, authenticated
 with check (true);
 
+drop policy if exists authenticated_can_read_trip_route_points on public.trip_route_points;
 create policy authenticated_can_read_trip_route_points
 on public.trip_route_points
 for select
 to anon, authenticated
 using (true);
 
+drop policy if exists authenticated_can_read_trip_routes on public.trip_routes;
 create policy authenticated_can_read_trip_routes
 on public.trip_routes
 for select
 to anon, authenticated
 using (true);
 
+drop policy if exists authenticated_can_insert_trip_routes on public.trip_routes;
 create policy authenticated_can_insert_trip_routes
 on public.trip_routes
 for insert
 to anon, authenticated
 with check (true);
 
+drop policy if exists authenticated_can_update_trip_routes on public.trip_routes;
 create policy authenticated_can_update_trip_routes
 on public.trip_routes
 for update
@@ -999,48 +1403,71 @@ to anon, authenticated
 using (true)
 with check (true);
 
+drop policy if exists authenticated_can_delete_trip_routes on public.trip_routes;
 create policy authenticated_can_delete_trip_routes
 on public.trip_routes
 for delete
 to anon, authenticated
 using (true);
 
+drop policy if exists authenticated_can_read_mobile_violations on public.mobile_violations;
 create policy authenticated_can_read_mobile_violations
 on public.mobile_violations
 for select
 to anon, authenticated
 using (true);
 
+drop policy if exists authenticated_can_insert_mobile_violations on public.mobile_violations;
 create policy authenticated_can_insert_mobile_violations
 on public.mobile_violations
 for insert
 to anon, authenticated
 with check (true);
 
+drop policy if exists authenticated_can_update_mobile_violations on public.mobile_violations;
+create policy authenticated_can_update_mobile_violations
+on public.mobile_violations
+for update
+to anon, authenticated
+using (true)
+with check (true);
+
+drop policy if exists authenticated_can_read_driver_password_reset_requests on public.driver_password_reset_requests;
+create policy authenticated_can_read_driver_password_reset_requests
+on public.driver_password_reset_requests
+for select
+to anon, authenticated
+using (true);
+
+drop policy if exists authenticated_can_read_violation_appeals on public.violation_appeals;
 create policy authenticated_can_read_violation_appeals
 on public.violation_appeals
 for select
 to anon, authenticated
 using (true);
 
+drop policy if exists authenticated_can_insert_violation_appeals on public.violation_appeals;
 create policy authenticated_can_insert_violation_appeals
 on public.violation_appeals
 for insert
 to anon, authenticated
 with check (true);
 
+drop policy if exists authenticated_can_read_violation_proofs on public.violation_proofs;
 create policy authenticated_can_read_violation_proofs
 on public.violation_proofs
 for select
 to anon, authenticated
 using (true);
 
+drop policy if exists authenticated_can_insert_violation_proofs on public.violation_proofs;
 create policy authenticated_can_insert_violation_proofs
 on public.violation_proofs
 for insert
 to anon, authenticated
 with check (true);
 
+drop policy if exists authenticated_can_read_violations on public.violations;
 create policy authenticated_can_read_violations
 on public.violations
 for select
@@ -1071,6 +1498,11 @@ begin
 
   begin
     alter publication supabase_realtime add table public.mobile_violations;
+  exception when duplicate_object or undefined_object then null;
+  end;
+
+  begin
+    alter publication supabase_realtime add table public.driver_password_reset_requests;
   exception when duplicate_object or undefined_object then null;
   end;
 
@@ -1121,6 +1553,11 @@ begin
 exception
   when undefined_table then null;
 end $$;
+
+grant execute on function public.request_driver_password_reset(text, text, text) to anon, authenticated;
+grant execute on function public.get_driver_password_reset_status(text) to anon, authenticated;
+grant execute on function public.complete_driver_password_reset(text, text, text) to anon, authenticated;
+grant execute on function public.verify_driver_temporary_password(text, text) to anon, authenticated;
 
 do $$
 begin

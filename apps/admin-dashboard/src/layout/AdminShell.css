@@ -1119,6 +1119,7 @@
   position: relative;
   width: 60px;
   height: 60px;
+  overflow: visible;
   transition:
     transform 160ms ease,
     filter 160ms ease;
@@ -1130,6 +1131,8 @@
 }
 
 .violator-avatar__button {
+  position: relative;
+  z-index: 1;
   width: 100%;
   height: 100%;
   padding: 0;
@@ -1186,6 +1189,7 @@
   position: absolute;
   top: -4px;
   left: -4px;
+  z-index: 3;
   width: 22px;
   height: 22px;
   border: 2px solid #ffffff;
@@ -1197,6 +1201,7 @@
   font-size: 0.9rem;
   line-height: 1;
   cursor: pointer;
+  pointer-events: auto;
   box-shadow: 0 8px 18px rgba(15, 23, 42, 0.22);
 }
 
@@ -1606,6 +1611,18 @@
   border-bottom: 0;
 }
 
+.dashboard-data-table__row--clickable {
+  cursor: pointer;
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+
+.dashboard-data-table__row--clickable:hover,
+.dashboard-data-table__row--clickable:focus-visible {
+  background: #f8fafc;
+  box-shadow: inset 3px 0 0 #32b894;
+  outline: none;
+}
+
 .dashboard-table-empty {
   display: grid;
   place-items: center;
@@ -1620,6 +1637,26 @@
 
 .drivers-table__pill--status {
   text-transform: capitalize;
+}
+
+.trip-status-pill--ongoing {
+  color: #075985;
+  background: #e0f2fe;
+}
+
+.trip-status-pill--completed {
+  color: #166534;
+  background: #dcfce7;
+}
+
+.trip-status-pill--incomplete {
+  color: #92400e;
+  background: #fef3c7;
+}
+
+.trip-status-pill--cancelled {
+  color: #991b1b;
+  background: #fee2e2;
 }
 
 .alerts-list--summary,
@@ -1734,6 +1771,184 @@
 .status-badge.online {
   background: #dcfce7;
   color: #166534;
+}
+
+.password-reset-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1230;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.46);
+  backdrop-filter: blur(4px);
+}
+
+.password-reset-modal {
+  width: min(100%, 520px);
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid #bfdbfe;
+  background: #ffffff;
+  box-shadow: 0 28px 64px rgba(15, 23, 42, 0.24);
+  animation: emergency-modal-enter 180ms ease-out;
+}
+
+.password-reset-modal__header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 20px 0;
+}
+
+.password-reset-modal__badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: #e0f2fe;
+  color: #075985;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.password-reset-modal__close {
+  width: 36px;
+  height: 36px;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 1.35rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.password-reset-modal__body {
+  display: grid;
+  gap: 14px;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 20px;
+}
+
+.password-reset-modal h2 {
+  margin: 0;
+  color: #0f172a;
+  font-size: 1.25rem;
+  line-height: 1.25;
+}
+
+.password-reset-modal p {
+  margin: 0;
+  color: #475569;
+  font-size: 0.875rem;
+  line-height: 1.55;
+}
+
+.password-reset-modal__details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.password-reset-modal__details div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.password-reset-modal__details span,
+.password-reset-modal__temp span,
+.password-reset-modal__temp small {
+  color: #64748b;
+  font-size: 0.75rem;
+}
+
+.password-reset-modal__details strong {
+  min-width: 0;
+  color: #0f172a;
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.password-reset-modal__error {
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(201, 58, 76, 0.24);
+  background: #fff1f2;
+  color: #a61b32;
+  font-size: 0.8125rem;
+}
+
+.password-reset-modal__temp {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border-radius: 8px;
+  border: 1px solid #bbf7d0;
+  background: #f0fdf4;
+}
+
+.password-reset-modal__temp strong {
+  color: #14532d;
+  font-size: 1.5rem;
+  letter-spacing: 0.08em;
+}
+
+.password-reset-modal__actions {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 0 20px 20px;
+}
+
+.password-reset-modal__primary,
+.password-reset-modal__secondary,
+.password-reset-modal__danger {
+  min-height: 42px;
+  padding: 0 16px;
+  border-radius: 8px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.password-reset-modal__primary {
+  border: 0;
+  background: #0f766e;
+  color: #ffffff;
+}
+
+.password-reset-modal__secondary {
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #334155;
+}
+
+.password-reset-modal__danger {
+  border: 1px solid #fecaca;
+  background: #fff1f2;
+  color: #b91c1c;
+}
+
+.password-reset-modal__primary:disabled,
+.password-reset-modal__secondary:disabled,
+.password-reset-modal__danger:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .emergency-modal-backdrop {
@@ -2079,6 +2294,141 @@
   cursor: not-allowed;
 }
 
+.alert-detail-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1220;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.44);
+  backdrop-filter: blur(4px);
+}
+
+.alert-detail-modal {
+  width: min(100%, 860px);
+  max-height: min(90vh, 820px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 8px;
+  border: 1px solid #dbe4ef;
+  background: #ffffff;
+  box-shadow: 0 28px 64px rgba(15, 23, 42, 0.24);
+  animation: emergency-modal-enter 180ms ease-out;
+}
+
+.alert-detail-modal__header {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 20px;
+  border-bottom: 1px solid #e6edf5;
+}
+
+.alert-detail-modal__badge {
+  display: inline-flex;
+  width: fit-content;
+  margin-bottom: 8px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: #e7f7f2;
+  color: #167f68;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.alert-detail-modal h2,
+.alert-detail-modal p {
+  margin: 0;
+}
+
+.alert-detail-modal h2 {
+  color: #172033;
+  font-size: 1.15rem;
+}
+
+.alert-detail-modal p {
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 0.84rem;
+}
+
+.alert-detail-modal__body {
+  display: grid;
+  gap: 14px;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px;
+}
+
+.alert-detail-modal__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.alert-detail-modal__grid div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+}
+
+.alert-detail-modal__grid span,
+.alert-detail-modal__status span {
+  color: #64748b;
+  font-size: 0.73rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.alert-detail-modal__grid strong {
+  min-width: 0;
+  color: #172033;
+  overflow-wrap: anywhere;
+}
+
+.alert-detail-modal__status {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #dbe4ef;
+  background: #f8fafc;
+}
+
+.alert-detail-modal__status select {
+  min-height: 42px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 0 12px;
+  color: #172033;
+  font: inherit;
+}
+
+.alert-detail-modal__map {
+  min-height: 280px;
+  overflow: hidden;
+  border-radius: 8px;
+  border: 1px solid #dbe4ef;
+  background: #e8eef6;
+}
+
+.alert-detail-modal__map iframe {
+  width: 100%;
+  height: 320px;
+  display: block;
+  border: 0;
+}
+
 .violation-map-focus-marker {
   position: relative;
   width: 28px;
@@ -2390,6 +2740,69 @@
   color: #64748b;
 }
 
+.driver-password-reset-list {
+  display: grid;
+  gap: 10px;
+}
+
+.driver-password-reset-card,
+.driver-password-reset__temp {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #dbe4ea;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.driver-password-reset-card > div:first-child,
+.driver-password-reset-card__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.driver-password-reset-card span,
+.driver-password-reset-card small,
+.driver-password-reset__temp span,
+.driver-password-reset__temp small {
+  color: #64748b;
+  font-size: 0.8125rem;
+}
+
+.driver-password-reset__temp {
+  border-color: #86efac;
+  background: #f0fdf4;
+}
+
+.driver-password-reset__temp strong {
+  width: fit-content;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #166534;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  letter-spacing: 0.08em;
+}
+
+.driver-password-reset-card__status--approved {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.driver-password-reset-card__status--denied,
+.driver-password-reset-card__status--expired {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.driver-password-reset-card__status--completed {
+  background: #e0f2fe;
+  color: #075985;
+}
+
 .driver-trip-list {
   display: grid;
   gap: 12px;
@@ -2503,7 +2916,7 @@
 }
 
 .trip-path-modal {
-  width: min(1040px, 100%);
+  width: min(1180px, 100%);
   max-height: min(860px, calc(100vh - 40px));
   overflow: hidden;
   display: flex;
@@ -2581,6 +2994,55 @@
   background: #eff6ff;
   color: #1e3a8a;
   font-weight: 700;
+}
+
+.trip-path-modal__section {
+  display: grid;
+  gap: 10px;
+}
+
+.trip-path-modal__section-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.trip-path-modal__section-head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #0f172a;
+}
+
+.trip-path-modal__section-head span {
+  color: #64748b;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.trip-path-modal__violations {
+  display: grid;
+  gap: 8px;
+}
+
+.trip-path-modal__violations article {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid #fee2e2;
+  border-radius: 10px;
+  background: #fff7ed;
+}
+
+.trip-path-modal__violations strong {
+  color: #7f1d1d;
+}
+
+.trip-path-modal__violations span,
+.trip-path-modal__violations p {
+  margin: 0;
+  color: #64748b;
+  font-size: 0.82rem;
 }
 
 .trip-path-map {
@@ -2730,6 +3192,7 @@
   .driver-modal__info-grid,
   .driver-trip-card__grid,
   .trip-path-modal__meta,
+  .alert-detail-modal__grid,
   .emergency-modal__details {
     grid-template-columns: 1fr;
   }

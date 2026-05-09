@@ -136,5 +136,27 @@ export default function ReportPage({ params }: ReportPageProps) {
     )
   }
 
-  redirect(`${passengerAppBase.url}/report/${encodeURIComponent(params.qrToken)}`)
+  const nextUrl = new URL(
+    `${passengerAppBase.url}/report/${encodeURIComponent(params.qrToken)}`
+  )
+  nextUrl.searchParams.set("apiBase", "")
+
+  const forwardedHost = process.env.VERCEL_PROJECT_PRODUCTION_URL
+    ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
+    : process.env.VERCEL_URL
+      ? `https://${process.env.VERCEL_URL}`
+      : process.env.URL?.trim()
+
+  if (forwardedHost) {
+    try {
+      const parsed = new URL(forwardedHost)
+      nextUrl.searchParams.set("apiBase", parsed.toString().replace(/\/+$/, ""))
+    } catch {
+      nextUrl.searchParams.delete("apiBase")
+    }
+  } else {
+    nextUrl.searchParams.delete("apiBase")
+  }
+
+  redirect(nextUrl.toString())
 }

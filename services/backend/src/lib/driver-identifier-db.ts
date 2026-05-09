@@ -12,8 +12,11 @@ export const resolveDriverIdFromIdentifier = async (identifier: string) => {
     `
       SELECT d.driver_id
       FROM public.drivers d
-      WHERE upper(d.driver_code) = $1
-         OR d.driver_id::text = $1
+      WHERE d.deleted_at IS NULL
+        AND (
+          upper(d.driver_code) = $1
+          OR d.driver_id::text = $1
+        )
       LIMIT 1
     `,
     [normalized]

@@ -2,13 +2,15 @@ import { useEffect, useMemo, useState } from "react"
 import QRCode from "qrcode"
 import {
   fetchDashboardData,
+  getCachedDashboardData,
   type DashboardTripRecord
 } from "../lib/dashboard-data"
-import { fetchAdminReports, type AdminReportRecord } from "../lib/reports"
+import { fetchAdminReports, getCachedAdminReports, type AdminReportRecord } from "../lib/reports"
 import {
   createMasterDataItem,
   deleteMasterDataItem,
   fetchMasterData,
+  getCachedMasterData,
   updateMasterDataItem,
   type DriverRecord,
   type EntityStatus,
@@ -26,6 +28,8 @@ type TodaManagementPageProps = {
   searchQuery?: string
   onSearchQueryChange?: (query: string) => void
   onDataChanged?: () => void
+  onDriverDeleted?: (driver: DriverRecord) => void
+  readOnly?: boolean
 }
 
 type DriverFormState = {
@@ -47,6 +51,7 @@ type PendingDeleteState =
   | {
       entity: "driver"
       id: number
+      driver: DriverRecord
       title: string
       description: string
       confirmLabel: string
@@ -74,6 +79,18 @@ const initialMasterData: MasterDataSnapshot = {
   tricycles: [],
   routes: []
 }
+
+type FleetPageCache = {
+  savedAt: number
+  data: MasterDataSnapshot
+  driverTrips: DashboardTripRecord[]
+  driverReports: AdminReportRecord[]
+  tripHistoryError: string | null
+  reportHistoryError: string | null
+}
+
+const FLEET_PAGE_CACHE_MAX_AGE_MS = 2 * 60 * 1000
+const fleetPageCache = new Map<string, FleetPageCache>()
 
 const createInitialDriverForm = (): DriverFormState => ({
   firstName: "",
@@ -108,6 +125,23 @@ const formatTripStatusLabel = (value: DashboardTripRecord["tripStatus"]) => toTi
 const firstConfiguredUrl = (...values: Array<string | undefined>) =>
   values.map((value) => value?.trim()).find((value) => Boolean(value)) ?? ""
 
+const normalizePublicBaseUrl = (value: string) => {
+  try {
+    const parsed = new URL(value.trim())
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null
+    }
+
+    if (isLoopbackHostname(parsed.hostname) || isPrivateIpv4Hostname(parsed.hostname)) {
+      return null
+    }
+
+    return parsed.toString().replace(/\/+$/, "")
+  } catch {
+    return null
+  }
+}
+
 const REPORT_BASE_URL = firstConfiguredUrl(
   import.meta.env.VITE_PUBLIC_PASSENGER_REPORT_BASE_URL as string | undefined,
   import.meta.env.VITE_PUBLIC_REPORT_BASE_URL as string | undefined,
@@ -122,6 +156,12 @@ const REPORT_BASE_URL = firstConfiguredUrl(
     ? `https://${import.meta.env.VITE_NETLIFY_URL as string}`
     : undefined,
   import.meta.env.VITE_DEPLOY_PRIME_URL as string | undefined
+)
+
+const REPORTING_API_BASE_URL = firstConfiguredUrl(
+  import.meta.env.VITE_PUBLIC_BACKEND_BASE_URL as string | undefined,
+  import.meta.env.VITE_PUBLIC_API_BASE_URL as string | undefined,
+  import.meta.env.VITE_BACKEND_BASE_URL as string | undefined
 )
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"])
@@ -199,9 +239,29 @@ const resolvePassengerReportBaseUrl = () => {
 
 const PASSENGER_REPORT_BASE = resolvePassengerReportBaseUrl()
 
+const resolvePassengerReportingApiBaseUrl = () => {
+  const configured = normalizePublicBaseUrl(REPORTING_API_BASE_URL)
+  if (configured) {
+    return configured
+  }
+
+  if (typeof window === "undefined") {
+    return null
+  }
+
+  return normalizePublicBaseUrl(window.location.origin)
+}
+
 const buildPassengerReportUrl = (reportPath?: string) => {
   if (!reportPath || !PASSENGER_REPORT_BASE.url) return ""
-  return `${PASSENGER_REPORT_BASE.url}${reportPath}`
+
+  const targetUrl = new URL(`${PASSENGER_REPORT_BASE.url}${reportPath}`)
+  const apiBase = resolvePassengerReportingApiBaseUrl()
+  if (apiBase) {
+    targetUrl.searchParams.set("apiBase", apiBase)
+  }
+
+  return targetUrl.toString()
 }
 
 export default function TodaManagementPage({
@@ -211,7 +271,9 @@ export default function TodaManagementPage({
   lockedTodaLabel,
   searchQuery: controlledSearchQuery,
   onSearchQueryChange,
-  onDataChanged
+  onDataChanged,
+  onDriverDeleted,
+  readOnly = false
 }: TodaManagementPageProps) {
   const isDriverPage = page === "drivers"
   const [data, setData] = useState<MasterDataSnapshot>(initialMasterData)
@@ -236,43 +298,86 @@ export default function TodaManagementPage({
   const [tricycleForm, setTricycleForm] = useState<TricycleFormState>(createInitialTricycleForm)
   const [pendingDelete, setPendingDelete] = useState<PendingDeleteState | null>(null)
   const [qrPreviewDataUrl, setQrPreviewDataUrl] = useState<string | null>(null)
+  const fleetCacheKey = `${lockedTodaId ?? "all"}:${readOnly ? "readonly" : "live"}`
 
-  const loadMasterData = async () => {
-    setLoading(true)
-    setTripHistoryLoading(true)
-    setReportHistoryLoading(true)
+  const applyFleetCache = (cached: FleetPageCache) => {
+    setData(cached.data)
+    setDriverTrips(cached.driverTrips)
+    setDriverReports(cached.driverReports)
+    setTripHistoryError(cached.tripHistoryError)
+    setReportHistoryError(cached.reportHistoryError)
+    setLoading(false)
+    setTripHistoryLoading(false)
+    setReportHistoryLoading(false)
+    setError(null)
+  }
+
+  const loadMasterData = async (options: { force?: boolean } = {}) => {
+    const cached = fleetPageCache.get(fleetCacheKey)
+    const canUseWarmCache = Boolean(cached && !options.force)
+
+    if (cached && canUseWarmCache) {
+      applyFleetCache(cached)
+      if (readOnly || Date.now() - cached.savedAt < FLEET_PAGE_CACHE_MAX_AGE_MS) {
+        return
+      }
+    } else {
+      setLoading(true)
+      setTripHistoryLoading(true)
+      setReportHistoryLoading(true)
+    }
+
     try {
       const [masterSnapshot, dashboardSnapshot, reportsSnapshot] = await Promise.allSettled([
-        fetchMasterData(accessToken),
-        fetchDashboardData(accessToken),
-        fetchAdminReports(accessToken)
+        readOnly ? getCachedMasterData() : fetchMasterData(accessToken),
+        readOnly ? getCachedDashboardData() : fetchDashboardData(accessToken),
+        readOnly ? getCachedAdminReports() : fetchAdminReports(accessToken)
       ])
 
       if (masterSnapshot.status === "rejected") {
         throw masterSnapshot.reason
       }
+      if (!masterSnapshot.value) {
+        throw new Error("No cached fleet data is available for offline viewer mode.")
+      }
 
       const snapshot = masterSnapshot.value
-      setData(snapshot)
       setError(null)
 
-      if (dashboardSnapshot.status === "fulfilled") {
-        setDriverTrips(dashboardSnapshot.value.recentTrips)
-        setTripHistoryError(null)
+      let nextDriverTrips: DashboardTripRecord[] = []
+      let nextTripHistoryError: string | null = null
+      if (dashboardSnapshot.status === "fulfilled" && dashboardSnapshot.value) {
+        nextDriverTrips = dashboardSnapshot.value.recentTrips
+      } else if (dashboardSnapshot.status === "rejected") {
+        nextTripHistoryError = String(dashboardSnapshot.reason)
       } else {
-        setDriverTrips([])
-        setTripHistoryError(String(dashboardSnapshot.reason))
+        nextTripHistoryError = "No cached trip history is available for offline viewer mode."
       }
 
-      if (reportsSnapshot.status === "fulfilled") {
-        setDriverReports(reportsSnapshot.value.reports)
-        setReportHistoryError(null)
+      let nextDriverReports: AdminReportRecord[] = []
+      let nextReportHistoryError: string | null = null
+      if (reportsSnapshot.status === "fulfilled" && reportsSnapshot.value) {
+        nextDriverReports = reportsSnapshot.value.reports
+      } else if (reportsSnapshot.status === "rejected") {
+        nextReportHistoryError = String(reportsSnapshot.reason)
       } else {
-        setDriverReports([])
-        setReportHistoryError(String(reportsSnapshot.reason))
+        nextReportHistoryError = "No cached report history is available for offline viewer mode."
       }
+
+      const nextCache: FleetPageCache = {
+        savedAt: Date.now(),
+        data: snapshot,
+        driverTrips: nextDriverTrips,
+        driverReports: nextDriverReports,
+        tripHistoryError: nextTripHistoryError,
+        reportHistoryError: nextReportHistoryError
+      }
+      fleetPageCache.set(fleetCacheKey, nextCache)
+      applyFleetCache(nextCache)
     } catch (loadError) {
-      setError(String(loadError))
+      if (!cached) {
+        setError(String(loadError))
+      }
     } finally {
       setLoading(false)
       setTripHistoryLoading(false)
@@ -282,7 +387,7 @@ export default function TodaManagementPage({
 
   useEffect(() => {
     void loadMasterData()
-  }, [accessToken])
+  }, [accessToken, readOnly, fleetCacheKey])
 
   useEffect(() => {
     if (!isModalOpen && !selectedDriverDetails) return
@@ -428,6 +533,7 @@ export default function TodaManagementPage({
   }
 
   const openCreateModal = () => {
+    if (readOnly) return
     resetFeedback()
     setModalMode("create")
     setSelectedDriver(null)
@@ -438,6 +544,7 @@ export default function TodaManagementPage({
   }
 
   const openDriverEditModal = (row: DriverRecord) => {
+    if (readOnly) return
     resetFeedback()
     setModalMode("edit")
     setSelectedDriver(row)
@@ -456,6 +563,7 @@ export default function TodaManagementPage({
   }
 
   const openTricycleEditModal = (row: TricycleRecord) => {
+    if (readOnly) return
     resetFeedback()
     setModalMode("edit")
     setSelectedTricycle(row)
@@ -469,6 +577,10 @@ export default function TodaManagementPage({
   }
 
   const handleDriverSubmit = async () => {
+    if (readOnly) {
+      setError("Offline viewer mode is read-only. Reconnect to edit drivers.")
+      return
+    }
     if (!lockedTodaId) {
       setError("This TODA admin account is missing an assigned TODA.")
       return
@@ -509,7 +621,7 @@ export default function TodaManagementPage({
         setNotice(`Updated driver ${driverForm.firstName} ${driverForm.lastName}.`)
       }
 
-      await loadMasterData()
+      await loadMasterData({ force: true })
       onDataChanged?.()
       closeModal()
     } catch (submitError) {
@@ -520,6 +632,10 @@ export default function TodaManagementPage({
   }
 
   const handleTricycleSubmit = async () => {
+    if (readOnly) {
+      setError("Offline viewer mode is read-only. Reconnect to edit tricycles.")
+      return
+    }
     if (!lockedTodaId) {
       setError("This TODA admin account is missing an assigned TODA.")
       return
@@ -569,7 +685,7 @@ export default function TodaManagementPage({
         setNotice(`Updated tricycle ${tricycleForm.plateNo}.`)
       }
 
-      await loadMasterData()
+      await loadMasterData({ force: true })
       onDataChanged?.()
       closeModal()
     } catch (submitError) {
@@ -580,9 +696,11 @@ export default function TodaManagementPage({
   }
 
   const openDeleteDriverDialog = (row: DriverRecord) => {
+    if (readOnly) return
     setPendingDelete({
       entity: "driver",
       id: row.driverId,
+      driver: row,
       title: `Delete driver ${row.firstName} ${row.lastName}?`,
       description: "The driver record will be permanently removed from this TODA page.",
       confirmLabel: "Delete Driver"
@@ -590,6 +708,7 @@ export default function TodaManagementPage({
   }
 
   const openDeleteTricycleDialog = (row: TricycleRecord) => {
+    if (readOnly) return
     setPendingDelete({
       entity: "tricycle",
       id: row.tricycleId,
@@ -601,6 +720,10 @@ export default function TodaManagementPage({
 
   const confirmDelete = async () => {
     if (!pendingDelete) return
+    if (readOnly) {
+      setError("Offline viewer mode is read-only. Reconnect to delete records.")
+      return
+    }
 
     const deleteKey = `delete-${pendingDelete.entity}-${pendingDelete.id}`
     setBusyKey(deleteKey)
@@ -609,7 +732,10 @@ export default function TodaManagementPage({
 
     try {
       await deleteMasterDataItem(accessToken, pendingDelete.entity, pendingDelete.id)
-      await loadMasterData()
+      await loadMasterData({ force: true })
+      if (pendingDelete.entity === "driver") {
+        onDriverDeleted?.(pendingDelete.driver)
+      }
       setNotice(
         pendingDelete.entity === "driver" ? "Deleted driver." : "Deleted tricycle."
       )
@@ -678,6 +804,10 @@ export default function TodaManagementPage({
 
   const handleRegenerateDriverQr = async () => {
     if (!selectedDriverDetails) return
+    if (readOnly) {
+      setError("Offline viewer mode is read-only. Reconnect to regenerate QR codes.")
+      return
+    }
 
     const busyAction = `regenerate-driver-qr-${selectedDriverDetails.driverId}`
     setBusyKey(busyAction)
@@ -693,7 +823,7 @@ export default function TodaManagementPage({
       )
 
       setSelectedDriverDetails(updated)
-      await loadMasterData()
+      await loadMasterData({ force: true })
       onDataChanged?.()
       setNotice(`Regenerated passenger QR for ${updated.firstName} ${updated.lastName}.`)
     } catch (regenerateError) {
@@ -723,7 +853,6 @@ export default function TodaManagementPage({
           {error ?? notice}
         </div>
       )}
-
       <section className="fleet-toolbar">
         <input
           className="fleet-toolbar__search"
@@ -746,7 +875,12 @@ export default function TodaManagementPage({
           ))}
         </select>
 
-        <button type="button" className="fleet-toolbar__button" onClick={openCreateModal}>
+        <button
+          type="button"
+          className="fleet-toolbar__button"
+          onClick={openCreateModal}
+          disabled={readOnly}
+        >
           {addButtonLabel}
         </button>
       </section>
@@ -806,6 +940,7 @@ export default function TodaManagementPage({
                               event.stopPropagation()
                               openDriverEditModal(row)
                             }}
+                            disabled={readOnly}
                           >
                             Edit
                           </button>
@@ -816,7 +951,7 @@ export default function TodaManagementPage({
                               event.stopPropagation()
                               openDeleteDriverDialog(row)
                             }}
-                            disabled={busyKey === `delete-driver-${row.driverId}`}
+                            disabled={readOnly || busyKey === `delete-driver-${row.driverId}`}
                           >
                             {busyKey === `delete-driver-${row.driverId}` ? "Deleting..." : "Delete"}
                           </button>
@@ -859,6 +994,7 @@ export default function TodaManagementPage({
                           type="button"
                           className="fleet-action fleet-action--edit"
                           onClick={() => openTricycleEditModal(row)}
+                          disabled={readOnly}
                         >
                           Edit
                         </button>
@@ -866,7 +1002,7 @@ export default function TodaManagementPage({
                           type="button"
                           className="fleet-action fleet-action--delete"
                           onClick={() => openDeleteTricycleDialog(row)}
-                          disabled={busyKey === `delete-tricycle-${row.tricycleId}`}
+                          disabled={readOnly || busyKey === `delete-tricycle-${row.tricycleId}`}
                         >
                           {busyKey === `delete-tricycle-${row.tricycleId}` ? "Deleting..." : "Delete"}
                         </button>
@@ -1023,6 +1159,7 @@ export default function TodaManagementPage({
                           className="fleet-action fleet-action--delete"
                           onClick={() => void handleRegenerateDriverQr()}
                           disabled={
+                            readOnly ||
                             busyKey === `regenerate-driver-qr-${selectedDriverDetails.driverId}`
                           }
                         >

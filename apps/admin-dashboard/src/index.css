@@ -48,3 +48,52 @@ textarea::placeholder {
   font-family: var(--admin-font-family);
   font-size: inherit;
 }
+
+.offline-status {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 10000;
+  display: flex;
+  max-width: min(420px, calc(100vw - 32px));
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.18);
+  color: #0f172a;
+  font-size: var(--admin-font-size-meta);
+  font-weight: 600;
+}
+
+.offline-status span {
+  min-width: 0;
+}
+
+.offline-status button {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 6px;
+  background: #0b5cff;
+  color: #ffffff;
+  cursor: pointer;
+  font-weight: 700;
+  padding: 7px 10px;
+}
+
+.offline-status button:hover {
+  background: #0848c8;
+}
+
+@media (max-width: 520px) {
+  .offline-status {
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+    max-width: none;
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

@@ -164,6 +164,11 @@ export const fetchMasterData = async (accessToken: string) => {
   }
 }
 
+export const getCachedMasterData = async () => {
+  const cached = await getSnapshot<MasterDataSnapshot>(MASTER_DATA_CACHE_KEY)
+  return cached ? withCacheMeta(cached) : null
+}
+
 export const createMasterDataItem = async <TItem>(
   accessToken: string,
   entity: EntityType,

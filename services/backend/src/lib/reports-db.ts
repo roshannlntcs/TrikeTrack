@@ -795,6 +795,10 @@ export const createPassengerReport = async (input: CreatePassengerReportInput) =
       }
 
       if (input.evidenceImage) {
+        const evidenceMediaType =
+          input.evidenceImage.mimeType.trim().toLowerCase() === "application/pdf"
+            ? "document"
+            : "image"
         const uploadedEvidence = await uploadPassengerReportEvidence({
           reportId,
           driverId: context.driverId,
@@ -812,9 +816,9 @@ export const createPassengerReport = async (input: CreatePassengerReportInput) =
               media_type,
               file_url
             )
-            VALUES ($1, 'image', $2)
+            VALUES ($1, $2, $3)
           `,
-          [reportId, uploadedEvidence.publicUrl]
+          [reportId, evidenceMediaType, uploadedEvidence.publicUrl]
         )
       }
 

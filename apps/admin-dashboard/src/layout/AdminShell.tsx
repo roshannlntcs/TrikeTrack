@@ -15,9 +15,12 @@ import {
   type DashboardOperationalDriverRecord,
   type DashboardTripRecord,
   type DashboardViolationRecord,
+  type DriverPasswordResetRequestRecord,
   type TripPathRecord,
   fetchTripPath,
-  markDashboardNotificationsRead
+  markDashboardNotificationsRead,
+  updateViolationAlertStatus,
+  decideDriverPasswordResetRequest
 } from "../lib/dashboard-data"
 import {
   connectAdminEmergencyStream,
@@ -34,13 +37,17 @@ import {
   type LiveMapViolator,
   type ViolationPopupPosition
 } from "../components/live-map/violator-types"
+import {
+  createSmoothDriverMarkerManager,
+  type DriverMarkerAppearance,
+  type DriverMarkerOnlineStatus
+} from "../components/live-map/smooth-driver-markers"
 import SuperadminPage from "../superadmin/SuperadminPage"
 import TodaManagementPage from "../toda/TodaManagementPage"
 import {
-  MAP_STYLE_OPTIONS,
   createRasterStyle,
   type TriketrackMapStyleId
-} from "../../../../common/maps"
+} from "../lib/map-basemaps"
 import "./AdminShell.css"
 
 type DriverStreamState = {
@@ -49,6 +56,7 @@ type DriverStreamState = {
   latestPoint: DriverLocationEvent
   violationCount: number
   recentPoints: DriverLocationEvent[]
+  onlineStatus: DriverMarkerOnlineStatus
 }
 
 type NavKey =
@@ -217,6 +225,7 @@ const ALERT_REASON_PRIORITY: Record<string, number> = {
 
 const FRESH_VIOLATION_WINDOW_MS = 30 * 60 * 1000
 const VIOLATOR_DISMISSALS_STORAGE_KEY_PREFIX = "triketrack-admin-violator-dismissals"
+const LIVE_VIOLATORS_STORAGE_KEY_PREFIX = "triketrack-admin-live-violators"
 const ACTIVE_VIOLATION_STATUSES = new Set([
   "active",
   "unresolved",
@@ -318,6 +327,14 @@ const formatDateTime = (value?: string) => (value ? new Date(value).toLocaleStri
 const formatTripStatus = (value: DashboardTripRecord["tripStatus"]) =>
   value.charAt(0).toUpperCase() + value.slice(1)
 
+type TripDisplayStatus = "ongoing" | "completed" | "incomplete" | "cancelled"
+
+const formatTripDisplayStatus = (value: TripDisplayStatus) =>
+  value.charAt(0).toUpperCase() + value.slice(1)
+
+const getCoordinateLabel = (coordinate?: [number, number]) =>
+  coordinate ? `${coordinate[1].toFixed(6)}, ${coordinate[0].toFixed(6)}` : "-"
+
 const createViolationMarkerElement = () => {
   const markerEl = document.createElement("div")
   markerEl.className = "violation-map-focus-marker"
@@ -352,13 +369,26 @@ const getTripPathCoordinates = (pathGeojson: unknown): Array<[number, number]> =
   return geometry.coordinates.filter(isLngLatPair)
 }
 
-function TripPathMap({ tripPath }: { tripPath: TripPathRecord }) {
+function TripPathMap({
+  tripPath,
+  violations = []
+}: {
+  tripPath: TripPathRecord
+  violations?: DashboardViolationRecord[]
+}) {
   const mapRootRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     if (!mapRootRef.current) return
 
     const coordinates = getTripPathCoordinates(tripPath.pathGeojson)
+    const violationCoordinates = violations.filter(
+      (violation): violation is DashboardViolationRecord & { latitude: number; longitude: number } =>
+        typeof violation.latitude === "number" &&
+        Number.isFinite(violation.latitude) &&
+        typeof violation.longitude === "number" &&
+        Number.isFinite(violation.longitude)
+    )
     const map = new maplibregl.Map({
       container: mapRootRef.current,
       style: createRasterStyle("street") as maplibregl.StyleSpecification,
@@ -403,9 +433,24 @@ function TripPathMap({ tripPath }: { tripPath: TripPathRecord }) {
         }
       })
 
+      map.addLayer({
+        id: "trip-path-trace-line",
+        type: "line",
+        source: "trip-path",
+        paint: {
+          "line-color": "#0f172a",
+          "line-width": 2,
+          "line-opacity": 0.45,
+          "line-dasharray": [1, 1.5]
+        }
+      })
+
       const bounds = new maplibregl.LngLatBounds()
       for (const coordinate of coordinates) {
         bounds.extend(coordinate)
+      }
+      for (const violation of violationCoordinates) {
+        bounds.extend([violation.longitude, violation.latitude])
       }
       map.fitBounds(bounds, {
         padding: 54,
@@ -427,12 +472,25 @@ function TripPathMap({ tripPath }: { tripPath: TripPathRecord }) {
           .setPopup(new maplibregl.Popup({ offset: 12 }).setText("Latest/end point"))
           .addTo(map)
       }
+
+      for (const violation of violationCoordinates) {
+        const markerEl = createViolationMarkerElement()
+        markerEl.setAttribute("aria-label", violation.violationTypeLabel)
+        new maplibregl.Marker({ element: markerEl })
+          .setLngLat([violation.longitude, violation.latitude])
+          .setPopup(
+            new maplibregl.Popup({ offset: 12 }).setText(
+              `${violation.violationTypeLabel} | ${formatDateTime(violation.detectedAt)}`
+            )
+          )
+          .addTo(map)
+      }
     })
 
     return () => {
       map.remove()
     }
-  }, [tripPath])
+  }, [tripPath, violations])
 
   return <div className="trip-path-map" ref={mapRootRef} />
 }
@@ -471,6 +529,16 @@ const getViolatorDriverKey = ({
 const buildDriverTokens = (...values: Array<string | number | null | undefined>) =>
   [...new Set(values.map((value) => normalizeDriverToken(value)).filter(Boolean))] as string[]
 
+const getViolatorTrackingIdentifiers = (violator: LiveMapViolator) => {
+  const driverTokens = (violator as LiveMapViolator & { driverTokens?: string[] }).driverTokens
+  return driverTokens && driverTokens.length > 0 ? driverTokens : [violator.driverId]
+}
+
+const hasVisibleDriverTokenMatch = (
+  violator: Pick<MapViolatorRecord, "driverTokens">,
+  visibleIdentifiers: Set<string>
+) => violator.driverTokens.some((token) => visibleIdentifiers.has(token))
+
 const isOutsideGeofenceViolation = (violation: DashboardViolationRecord) => {
   const haystack = [
     violation.violationTypeCode,
@@ -482,6 +550,32 @@ const isOutsideGeofenceViolation = (violation: DashboardViolationRecord) => {
     .toLowerCase()
 
   return OUTSIDE_GEOFENCE_HINTS.some((hint) => haystack.includes(hint))
+}
+
+const isGeofenceBoundaryViolation = (violation: DashboardViolationRecord) => {
+  const haystack = [
+    violation.violationTypeCode,
+    violation.violationTypeLabel,
+    violation.description
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase()
+
+  return haystack.includes("geofence") || haystack.includes("boundary")
+}
+
+const formatAlertStatusLabel = (status?: string) => {
+  switch (status) {
+    case "open":
+      return "Take Action"
+    case "under_review":
+      return "Under Review"
+    case "resolved":
+      return "Resolved"
+    default:
+      return status ? status.replace(/_/g, " ") : "Take Action"
+  }
 }
 
 const isSameLocalCalendarDay = (leftTs: number, rightTs: number) => {
@@ -520,6 +614,7 @@ type AdminShellProps = {
   onLogout: () => void
   adminProfile: AdminProfile
   accessToken: string
+  offlineViewerMode?: boolean
 }
 
 type LiveDriverLocationRow = {
@@ -557,10 +652,16 @@ const isDriverOnlineNow = (
   if (driver.status !== "active") return false
 
   if (livePresenceHydrated) {
-    return Boolean(driver.liveState && isFreshPresence(driver.liveState.lastSeenTs, nowTs))
+    return Boolean(
+      driver.liveState &&
+        driver.liveState.onlineStatus === "online" &&
+        isFreshPresence(driver.liveState.lastSeenTs, nowTs)
+    )
   }
 
-  return Boolean(driver.liveState) || driver.operationalState?.isOnline === true
+  return (
+    driver.liveState?.onlineStatus === "online" || driver.operationalState?.isOnline === true
+  )
 }
 
 const getDriverPresenceMeta = (
@@ -628,6 +729,8 @@ type AlertListItem = {
   key: string
   source: "violation" | "emergency"
   emergencyId?: number
+  violationId?: DashboardViolationRecord["violationId"]
+  alertSource?: DashboardViolationRecord["alertSource"]
   driverId: string
   driverName?: string
   todaName?: string
@@ -641,6 +744,10 @@ type AlertListItem = {
   lat?: number
   lng?: number
 }
+
+type SelectedAlertDetails =
+  | { kind: "violation"; item: AlertListItem; record: DashboardViolationRecord }
+  | { kind: "emergency"; item: AlertListItem; record: DashboardEmergencyRecord }
 
 type ViolationAlertDetails = {
   key: string
@@ -664,7 +771,7 @@ type ViolationAlertDetails = {
 
 type NotificationItem = {
   key: string
-  kind: "violation" | "trip" | "driver" | "emergency" | "appeal"
+  kind: "violation" | "trip" | "driver" | "emergency" | "appeal" | "password_reset"
   page: Extract<NavKey, "alerts" | "trip-logs" | "drivers" | "reports">
   title: string
   body: string
@@ -804,6 +911,8 @@ const createPointSignature = (point: Pick<DriverLocationEvent, "ts" | "lng" | "l
 const createStoredAlertListItem = (alert: DashboardViolationRecord): AlertListItem => ({
   key: `stored-${alert.alertSource}-${alert.violationId}`,
   source: "violation",
+  violationId: alert.violationId,
+  alertSource: alert.alertSource,
   driverId: String(alert.driverId ?? "N/A"),
   driverName: alert.driverName ?? alert.driverCode,
   todaName: alert.todaName,
@@ -861,10 +970,14 @@ void createDriverNotification
 export default function AdminShell({
   onLogout,
   adminProfile,
-  accessToken
+  accessToken,
+  offlineViewerMode = false
 }: AdminShellProps) {
   const mapEl = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
+  const driverMarkerManagerRef = useRef<ReturnType<
+    typeof createSmoothDriverMarkerManager
+  > | null>(null)
   const geofenceBoundsRef = useRef<[[number, number], [number, number]] | null>(null)
   const ensureGeofenceLayersRef = useRef<((fitToBounds?: boolean) => void) | null>(null)
   const appliedMapStyleRef = useRef<TriketrackMapStyleId>("street")
@@ -874,13 +987,13 @@ export default function AdminShell({
       ? "superadmin"
       : "home"
   )
-  const [selectedMapStyle, setSelectedMapStyle] = useState<TriketrackMapStyleId>("street")
+  const [selectedMapStyle] = useState<TriketrackMapStyleId>("street")
 
   const [syncStatus, setSyncStatus] = useState<
     "connecting" | "connected" | "disconnected"
   >("connecting")
   const [lastUpdateTs, setLastUpdateTs] = useState<number | null>(null)
-  const [online, setOnline] = useState<boolean>(navigator.onLine)
+  const [online, setOnline] = useState<boolean>(navigator.onLine && !offlineViewerMode)
   const [driversById, setDriversById] = useState<Record<string, DriverStreamState>>(
     {}
   )
@@ -909,6 +1022,18 @@ export default function AdminShell({
   const [reportsPageSection] = useState<"reports" | "appeals">("reports")
   const [selectedDriverId, setSelectedDriverId] = useState<number | null>(null)
   const [driverTripHistoryOpen, setDriverTripHistoryOpen] = useState(false)
+  const [passwordResetBusyId, setPasswordResetBusyId] = useState<number | null>(null)
+  const [passwordResetError, setPasswordResetError] = useState<string | null>(null)
+  const [approvedTemporaryPassword, setApprovedTemporaryPassword] = useState<{
+    requestId: number
+    driverName: string
+    temporaryPassword: string
+    expiresAt?: string
+    pushNotificationSent?: boolean
+    pushNotificationError?: string
+  } | null>(null)
+  const [activePasswordResetRequest, setActivePasswordResetRequest] =
+    useState<DriverPasswordResetRequestRecord | null>(null)
   const [selectedTripForPath, setSelectedTripForPath] =
     useState<DashboardTripRecord | null>(null)
   const [tripPathData, setTripPathData] = useState<TripPathRecord | null>(null)
@@ -919,6 +1044,10 @@ export default function AdminShell({
     useState<DashboardEmergencyRecord | null>(null)
   const [emergencyQueue, setEmergencyQueue] = useState<DashboardEmergencyRecord[]>([])
   const [emergencyActionBusyId, setEmergencyActionBusyId] = useState<number | null>(null)
+  const [selectedAlertDetails, setSelectedAlertDetails] =
+    useState<SelectedAlertDetails | null>(null)
+  const [alertStatusBusy, setAlertStatusBusy] = useState(false)
+  const [alertDetailsError, setAlertDetailsError] = useState<string | null>(null)
   const [activeViolationAlert, setActiveViolationAlert] =
     useState<ViolationAlertDetails | null>(null)
   const [violationAlertQueue, setViolationAlertQueue] = useState<ViolationAlertDetails[]>([])
@@ -940,6 +1069,7 @@ export default function AdminShell({
   const dashboardRefreshQueuedRef = useRef(false)
   const visibleDriverIdentifiersRef = useRef<Set<string>>(new Set())
   const dashboardDriversRef = useRef<DashboardDriverRecord[]>([])
+  const shownPasswordResetRequestIdsRef = useRef<Set<number>>(new Set())
   const knownViolationKeysRef = useRef<Set<string>>(new Set())
   const pendingViolationPopupKeysRef = useRef<Set<string>>(new Set())
   const shownViolationPopupKeysRef = useRef<Set<string>>(new Set())
@@ -953,12 +1083,19 @@ export default function AdminShell({
   const showLiveMapView = activePage === "home" || activePage === "live-map"
   const showViolatorOverlay = activePage === "live-map"
   const violatorDismissalsStorageKey = `${VIOLATOR_DISMISSALS_STORAGE_KEY_PREFIX}:${adminProfile.adminId}`
+  const liveViolatorsStorageKey = `${LIVE_VIOLATORS_STORAGE_KEY_PREFIX}:${adminProfile.adminId}`
   const activeViolators = useMemo<MapViolatorRecord[]>(() => {
     const newestByDriver = new Map<string, MapViolatorRecord>()
+    const visibleIdentifiers = visibleDriverIdentifiersRef.current
     const candidates = [
       ...Object.values(liveViolatorsByKey),
       ...Object.values(storedViolatorsByKey)
-    ].filter((violator) => isViolatorActive(violator) && !violator.uiDismissedByAdmin)
+    ].filter(
+      (violator) =>
+        isViolatorActive(violator) &&
+        !violator.uiDismissedByAdmin &&
+        hasVisibleDriverTokenMatch(violator, visibleIdentifiers)
+    )
 
     for (const violator of candidates) {
       const existing = newestByDriver.get(violator.driverKey)
@@ -987,7 +1124,7 @@ export default function AdminShell({
         return !dismissed || dismissed.dismissalKey !== getViolatorDismissalKey(violator)
       })
       .sort(sortViolatorsByRecency)
-  }, [dismissedViolatorsByDriver, liveViolatorsByKey, storedViolatorsByKey])
+  }, [dashboardData?.drivers, dismissedViolatorsByDriver, liveViolatorsByKey, storedViolatorsByKey])
 
   const selectedViolator = useMemo(
     () => activeViolators.find((violator) => violator.driverKey === selectedViolatorKey) ?? null,
@@ -1080,6 +1217,32 @@ export default function AdminShell({
     setStoredViolatorsByKey(removeByDriverKey)
 
     if (selectedViolatorKey === violator.driverKey) {
+      setSelectedViolatorKey(null)
+      setSelectedViolationPopupPosition(null)
+    }
+  }
+
+  const purgeViolatorProfilesByTokens = (tokens: string[]) => {
+    if (tokens.length === 0) return
+
+    const tokenSet = new Set(tokens.map((token) => token.trim().toUpperCase()))
+    const selectedMatches =
+      selectedViolator?.driverTokens?.some((token) => tokenSet.has(token)) ?? false
+
+    updateViolatorsByTokens(tokens, () => null)
+
+    setDismissedViolatorsByDriver((current) => {
+      const next = { ...current }
+      for (const driverKey of Object.keys(current)) {
+        const normalizedDriverKey = driverKey.trim().toUpperCase()
+        if (tokenSet.has(normalizedDriverKey.replace(/^CODE:/, "")) || tokenSet.has(normalizedDriverKey.replace(/^ID:/, ""))) {
+          delete next[driverKey]
+        }
+      }
+      return next
+    })
+
+    if (selectedMatches) {
       setSelectedViolatorKey(null)
       setSelectedViolationPopupPosition(null)
     }
@@ -1202,27 +1365,23 @@ export default function AdminShell({
 
     const runRefresh = async () => {
       try {
-        const snapshot = await fetchDashboardData(accessToken)
+        const snapshot = offlineViewerMode
+          ? await getCachedDashboardData()
+          : await fetchDashboardData(accessToken)
+        if (!snapshot) {
+          throw new Error("No cached dashboard data is available for offline viewer mode.")
+        }
         setDashboardData(snapshot)
         const syncedAt = snapshot.cacheMeta?.savedAt ?? new Date().toISOString()
         setLastDashboardSyncAt(syncedAt)
         lastDashboardSyncAtRef.current = syncedAt
         setDashboardDataSource(snapshot.cacheMeta ? "cache" : "live")
-        setDashboardNotice(
-          snapshot.cacheMeta
-            ? `Showing cached dashboard data from ${formatDateTime(snapshot.cacheMeta.savedAt)}.`
-            : null
-        )
+        setDashboardNotice(null)
         setDashboardError(null)
       } catch (error) {
         if (dashboardDataRef.current) {
-          const fallbackTimestamp = lastDashboardSyncAtRef.current
           setDashboardDataSource("cache")
-          setDashboardNotice(
-            fallbackTimestamp
-              ? `Unable to refresh live dashboard data. Showing last synced data from ${formatDateTime(fallbackTimestamp)}.`
-              : "Unable to refresh live dashboard data. Showing the last synced snapshot."
-          )
+          setDashboardNotice(null)
           setDashboardError(null)
         } else {
           setDashboardError(String(error))
@@ -1267,39 +1426,31 @@ export default function AdminShell({
         const cachedSnapshot = await getCachedDashboardData()
         if (active && cachedSnapshot) {
           setDashboardData(cachedSnapshot)
-          setDashboardNotice(
-            cachedSnapshot.cacheMeta
-              ? `Offline-ready snapshot loaded from ${formatDateTime(cachedSnapshot.cacheMeta.savedAt)}.`
-              : null
-          )
+          setDashboardNotice(null)
           setLastDashboardSyncAt(cachedSnapshot.cacheMeta?.savedAt ?? null)
           lastDashboardSyncAtRef.current = cachedSnapshot.cacheMeta?.savedAt ?? null
           setDashboardDataSource("cache")
         }
 
-        const snapshot = await fetchDashboardData(accessToken)
+        const snapshot = offlineViewerMode
+          ? await getCachedDashboardData()
+          : await fetchDashboardData(accessToken)
+        if (!snapshot) {
+          throw new Error("No cached dashboard data is available for offline viewer mode.")
+        }
         if (!active) return
         setDashboardData(snapshot)
         const syncedAt = snapshot.cacheMeta?.savedAt ?? new Date().toISOString()
         setLastDashboardSyncAt(syncedAt)
         lastDashboardSyncAtRef.current = syncedAt
         setDashboardDataSource(snapshot.cacheMeta ? "cache" : "live")
-        setDashboardNotice(
-          snapshot.cacheMeta
-            ? `Showing cached dashboard data from ${formatDateTime(snapshot.cacheMeta.savedAt)}.`
-            : null
-        )
+        setDashboardNotice(null)
         setDashboardError(null)
       } catch (error) {
         if (!active) return
         if (dashboardDataRef.current) {
-          const fallbackTimestamp = lastDashboardSyncAtRef.current
           setDashboardDataSource("cache")
-          setDashboardNotice(
-            fallbackTimestamp
-              ? `Unable to refresh live dashboard data. Showing last synced data from ${formatDateTime(fallbackTimestamp)}.`
-              : "Unable to refresh live dashboard data. Showing the last synced snapshot."
-          )
+          setDashboardNotice(null)
           setDashboardError(null)
         } else {
           setDashboardError(String(error))
@@ -1312,7 +1463,7 @@ export default function AdminShell({
       dashboardRefreshInFlightRef.current = null
       dashboardRefreshQueuedRef.current = false
     }
-  }, [accessToken])
+  }, [accessToken, offlineViewerMode])
 
   useEffect(() => {
     const refreshOnResume = () => {
@@ -1347,6 +1498,61 @@ export default function AdminShell({
   useEffect(() => {
     dashboardDataRef.current = dashboardData
   }, [dashboardData])
+
+  useEffect(() => {
+    if (!dashboardData || activePasswordResetRequest) return
+
+    const newPendingRequest = (dashboardData.passwordResetRequests ?? [])
+      .filter((request) => request.status === "pending")
+      .sort(
+        (a, b) =>
+          new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime()
+      )
+      .find((request) => !shownPasswordResetRequestIdsRef.current.has(request.requestId))
+
+    if (!newPendingRequest) return
+
+    shownPasswordResetRequestIdsRef.current.add(newPendingRequest.requestId)
+    setPasswordResetError(null)
+    setApprovedTemporaryPassword(null)
+    setActivePasswordResetRequest(newPendingRequest)
+  }, [activePasswordResetRequest, dashboardData])
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(liveViolatorsStorageKey)
+      if (!raw) return
+
+      const parsed = JSON.parse(raw) as Record<string, MapViolatorRecord>
+      if (!parsed || typeof parsed !== "object") return
+
+      const normalizedEntries = Object.entries(parsed).filter((entry) => {
+        const [, violator] = entry
+        return (
+          violator &&
+          typeof violator === "object" &&
+          typeof violator.driverKey === "string" &&
+          typeof violator.violationId === "string" &&
+          typeof violator.timestamp === "string" &&
+          typeof violator.latitude === "number" &&
+          typeof violator.longitude === "number"
+        )
+      })
+
+      if (normalizedEntries.length === 0) return
+
+      setLiveViolatorsByKey(Object.fromEntries(normalizedEntries))
+    } catch {
+      // Ignore invalid cached live violator data.
+    }
+  }, [liveViolatorsStorageKey])
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      liveViolatorsStorageKey,
+      JSON.stringify(liveViolatorsByKey)
+    )
+  }, [liveViolatorsByKey, liveViolatorsStorageKey])
 
   useEffect(() => {
     try {
@@ -1399,6 +1605,8 @@ export default function AdminShell({
   }, [dismissedViolatorsByDriver, violatorDismissalsStorageKey])
 
   useEffect(() => {
+    if (!dashboardData) return
+
     dashboardDriversRef.current = dashboardData?.drivers ?? []
     const identifiers = new Set<string>()
     for (const driver of dashboardData?.drivers ?? []) {
@@ -1406,8 +1614,29 @@ export default function AdminShell({
       identifiers.add(driver.driverCode.trim().toUpperCase())
     }
     visibleDriverIdentifiersRef.current = identifiers
+
+    setLiveViolatorsByKey((current) => {
+      const nextEntries = Object.entries(current).filter(([, violator]) =>
+        hasVisibleDriverTokenMatch(violator, identifiers)
+      )
+
+      return nextEntries.length === Object.keys(current).length
+        ? current
+        : Object.fromEntries(nextEntries)
+    })
+
+    setStoredViolatorsByKey((current) => {
+      const nextEntries = Object.entries(current).filter(([, violator]) =>
+        hasVisibleDriverTokenMatch(violator, identifiers)
+      )
+
+      return nextEntries.length === Object.keys(current).length
+        ? current
+        : Object.fromEntries(nextEntries)
+    })
+
     refreshLiveLocationsRef.current?.()
-  }, [dashboardData?.drivers])
+  }, [dashboardData])
 
   useEffect(() => {
     if (!notificationsOpen) return
@@ -1493,6 +1722,12 @@ export default function AdminShell({
       setTripPathLoading(false)
     })()
 
+    if (offlineViewerMode) {
+      return () => {
+        active = false
+      }
+    }
+
     void fetchTripPath(accessToken, selectedTripForPath.tripId)
       .then((path) => {
         if (!active) return
@@ -1513,7 +1748,7 @@ export default function AdminShell({
     return () => {
       active = false
     }
-  }, [accessToken, selectedTripForPath])
+  }, [accessToken, selectedTripForPath, offlineViewerMode])
 
   useEffect(() => {
     if (!mapEl.current) return
@@ -1574,7 +1809,6 @@ export default function AdminShell({
     let dashboardRefreshTimer: number | undefined
     let stalePresenceTimer: number | undefined
 
-    const markers = new Map<string, maplibregl.Marker>()
     let pendingGeofenceFit = false
     let geofenceRetryQueued = false
     const ensureGeofenceLayers = (fitToBounds = false) => {
@@ -1787,22 +2021,45 @@ export default function AdminShell({
       frameEl.textContent = getDriverInitials(driverIdentifier)
     }
 
-    const applyMarkerTone = (markerEl: HTMLDivElement, inside: boolean) => {
+    const applyMarkerAppearance = (
+      markerEl: HTMLDivElement,
+      appearance: DriverMarkerAppearance
+    ) => {
       const frameEl = markerEl.querySelector("[data-marker-frame]") as HTMLDivElement | null
       const badgeEl = markerEl.querySelector("[data-marker-badge]") as HTMLDivElement | null
+      const arrowEl = markerEl.querySelector("[data-marker-arrow]") as HTMLDivElement | null
+      const online = appearance.onlineStatus === "online"
+      const frameColor = online
+        ? appearance.inside
+          ? "#22c55e"
+          : "#ef4444"
+        : "#94a3b8"
+      const arrowColor = appearance.inside ? "#16a34a" : "#dc2626"
+
       if (frameEl) {
-        frameEl.style.borderColor = inside ? "#22c55e" : "#ef4444"
-        frameEl.style.boxShadow = inside
-          ? "0 12px 28px rgba(34,197,94,0.28)"
-          : "0 12px 28px rgba(239,68,68,0.28)"
+        frameEl.style.borderColor = frameColor
+        frameEl.style.boxShadow = online
+          ? appearance.inside
+            ? "0 12px 28px rgba(34,197,94,0.28)"
+            : "0 12px 28px rgba(239,68,68,0.28)"
+          : "0 12px 28px rgba(148,163,184,0.24)"
       }
       if (badgeEl) {
-        badgeEl.style.background = inside ? "#22c55e" : "#ef4444"
+        badgeEl.style.background = online ? "#22c55e" : "#94a3b8"
       }
+      if (arrowEl) {
+        arrowEl.style.background = online ? arrowColor : "#64748b"
+        arrowEl.style.transform = `translate(-50%, -122%) rotate(${appearance.bearing}deg)`
+      }
+      markerEl.style.opacity = online ? "1" : "0.72"
     }
 
-    const createMarkerElement = (driverIdentifier: string, inside: boolean) => {
+    const createMarkerElement = (
+      driverIdentifier: string,
+      appearance: DriverMarkerAppearance
+    ) => {
       const markerEl = document.createElement("div")
+      markerEl.dataset.driverIdentifier = driverIdentifier
       markerEl.style.width = "42px"
       markerEl.style.height = "42px"
       markerEl.style.position = "relative"
@@ -1829,6 +2086,18 @@ export default function AdminShell({
         "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
       frameEl.style.boxSizing = "border-box"
 
+      const arrowEl = document.createElement("div")
+      arrowEl.setAttribute("data-marker-arrow", "true")
+      arrowEl.style.position = "absolute"
+      arrowEl.style.left = "50%"
+      arrowEl.style.top = "50%"
+      arrowEl.style.width = "14px"
+      arrowEl.style.height = "14px"
+      arrowEl.style.clipPath = "polygon(50% 0%, 0% 100%, 100% 100%)"
+      arrowEl.style.transformOrigin = "50% 50%"
+      arrowEl.style.boxShadow = "0 6px 14px rgba(15,23,42,0.22)"
+      arrowEl.style.pointerEvents = "none"
+
       const badgeEl = document.createElement("div")
       badgeEl.setAttribute("data-marker-badge", "true")
       badgeEl.style.position = "absolute"
@@ -1841,11 +2110,12 @@ export default function AdminShell({
       badgeEl.style.background = "#22c55e"
       badgeEl.style.boxSizing = "border-box"
 
+      markerEl.appendChild(arrowEl)
       markerEl.appendChild(frameEl)
       markerEl.appendChild(badgeEl)
       markerEl.title = getDriverLabel(driverIdentifier)
       renderMarkerFrameContent(markerEl, driverIdentifier)
-      applyMarkerTone(markerEl, inside)
+      applyMarkerAppearance(markerEl, appearance)
       return markerEl
     }
 
@@ -1867,13 +2137,6 @@ export default function AdminShell({
       })
     }
 
-    const removeDriverMarker = (driverIdentifier: string) => {
-      const marker = markers.get(driverIdentifier)
-      if (!marker) return
-      marker.remove()
-      markers.delete(driverIdentifier)
-    }
-
     const updateViolatorPresence = (
       identifiers: string[],
       driverOnlineStatus: "online" | "offline",
@@ -1886,32 +2149,58 @@ export default function AdminShell({
       }))
     }
 
-    const removeDriverLivePresence = (identifiers: string[], lastSeenTs?: number) => {
+    const setDriverOffline = (driverIdentifier: string, identifiers: string[], lastSeenTs?: number) => {
       updateViolatorPresence(identifiers, "offline", lastSeenTs)
-      for (const identifier of identifiers) {
-        removeDriverMarker(identifier)
-        removeDriverState(identifier)
-      }
+      driverMarkerManagerRef.current?.setOffline([driverIdentifier, ...identifiers], lastSeenTs)
+      setDriversById((previous) => {
+        const existing = previous[driverIdentifier]
+        if (!existing) return previous
+        return {
+          ...previous,
+          [driverIdentifier]: {
+            ...existing,
+            lastSeenTs: Math.max(existing.lastSeenTs, lastSeenTs ?? existing.lastSeenTs),
+            onlineStatus: "offline"
+          }
+        }
+      })
     }
 
-    const upsertDriverState = (event: DriverLocationEvent, isViolation: boolean) => {
+    const removeDriverLivePresence = (driverIdentifier: string, identifiers: string[]) => {
+      updateViolatorPresence(identifiers, "offline")
+      driverMarkerManagerRef.current?.remove([driverIdentifier, ...identifiers])
+      removeDriverState(driverIdentifier)
+    }
+
+    const upsertDriverState = (
+      event: DriverLocationEvent,
+      isViolation: boolean,
+      onlineStatus: DriverMarkerOnlineStatus,
+      acceptedLocation = true
+    ) => {
       setDriversById((previous) => {
         const existing = previous[event.driverId]
-        const dedupedRecent = [event, ...(existing?.recentPoints ?? [])]
-          .sort((a, b) => b.ts - a.ts)
-          .filter((point, index, all) => {
-            const signature = createPointSignature(point)
-            return index === all.findIndex((candidate) => createPointSignature(candidate) === signature)
-          })
-          .slice(0, RECENT_POINTS_PER_DRIVER)
+        const dedupedRecent = acceptedLocation
+          ? [event, ...(existing?.recentPoints ?? [])]
+              .sort((a, b) => b.ts - a.ts)
+              .filter((point, index, all) => {
+                const signature = createPointSignature(point)
+                return (
+                  index ===
+                  all.findIndex((candidate) => createPointSignature(candidate) === signature)
+                )
+              })
+              .slice(0, RECENT_POINTS_PER_DRIVER)
+          : (existing?.recentPoints ?? [])
         return {
           ...previous,
           [event.driverId]: {
             driverId: event.driverId,
             lastSeenTs: Math.max(existing?.lastSeenTs ?? 0, event.ts),
-            latestPoint: event,
+            latestPoint: acceptedLocation ? event : (existing?.latestPoint ?? event),
             violationCount: (existing?.violationCount ?? 0) + (isViolation ? 1 : 0),
-            recentPoints: dedupedRecent
+            recentPoints: dedupedRecent,
+            onlineStatus
           }
         }
       })
@@ -1928,30 +2217,39 @@ export default function AdminShell({
     map.on("load", () => {
       ensureGeofenceLayers(true)
 
-      const updateMarker = (event: DriverLocationEvent, inside: boolean) => {
-        const existing = markers.get(event.driverId)
-        if (existing) {
-          existing.setLngLat([event.lng, event.lat])
-          const markerEl = existing.getElement() as HTMLDivElement
-          markerEl.title = getDriverLabel(event.driverId)
-          renderMarkerFrameContent(markerEl, event.driverId)
-          applyMarkerTone(markerEl, inside)
-          existing.getPopup()?.setDOMContent(createDriverPopupContent(event.driverId))
-          return
+      driverMarkerManagerRef.current = createSmoothDriverMarkerManager({
+        map,
+        createMarkerElement,
+        getPopupContent: createDriverPopupContent,
+        updateMarkerElement: (markerEl, appearance) => {
+          const driverIdentifier = markerEl.dataset.driverIdentifier ?? ""
+          markerEl.title = getDriverLabel(driverIdentifier)
+          renderMarkerFrameContent(markerEl, driverIdentifier)
+          applyMarkerAppearance(markerEl, appearance)
         }
-        const markerEl = createMarkerElement(event.driverId, inside)
-        const marker = new maplibregl.Marker({ element: markerEl })
-          .setLngLat([event.lng, event.lat])
-          .setPopup(
-            new maplibregl.Popup({ offset: 12 }).setDOMContent(
-              createDriverPopupContent(event.driverId)
-            )
-          )
-          .addTo(map)
-        markers.set(event.driverId, marker)
-      }
+      })
 
-      const handleLocationEvent = (event: DriverLocationEvent) => {
+      const updateMarker = (
+        event: DriverLocationEvent,
+        inside: boolean,
+        identifiers: string[]
+      ) =>
+        driverMarkerManagerRef.current?.upsert({
+          driverIdentifier: event.driverId,
+          aliases: identifiers,
+          position: {
+            lng: event.lng,
+            lat: event.lat
+          },
+          timestamp: event.ts,
+          accuracy: event.accuracy,
+          heading: event.heading,
+          speed: event.speed,
+          inside,
+          onlineStatus: "online"
+        }) ?? { accepted: false, snapped: false, position: null }
+
+      const handleLocationEvent = (event: DriverLocationEvent, identifiers: string[]) => {
         if (!isDriverVisibleToAdmin(event.driverId)) return
         const inside = turf.booleanPointInPolygon(
           turf.point([event.lng, event.lat]),
@@ -1967,21 +2265,25 @@ export default function AdminShell({
           event.tripId ?? operationalState?.activeTripId
         )
         const activeTripId = event.tripId ?? operationalState?.activeTripId ?? trip?.tripId
-        const hasActiveTrip =
-          activeTripId !== undefined ||
-          operationalState?.operationalStatus === "on_trip" ||
-          trip?.tripStatus === "ongoing"
         const driverTokens = buildDriverTokens(driver?.driverCode ?? event.driverId, driver?.driverId)
         const driverKey = getViolatorDriverKey({
           driverCode: driver?.driverCode ?? event.driverId,
           driverId: driver?.driverId
         })
         const previousInside = driverInsideStateRef.current[event.driverId]
-        updateMarker(event, inside)
-        upsertDriverState(event, !inside && hasActiveTrip)
+        const hadLivePresenceBefore = Boolean(driversByIdRef.current[event.driverId])
+        const markerUpdate = updateMarker(event, inside, identifiers)
+        upsertDriverState(event, !inside && markerUpdate.accepted, "online", markerUpdate.accepted)
         updateViolatorPresence(driverTokens, "online", event.ts)
 
-        if (!inside && hasActiveTrip && driverKey && previousInside !== false) {
+        if (!markerUpdate.accepted) {
+          return
+        }
+
+        const shouldTriggerLiveGeofenceAlert =
+          !inside && Boolean(driverKey) && (previousInside !== false || !hadLivePresenceBefore)
+
+        if (!inside && driverKey) {
           upsertLiveViolator({
             driverKey,
             driverId: driver?.driverCode ?? event.driverId,
@@ -2006,7 +2308,7 @@ export default function AdminShell({
         }
 
         driverInsideStateRef.current[event.driverId] = inside
-        if (inside || previousInside === false || !hasActiveTrip) return
+        if (!shouldTriggerLiveGeofenceAlert || !driverKey) return
 
         const timestamp = new Date(event.ts).toISOString()
         queueViolationAlert({
@@ -2049,19 +2351,20 @@ export default function AdminShell({
       }
 
       const applyLocationRow = async (row: LiveDriverLocationRow) => {
-        const identifiers = [row.driver_code.trim().toUpperCase(), String(row.driver_id)]
+        const driverIdentifier = row.driver_code.trim().toUpperCase()
+        const identifiers = [driverIdentifier, String(row.driver_id)]
         const lastSeenTs = new Date(row.recorded_at ?? row.updated_at).getTime()
         if (!isLiveLocationRowOnline(row)) {
-          removeDriverLivePresence(identifiers, lastSeenTs)
+          setDriverOffline(driverIdentifier, identifiers, lastSeenTs)
           return
         }
 
         const locationEvent = toLocationEventFromRow(row)
         if (!isDriverVisibleToAdmin(locationEvent.driverId)) {
-          removeDriverLivePresence(identifiers)
+          removeDriverLivePresence(driverIdentifier, identifiers)
           return
         }
-        handleLocationEvent(locationEvent)
+        handleLocationEvent(locationEvent, identifiers)
         if (active) setLastUpdateTs(locationEvent.ts)
       }
 
@@ -2070,7 +2373,9 @@ export default function AdminShell({
           (driverIdentifier) => !isDriverVisibleToAdmin(driverIdentifier)
         )
         if (hiddenIdentifiers.length > 0) {
-          removeDriverLivePresence(hiddenIdentifiers)
+          for (const driverIdentifier of hiddenIdentifiers) {
+            removeDriverLivePresence(driverIdentifier, [driverIdentifier])
+          }
         }
 
         setSyncStatus("connecting")
@@ -2099,7 +2404,10 @@ export default function AdminShell({
           (driverIdentifier) => !onlineIdentifiers.has(driverIdentifier)
         )
         if (staleIdentifiers.length > 0) {
-          removeDriverLivePresence(staleIdentifiers)
+          for (const driverIdentifier of staleIdentifiers) {
+            const lastSeenTs = driversByIdRef.current[driverIdentifier]?.lastSeenTs
+            setDriverOffline(driverIdentifier, [driverIdentifier], lastSeenTs)
+          }
         }
 
         if (active) {
@@ -2139,9 +2447,10 @@ export default function AdminShell({
               const nextRow = payload.new as LiveDriverLocationRow | undefined
               const row = (nextRow || previousRow) as LiveDriverLocationRow | undefined
               if (!row) return
+              const driverIdentifier = row.driver_code.trim().toUpperCase()
               if (payload.eventType === "DELETE") {
-                removeDriverLivePresence([
-                  row.driver_code.trim().toUpperCase(),
+                removeDriverLivePresence(driverIdentifier, [
+                  driverIdentifier,
                   String(row.driver_id)
                 ])
                 scheduleDashboardRefresh()
@@ -2183,6 +2492,18 @@ export default function AdminShell({
             {
               event: "*",
               schema: "public",
+              table: "trip_paths"
+            },
+            () => {
+              if (!active) return
+              scheduleDashboardRefresh()
+            }
+          )
+          .on(
+            "postgres_changes",
+            {
+              event: "*",
+              schema: "public",
               table: "mobile_violations"
             },
             (payload) => {
@@ -2199,6 +2520,18 @@ export default function AdminShell({
                   }
                 }
               }
+              scheduleDashboardRefresh()
+            }
+          )
+          .on(
+            "postgres_changes",
+            {
+              event: "*",
+              schema: "public",
+              table: "driver_password_reset_requests"
+            },
+            () => {
+              if (!active) return
               scheduleDashboardRefresh()
             }
           )
@@ -2260,24 +2593,31 @@ export default function AdminShell({
       }
 
       onlineHandler = handleOnlineState
+      if (offlineViewerMode) {
+        setOnline(false)
+        setSyncStatus("disconnected")
+        setLivePresenceHydrated(true)
+        return
+      }
       window.addEventListener("online", handleOnlineState)
       window.addEventListener("offline", handleOnlineState)
       void loadLiveDriverLocations()
       connectRealtime()
       stalePresenceTimer = window.setInterval(() => {
         const nowTs = Date.now()
-        const staleIdentifiers = Object.entries(driversByIdRef.current)
-          .filter(([, driverState]) => !isFreshPresence(driverState.lastSeenTs, nowTs))
-          .map(([driverIdentifier]) => driverIdentifier)
+        const staleIdentifiers = Object.entries(driversByIdRef.current).filter(
+          ([, driverState]) =>
+            driverState.onlineStatus === "online" && !isFreshPresence(driverState.lastSeenTs, nowTs)
+        )
 
-        if (staleIdentifiers.length > 0) {
-          removeDriverLivePresence(staleIdentifiers)
+        for (const [driverIdentifier, driverState] of staleIdentifiers) {
+          setDriverOffline(driverIdentifier, [driverIdentifier], driverState.lastSeenTs)
         }
       }, 15000)
     })
 
-      return () => {
-        active = false
+    return () => {
+      active = false
       if (refreshLiveLocationsRef.current) {
         refreshLiveLocationsRef.current = null
       }
@@ -2298,16 +2638,15 @@ export default function AdminShell({
         window.removeEventListener("offline", onlineHandler)
       }
       ensureGeofenceLayersRef.current = null
-      for (const marker of markers.values()) {
-        marker.remove()
-      }
+      driverMarkerManagerRef.current?.destroy()
+      driverMarkerManagerRef.current = null
       violationFocusMarkerRef.current?.remove()
       violationFocusMarkerRef.current = null
       map.remove()
       mapRef.current = null
       geofenceBoundsRef.current = null
     }
-  }, [accessToken, adminProfile.adminId, adminProfile.role])
+  }, [accessToken, adminProfile.adminId, adminProfile.role, offlineViewerMode])
 
   useEffect(() => {
     if (showLiveMapView && mapRef.current) {
@@ -2343,18 +2682,28 @@ export default function AdminShell({
       return
     }
 
-    const lngLat: [number, number] = [selectedViolator.longitude, selectedViolator.latitude]
-    if (!violationFocusMarkerRef.current) {
-      violationFocusMarkerRef.current = new maplibregl.Marker({
-        element: createViolationMarkerElement()
-      })
-        .setLngLat(lngLat)
-        .addTo(map)
-    } else {
-      violationFocusMarkerRef.current.setLngLat(lngLat)
+    let animationFrameId: number | null = null
+    const getLngLat = (): [number, number] => {
+      const livePosition = driverMarkerManagerRef.current?.getDisplayedPosition(
+        getViolatorTrackingIdentifiers(selectedViolator)
+      )
+      return livePosition
+        ? [livePosition.lng, livePosition.lat]
+        : [selectedViolator.longitude, selectedViolator.latitude]
     }
 
     const syncPopupPosition = () => {
+      const lngLat = getLngLat()
+      if (!violationFocusMarkerRef.current) {
+        violationFocusMarkerRef.current = new maplibregl.Marker({
+          element: createViolationMarkerElement()
+        })
+          .setLngLat(lngLat)
+          .addTo(map)
+      } else {
+        violationFocusMarkerRef.current.setLngLat(lngLat)
+      }
+
       const point = map.project(lngLat)
       const container = map.getContainer()
       const align = point.x > container.clientWidth - 280 ? "left" : "right"
@@ -2370,7 +2719,16 @@ export default function AdminShell({
     map.on("zoom", syncPopupPosition)
     map.on("resize", syncPopupPosition)
 
+    const syncDuringAnimation = () => {
+      syncPopupPosition()
+      animationFrameId = window.requestAnimationFrame(syncDuringAnimation)
+    }
+    animationFrameId = window.requestAnimationFrame(syncDuringAnimation)
+
     return () => {
+      if (animationFrameId !== null) {
+        window.cancelAnimationFrame(animationFrameId)
+      }
       map.off("move", syncPopupPosition)
       map.off("zoom", syncPopupPosition)
       map.off("resize", syncPopupPosition)
@@ -2388,9 +2746,14 @@ export default function AdminShell({
     window.setTimeout(() => {
       const map = mapRef.current
       if (!map) return
+      const livePosition = driverMarkerManagerRef.current?.getDisplayedPosition(
+        getViolatorTrackingIdentifiers(violator)
+      )
       map.resize()
       map.flyTo({
-        center: [violator.longitude, violator.latitude],
+        center: livePosition
+          ? [livePosition.lng, livePosition.lat]
+          : [violator.longitude, violator.latitude],
         zoom: Math.max(map.getZoom(), 16.2),
         speed: 0.95,
         curve: 1.3,
@@ -2436,6 +2799,18 @@ export default function AdminShell({
     return driverDirectoryRows.find((driver) => driver.driverId === selectedDriverId) ?? null
   }, [driverDirectoryRows, selectedDriverId])
 
+  const selectedDriverPasswordResetRequests = useMemo(() => {
+    if (!selectedDriver) return []
+    return (dashboardData?.passwordResetRequests ?? []).filter(
+      (request) => request.driverId === selectedDriver.driverId
+    )
+  }, [dashboardData?.passwordResetRequests, selectedDriver])
+
+  const pendingPasswordResetRequests = useMemo(
+    () => (dashboardData?.passwordResetRequests ?? []).filter((request) => request.status === "pending"),
+    [dashboardData?.passwordResetRequests]
+  )
+
   const activeDriverCount = activeDriverRows.length
 
   const systemDriverStats = useMemo(() => {
@@ -2455,9 +2830,10 @@ export default function AdminShell({
       active: activeDriverCount,
       inTransit: inTransitCount,
       idle: idleCount,
-      setupPending: setupPendingCount
+      setupPending: setupPendingCount,
+      passwordResetPending: pendingPasswordResetRequests.length
     }
-  }, [activeDriverCount, clockTs, driverDirectoryRows, livePresenceHydrated])
+  }, [activeDriverCount, clockTs, driverDirectoryRows, livePresenceHydrated, pendingPasswordResetRequests.length])
 
   const activeTricycleCount = useMemo(() => {
     const activeTricycleKeys = new Set<string>()
@@ -2556,6 +2932,75 @@ export default function AdminShell({
   const tripRows = useMemo(() => {
     return dashboardData?.recentTrips ?? []
   }, [dashboardData?.recentTrips])
+
+  const activeTripIds = useMemo(() => {
+    return new Set(
+      (dashboardData?.operationalDrivers ?? [])
+        .filter((driver) => driver.operationalStatus === "on_trip")
+        .map((driver) => driver.activeTripId)
+        .filter((tripId): tripId is number => typeof tripId === "number")
+    )
+  }, [dashboardData?.operationalDrivers])
+
+  const getTripDisplayStatus = (trip: DashboardTripRecord): TripDisplayStatus => {
+    if (trip.tripStatus === "cancelled") return "cancelled"
+    if (trip.tripStatus === "completed") {
+      return trip.tripEnd ? "completed" : "incomplete"
+    }
+    if (trip.tripStatus === "ongoing") {
+      return activeTripIds.has(trip.tripId) ? "ongoing" : "incomplete"
+    }
+    return "incomplete"
+  }
+
+  const selectedAlertTrip = useMemo(() => {
+    if (!selectedAlertDetails) return undefined
+    const tripId =
+      selectedAlertDetails.kind === "violation"
+        ? selectedAlertDetails.record.tripId
+        : selectedAlertDetails.record.tripId
+
+    if (tripId !== undefined) {
+      const directTrip = tripRows.find((trip) => trip.tripId === tripId)
+      if (directTrip) return directTrip
+    }
+
+    const driverId =
+      selectedAlertDetails.kind === "violation"
+        ? selectedAlertDetails.record.driverId
+        : selectedAlertDetails.record.driverId
+
+    return tripRows
+      .filter((trip) => trip.driverId === driverId)
+      .sort(
+        (a, b) =>
+          new Date(b.tripEnd ?? b.tripStart).getTime() -
+          new Date(a.tripEnd ?? a.tripStart).getTime()
+      )[0]
+  }, [selectedAlertDetails, tripRows])
+
+  const openAlertDetails = (alert: AlertListItem) => {
+    setAlertDetailsError(null)
+    if (alert.source === "emergency" && alert.emergencyId !== undefined) {
+      const record = (dashboardData?.recentEmergencies ?? []).find(
+        (item) => item.emergencyId === alert.emergencyId
+      )
+      if (record) {
+        setSelectedAlertDetails({ kind: "emergency", item: alert, record })
+      }
+      return
+    }
+
+    if (alert.violationId && alert.alertSource) {
+      const record = (dashboardData?.recentViolations ?? []).find(
+        (item) =>
+          item.violationId === alert.violationId && item.alertSource === alert.alertSource
+      )
+      if (record) {
+        setSelectedAlertDetails({ kind: "violation", item: alert, record })
+      }
+    }
+  }
 
   const notificationItems = useMemo<NotificationItem[]>(() => {
     return (dashboardData?.notifications ?? [])
@@ -2668,6 +3113,9 @@ export default function AdminShell({
         const driver = violation.driverId
           ? dashboardData?.drivers.find((item) => item.driverId === violation.driverId)
           : undefined
+        if (!driver) {
+          continue
+        }
         const operationalState = violation.driverId
           ? dashboardData?.operationalDrivers.find((item) => item.driverId === violation.driverId)
           : undefined
@@ -2783,6 +3231,7 @@ export default function AdminShell({
       const driver = violation.driverId
         ? dashboardData?.drivers.find((item) => item.driverId === violation.driverId)
         : undefined
+      if (!driver) continue
       const operationalState = violation.driverId
         ? dashboardData?.operationalDrivers.find((item) => item.driverId === violation.driverId)
         : undefined
@@ -2838,6 +3287,8 @@ export default function AdminShell({
   }, [activeViolators, selectedViolatorKey])
 
   useEffect(() => {
+    if (offlineViewerMode) return
+
     const closeStream = connectAdminEmergencyStream(accessToken, {
       onSnapshot: (items) => {
         const pending = items
@@ -2877,9 +3328,11 @@ export default function AdminShell({
     return () => {
       closeStream()
     }
-  }, [accessToken])
+  }, [accessToken, offlineViewerMode])
 
   useEffect(() => {
+    if (offlineViewerMode) return
+
     const appealsChannel = supabase
       .channel("admin-appeal-notifications")
       .on(
@@ -2898,9 +3351,49 @@ export default function AdminShell({
     return () => {
       void supabase.removeChannel(appealsChannel)
     }
-  }, [accessToken])
+  }, [accessToken, offlineViewerMode])
+
+  useEffect(() => {
+    if (offlineViewerMode) return
+
+    const passwordResetChannel = supabase
+      .channel("admin-password-reset-notifications")
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "driver_password_reset_requests",
+          filter: "status=eq.pending"
+        },
+        () => {
+          void refreshDashboardData()
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "driver_password_reset_requests",
+          filter: "status=eq.pending"
+        },
+        () => {
+          void refreshDashboardData()
+        }
+      )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(passwordResetChannel)
+    }
+  }, [accessToken, offlineViewerMode])
 
   const handleEmergencyResponse = async (alert: DashboardEmergencyRecord) => {
+    if (dashboardReadOnly) {
+      setDashboardError("Offline mode is read-only. Reconnect to respond to emergencies.")
+      return
+    }
     setEmergencyActionBusyId(alert.emergencyId)
     try {
       await updateEmergencyAlertStatus(accessToken, alert.emergencyId, "responding")
@@ -2916,6 +3409,155 @@ export default function AdminShell({
     } finally {
       setEmergencyActionBusyId(null)
     }
+  }
+
+  const handleViolationStatusChange = async (
+    alert: DashboardViolationRecord,
+    status: Extract<DashboardViolationRecord["status"], "open" | "under_review" | "resolved">
+  ) => {
+    if (dashboardReadOnly) {
+      setAlertDetailsError("Offline mode is read-only. Reconnect to update alert status.")
+      return
+    }
+
+    setAlertStatusBusy(true)
+    setAlertDetailsError(null)
+    try {
+      await updateViolationAlertStatus(accessToken, alert.alertSource, alert.violationId, status)
+      setDashboardData((current) =>
+        current
+          ? {
+              ...current,
+              recentViolations: current.recentViolations.map((item) =>
+                item.alertSource === alert.alertSource && item.violationId === alert.violationId
+                  ? { ...item, status }
+                  : item
+              )
+            }
+          : current
+      )
+      setSelectedAlertDetails((current) =>
+        current?.kind === "violation" &&
+        current.record.alertSource === alert.alertSource &&
+        current.record.violationId === alert.violationId
+          ? {
+              ...current,
+              record: {
+                ...current.record,
+                status
+              },
+              item: {
+                ...current.item,
+                status
+              }
+            }
+          : current
+      )
+      await refreshDashboardData()
+    } catch (error) {
+      setAlertDetailsError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setAlertStatusBusy(false)
+    }
+  }
+
+  const focusSelectedAlertOnMap = (details: SelectedAlertDetails) => {
+    const record = details.record
+    const lat = record.latitude
+    const lng = record.longitude
+    if (typeof lat !== "number" || typeof lng !== "number") return
+
+    const alert: ViolationAlertDetails = {
+      key:
+        details.kind === "violation"
+          ? details.record.violationId
+          : `emergency-${details.record.emergencyId}`,
+      source:
+        details.kind === "violation"
+          ? details.record.alertSource
+          : "system_violation",
+      driverId: record.driverId,
+      driverCode: record.driverCode,
+      driverName: record.driverName,
+      plateNo: record.plateNo,
+      tricycleId: record.tricycleId,
+      tripId: record.tripId,
+      routeName: record.routeName,
+      violationType:
+        details.kind === "violation"
+          ? details.record.violationTypeLabel
+          : "Passenger Emergency",
+      timestamp:
+        details.kind === "violation"
+          ? details.record.detectedAt
+          : details.record.createdAt,
+      locationLabel: record.locationLabel ?? `${lat.toFixed(5)}, ${lng.toFixed(5)}`,
+      description:
+        details.kind === "violation"
+          ? details.record.description
+          : "Passenger triggered the emergency action from the QR web form.",
+      lat,
+      lng
+    }
+
+    const driverLookupToken = alert.driverCode ?? alert.driverId
+    const driverRecord = driverLookupToken
+      ? getDashboardDriverByIdentifier(driverLookupToken)
+      : undefined
+    const liveState = driverRecord
+      ? driversByIdRef.current[driverRecord.driverCode] ??
+        driversByIdRef.current[String(driverRecord.driverId)]
+      : undefined
+    const driverKey =
+      getViolatorDriverKey({
+        driverCode: alert.driverCode,
+        driverId: alert.driverId
+      }) ?? `alert:${alert.key}`
+    const nextViolator: MapViolatorRecord = {
+      driverKey,
+      driverId:
+        normalizeDriverToken(alert.driverCode) ??
+        (alert.driverId !== undefined ? String(alert.driverId) : "Unknown driver"),
+      driverName: alert.driverName ?? alert.driverCode ?? "Unknown driver",
+      avatarUrl: alert.profileImageUrl ?? null,
+      latitude: lat,
+      longitude: lng,
+      violationType: alert.violationType,
+      timestamp: alert.timestamp,
+      status: "active",
+      violationId: alert.key,
+      source: alert.source,
+      locationLabel: alert.locationLabel,
+      tripId: alert.tripId,
+      routeName: alert.routeName,
+      resolvedAt: null,
+      driverOnlineStatus: liveState ? "online" : "offline",
+      lastSeenTs: liveState?.lastSeenTs ?? null,
+      uiDismissedByAdmin: false,
+      driverTokens: buildDriverTokens(alert.driverCode, alert.driverId)
+    }
+
+    if (details.kind === "violation") {
+      upsertStoredViolator(nextViolator)
+    } else {
+      upsertLiveViolator(nextViolator)
+    }
+
+    setSelectedViolatorKey(driverKey)
+    setActivePage("live-map")
+    setSelectedAlertDetails(null)
+
+    window.setTimeout(() => {
+      const map = mapRef.current
+      if (!map) return
+
+      map.resize()
+      map.flyTo({
+        center: [nextViolator.longitude, nextViolator.latitude],
+        zoom: Math.max(map.getZoom(), 16.2),
+        essential: true
+      })
+    }, 80)
   }
 
   const filteredNotificationItems = useMemo(() => {
@@ -2968,6 +3610,7 @@ export default function AdminShell({
   const markNotificationAsRead = async (notificationKey: string) => {
     const target = notificationItems.find((item) => item.key === notificationKey)
     if (!target || target.isRead) return
+    if (offlineViewerMode) return
 
     setDashboardData((current) =>
       current
@@ -3012,6 +3655,7 @@ export default function AdminShell({
         trip.todaName,
         trip.barangayName,
         trip.tripStatus,
+        getTripDisplayStatus(trip),
         trip.durationMinutes,
         trip.fareAmount,
         trip.distanceKm,
@@ -3019,7 +3663,7 @@ export default function AdminShell({
         trip.hasPath ? "has path" : "no saved path"
       )
     })
-  }, [tripRows, hasSearchQuery, normalizedSearchQuery])
+  }, [tripRows, hasSearchQuery, normalizedSearchQuery, activeTripIds])
 
   const homeTripLogSummary = useMemo(() => {
     return filteredTripRows
@@ -3033,17 +3677,19 @@ export default function AdminShell({
   }, [filteredTripRows])
 
   const tripLogStats = useMemo(() => {
-    const ongoing = tripRows.filter((trip) => trip.tripStatus === "ongoing").length
-    const completed = tripRows.filter((trip) => trip.tripStatus === "completed").length
-    const cancelled = tripRows.filter((trip) => trip.tripStatus === "cancelled").length
+    const ongoing = tripRows.filter((trip) => getTripDisplayStatus(trip) === "ongoing").length
+    const completed = tripRows.filter((trip) => getTripDisplayStatus(trip) === "completed").length
+    const incomplete = tripRows.filter((trip) => getTripDisplayStatus(trip) === "incomplete").length
+    const cancelled = tripRows.filter((trip) => getTripDisplayStatus(trip) === "cancelled").length
 
     return {
       total: tripRows.length,
       ongoing,
       completed,
+      incomplete,
       cancelled
     }
-  }, [tripRows])
+  }, [tripRows, activeTripIds])
 
   const selectedDriverTripRows = useMemo(() => {
     if (!selectedDriver) return []
@@ -3098,6 +3744,7 @@ export default function AdminShell({
         : adminProfile.barangayName
           ? `${adminProfile.role.replace("_", " ")} - ${adminProfile.barangayName}`
         : adminProfile.role.replace("_", " ")
+  const dashboardReadOnly = offlineViewerMode || !online
   const dashboardStateLabel = !online
     ? dashboardData
       ? "Offline snapshot"
@@ -3115,7 +3762,7 @@ export default function AdminShell({
         ? "live"
         : "pending"
   const dashboardSyncSummary = lastDashboardSyncAt
-    ? `Last synced ${formatDateTime(lastDashboardSyncAt)}`
+    ? `Last synced: ${formatDateTime(lastDashboardSyncAt)}`
     : "Waiting for first sync"
   const pageSearchPlaceholder =
     childSearchPlaceholder ?? PAGE_SEARCH_PLACEHOLDERS[activePage]
@@ -3123,11 +3770,65 @@ export default function AdminShell({
   const openDriverModal = (driver: DriverDirectoryRow) => {
     setSelectedDriverId(driver.driverId)
     setDriverTripHistoryOpen(false)
+    setPasswordResetError(null)
+    setApprovedTemporaryPassword(null)
   }
 
   const closeDriverModal = () => {
     setSelectedDriverId(null)
     setDriverTripHistoryOpen(false)
+    setPasswordResetError(null)
+    setApprovedTemporaryPassword(null)
+  }
+
+  const handlePasswordResetDecision = async (
+    requestId: number,
+    decision: "approve" | "deny"
+  ): Promise<boolean> => {
+    if (dashboardReadOnly) {
+      setPasswordResetError("Offline mode is read-only. Reconnect to approve reset requests.")
+      return false
+    }
+
+    setPasswordResetBusyId(requestId)
+    setPasswordResetError(null)
+    setApprovedTemporaryPassword(null)
+    try {
+      const result = await decideDriverPasswordResetRequest(accessToken, requestId, decision)
+      if (result.temporaryPassword) {
+        setApprovedTemporaryPassword({
+          requestId,
+          driverName: result.request.driverName,
+          temporaryPassword: result.temporaryPassword,
+          expiresAt: result.request.expiresAt,
+          pushNotificationSent: result.pushNotificationSent,
+          pushNotificationError: result.pushNotificationError
+        })
+      }
+      await refreshDashboardData()
+      return true
+    } catch (error) {
+      setPasswordResetError(error instanceof Error ? error.message : String(error))
+      return false
+    } finally {
+      setPasswordResetBusyId(null)
+    }
+  }
+
+  const closePasswordResetRequestModal = () => {
+    setActivePasswordResetRequest(null)
+    setPasswordResetError(null)
+    setApprovedTemporaryPassword(null)
+  }
+
+  const openPasswordResetDriverDetails = (request: DriverPasswordResetRequestRecord) => {
+    shownPasswordResetRequestIdsRef.current.add(request.requestId)
+    setActivePasswordResetRequest(null)
+    setPasswordResetError(null)
+    setApprovedTemporaryPassword(null)
+    setSelectedDriverId(request.driverId)
+    setDriverTripHistoryOpen(false)
+    setActivePage("drivers")
   }
 
   const openTripPathModal = (trip: DashboardTripRecord) => {
@@ -3137,6 +3838,37 @@ export default function AdminShell({
   const closeTripPathModal = () => {
     setSelectedTripForPath(null)
   }
+
+  const selectedTripViolations = useMemo(() => {
+    if (!selectedTripForPath) return []
+    return (dashboardData?.recentViolations ?? []).filter(
+      (violation) => violation.tripId === selectedTripForPath.tripId
+    )
+  }, [dashboardData?.recentViolations, selectedTripForPath])
+
+  const selectedTripPathCoordinates = useMemo(
+    () => (tripPathData ? getTripPathCoordinates(tripPathData.pathGeojson) : []),
+    [tripPathData]
+  )
+  const selectedTripStartCoordinate = selectedTripPathCoordinates[0]
+  const selectedTripEndCoordinate =
+    selectedTripPathCoordinates[selectedTripPathCoordinates.length - 1]
+  const selectedTripStartLocationLabel = tripPathLoading
+    ? "Loading route coordinates..."
+    : getCoordinateLabel(selectedTripStartCoordinate)
+  const selectedTripEndLocationLabel = tripPathLoading
+    ? "Loading route coordinates..."
+    : getCoordinateLabel(selectedTripEndCoordinate)
+  const shouldShowMatchedRouteNotice =
+    !tripPathLoading && Boolean(tripPathData) && !selectedTripForPath?.hasPath
+
+  useEffect(() => {
+    if (!selectedTripForPath) return
+    const refreshedTrip = tripRows.find((trip) => trip.tripId === selectedTripForPath.tripId)
+    if (refreshedTrip && refreshedTrip !== selectedTripForPath) {
+      setSelectedTripForPath(refreshedTrip)
+    }
+  }, [selectedTripForPath, tripRows])
 
   const activeViolationCoordinates = activeViolationAlert
     ? formatViolationCoordinates(activeViolationAlert)
@@ -3338,6 +4070,7 @@ export default function AdminShell({
                         <option value="violation">Alerts</option>
                         <option value="emergency">Emergencies</option>
                         <option value="appeal">Appeals</option>
+                        <option value="password_reset">Password resets</option>
                         <option value="trip">Trips</option>
                         <option value="driver">Drivers</option>
                       </select>
@@ -3433,6 +4166,15 @@ export default function AdminShell({
                           onClick={() => {
                             void markNotificationAsRead(item.key)
                             setActivePage(item.page)
+                            if (item.kind === "password_reset") {
+                              const request = (dashboardData?.passwordResetRequests ?? []).find(
+                                (reset) => String(reset.requestId) === item.sourceEntityId
+                              )
+                              if (request) {
+                                setSelectedDriverId(request.driverId)
+                                setDriverTripHistoryOpen(false)
+                              }
+                            }
                             setNotificationsOpen(false)
                           }}
                         >
@@ -3446,9 +4188,11 @@ export default function AdminShell({
                                 ? "E"
                                 : item.kind === "appeal"
                                   ? "A"
-                                  : item.kind === "trip"
-                                    ? "T"
-                                    : "D"}
+                                  : item.kind === "password_reset"
+                                    ? "R"
+                                    : item.kind === "trip"
+                                      ? "T"
+                                      : "D"}
                           </span>
                           <span className="topbar-notification-item__content">
                             <span className="topbar-notification-item__title">
@@ -3513,6 +4257,21 @@ export default function AdminShell({
               </div>
             </div>
           )}
+
+          {dashboardReadOnly &&
+            activePage !== "superadmin" &&
+            activePage !== "toda-admin" && (
+              <div
+                className="page-panel dashboard-sync-banner"
+                style={{ padding: "12px 14px", marginBottom: "14px" }}
+              >
+                <strong>Offline Mode</strong>
+                <div className="muted">
+                  You are viewing the last saved dashboard data. Live updates and changes will
+                  resume when internet connection is restored.
+                </div>
+              </div>
+            )}
 
           {activePage === "superadmin" && adminProfile.role === "superadmin" && (
             <SuperadminPage
@@ -3654,27 +4413,6 @@ export default function AdminShell({
             } ${activePage === "live-map" ? "live-map-grid--live" : ""}`}
           >
             <section className="page-panel page-panel--map">
-              <div className="admin-map-toolbar">
-                <div className="admin-map-style-switcher" role="tablist" aria-label="Map style">
-                  {MAP_STYLE_OPTIONS.map((styleOption) => {
-                    const active = selectedMapStyle === styleOption.id
-                    return (
-                      <button
-                        key={styleOption.id}
-                        type="button"
-                        className={`admin-map-style-switcher__button ${
-                          active ? "admin-map-style-switcher__button--active" : ""
-                        }`}
-                        onClick={() => setSelectedMapStyle(styleOption.id)}
-                        role="tab"
-                        aria-selected={active}
-                      >
-                        {styleOption.label}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
               <div className="admin-map" ref={mapEl} />
               {showViolatorOverlay && (
                 <ViolatorProfileStack
@@ -3806,8 +4544,12 @@ export default function AdminShell({
                 lockedTodaLabel={adminProfile.todaName}
                 searchQuery={searchQuery}
                 onSearchQueryChange={setSearchQuery}
-                onDataChanged={() => void refreshDashboardData()}
-              />
+              onDriverDeleted={(driver) =>
+                purgeViolatorProfilesByTokens(buildDriverTokens(driver.driverCode, driver.driverId))
+              }
+              onDataChanged={() => void refreshDashboardData()}
+              readOnly={dashboardReadOnly}
+            />
             ) : (
               <section className="page-panel page-panel--table-layout">
                 <div className="drivers-table-summary">
@@ -3830,6 +4572,10 @@ export default function AdminShell({
                   <article className="drivers-table-summary__card">
                     <span>Setup Pending</span>
                     <strong>{systemDriverStats.setupPending}</strong>
+                  </article>
+                  <article className="drivers-table-summary__card">
+                    <span>Reset Requests</span>
+                    <strong>{systemDriverStats.passwordResetPending}</strong>
                   </article>
                 </div>
                 <div className="drivers-table-shell">
@@ -4051,6 +4797,79 @@ export default function AdminShell({
                         <strong>{selectedDriverTripRows.length}</strong>
                       </div>
                     </div>
+                  </section>
+
+                  <section className="driver-modal__section">
+                    <div className="driver-modal__section-head">
+                      <h4>Password Reset Requests</h4>
+                      <p>Approve only after verifying the driver's identity.</p>
+                    </div>
+
+                    {passwordResetError && (
+                      <div className="emergency-modal__error" role="alert">
+                        {passwordResetError}
+                      </div>
+                    )}
+
+                    {approvedTemporaryPassword && (
+                      <div className="driver-password-reset__temp" role="status">
+                        <span>Temporary reset password for {approvedTemporaryPassword.driverName}</span>
+                        <strong>{approvedTemporaryPassword.temporaryPassword}</strong>
+                        <small>
+                          {approvedTemporaryPassword.pushNotificationSent
+                            ? "A push notification with this one-time code was sent to the verified driver."
+                            : `Push notification was not delivered${approvedTemporaryPassword.pushNotificationError ? `: ${approvedTemporaryPassword.pushNotificationError}` : "."} Share this one-time code with the verified driver.`}{" "}
+                          It expires
+                          {approvedTemporaryPassword.expiresAt
+                            ? ` at ${formatDateTime(approvedTemporaryPassword.expiresAt)}.`
+                            : " soon."}
+                        </small>
+                      </div>
+                    )}
+
+                    {selectedDriverPasswordResetRequests.length === 0 ? (
+                      <div className="driver-modal__empty">
+                        No password reset request has been submitted by this driver.
+                      </div>
+                    ) : (
+                      <div className="driver-password-reset-list">
+                        {selectedDriverPasswordResetRequests.map((request) => (
+                          <article key={request.requestId} className="driver-password-reset-card">
+                            <div>
+                              <strong>Request #{request.requestId}</strong>
+                              <span>{formatDateTime(request.requestedAt)}</span>
+                            </div>
+                            <span className={`drivers-table__pill driver-password-reset-card__status--${request.status}`}>
+                              {request.status.replace("_", " ")}
+                            </span>
+                            {request.status === "pending" ? (
+                              <div className="driver-password-reset-card__actions">
+                                <button
+                                  type="button"
+                                  className="driver-modal__primary"
+                                  disabled={passwordResetBusyId === request.requestId || dashboardReadOnly}
+                                  onClick={() => void handlePasswordResetDecision(request.requestId, "approve")}
+                                >
+                                  {passwordResetBusyId === request.requestId ? "Approving..." : "Approve reset"}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="driver-modal__secondary"
+                                  disabled={passwordResetBusyId === request.requestId || dashboardReadOnly}
+                                  onClick={() => void handlePasswordResetDecision(request.requestId, "deny")}
+                                >
+                                  Deny
+                                </button>
+                              </div>
+                            ) : (
+                              <small>
+                                {request.expiresAt ? `Expires ${formatDateTime(request.expiresAt)}` : "No active temporary password"}
+                              </small>
+                            )}
+                          </article>
+                        ))}
+                      </div>
+                    )}
                   </section>
 
                   <section className="driver-modal__section">
@@ -4310,6 +5129,7 @@ export default function AdminShell({
               searchQuery={searchQuery}
               onSearchQueryChange={setSearchQuery}
               onDataChanged={() => void refreshDashboardData()}
+              readOnly={dashboardReadOnly}
             />
           )}
 
@@ -4357,7 +5177,19 @@ export default function AdminShell({
                       </thead>
                       <tbody>
                         {filteredAlerts.map((alert) => (
-                          <tr key={alert.key}>
+                          <tr
+                            key={alert.key}
+                            className="dashboard-data-table__row--clickable"
+                            tabIndex={0}
+                            role="button"
+                            onClick={() => openAlertDetails(alert)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault()
+                                openAlertDetails(alert)
+                              }
+                            }}
+                          >
                             <td>{alert.driverName ?? `Driver ${alert.driverId}`}</td>
                             <td>{alert.source === "emergency" ? "Emergency" : "Alert"}</td>
                             <td>{alert.reason}</td>
@@ -4371,7 +5203,9 @@ export default function AdminShell({
                             <td>{new Date(alert.ts).toLocaleString()}</td>
                             <td>
                               <span className={`drivers-table__pill drivers-table__pill--status`}>
-                                {alert.status ?? (alert.source === "emergency" ? "created" : "open")}
+                                {alert.source === "emergency"
+                                  ? formatAlertStatusLabel(alert.status ?? "created")
+                                  : formatAlertStatusLabel(alert.status ?? "open")}
                               </span>
                             </td>
                           </tr>
@@ -4392,6 +5226,7 @@ export default function AdminShell({
               onSearchQueryChange={setSearchQuery}
               onSearchPlaceholderChange={setChildSearchPlaceholder}
               onDataChanged={() => void refreshDashboardData()}
+              readOnly={dashboardReadOnly}
             />
           )}
 
@@ -4409,6 +5244,10 @@ export default function AdminShell({
                 <article className="dashboard-table-summary__card">
                   <span>Completed</span>
                   <strong>{tripLogStats.completed}</strong>
+                </article>
+                <article className="dashboard-table-summary__card">
+                  <span>Incomplete</span>
+                  <strong>{tripLogStats.incomplete}</strong>
                 </article>
                 <article className="dashboard-table-summary__card">
                   <span>Cancelled</span>
@@ -4442,8 +5281,21 @@ export default function AdminShell({
                         </tr>
                       </thead>
                       <tbody>
-                        {filteredTripRows.map((trip) => (
-                          <tr key={trip.tripId}>
+                        {filteredTripRows.map((trip) => {
+                          const tripDisplayStatus = getTripDisplayStatus(trip)
+                          return (
+                          <tr
+                            key={trip.tripId}
+                            className="dashboard-data-table__row--clickable"
+                            tabIndex={0}
+                            onClick={() => openTripPathModal(trip)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault()
+                                openTripPathModal(trip)
+                              }
+                            }}
+                          >
                             <td>{trip.tripId}</td>
                             <td>{trip.driverName}</td>
                             <td>{trip.plateNo}</td>
@@ -4457,7 +5309,10 @@ export default function AdminShell({
                               <button
                                 type="button"
                                 className="table-action-button"
-                                onClick={() => openTripPathModal(trip)}
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  openTripPathModal(trip)
+                                }}
                                 disabled={!trip.hasPath}
                               >
                                 {trip.hasPath ? `${trip.pathPointCount ?? 0} pts` : "None"}
@@ -4465,12 +5320,13 @@ export default function AdminShell({
                             </td>
                             <td>{trip.violationCount}</td>
                             <td>
-                              <span className="drivers-table__pill drivers-table__pill--status">
-                                {trip.tripStatus}
+                              <span className={`drivers-table__pill drivers-table__pill--status trip-status-pill trip-status-pill--${tripDisplayStatus}`}>
+                                {formatTripDisplayStatus(tripDisplayStatus)}
                               </span>
                             </td>
                           </tr>
-                        ))}
+                          )
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -4495,7 +5351,7 @@ export default function AdminShell({
               <div className="trip-path-modal__header">
                 <div>
                   <h2 id="trip-path-modal-title">
-                    Trip #{selectedTripForPath.tripId} Path
+                    Trip #{selectedTripForPath.tripId} Details
                   </h2>
                   <p>
                     {selectedTripForPath.driverName} | {selectedTripForPath.plateNo} |{" "}
@@ -4514,6 +5370,30 @@ export default function AdminShell({
               <div className="trip-path-modal__body">
                 <div className="trip-path-modal__meta">
                   <div>
+                    <span>Trip ID</span>
+                    <strong>{selectedTripForPath.tripId}</strong>
+                  </div>
+                  <div>
+                    <span>Driver</span>
+                    <strong>{selectedTripForPath.driverName}</strong>
+                  </div>
+                  <div>
+                    <span>Driver Code</span>
+                    <strong>{selectedTripForPath.driverCode}</strong>
+                  </div>
+                  <div>
+                    <span>Plate Number</span>
+                    <strong>{selectedTripForPath.plateNo}</strong>
+                  </div>
+                  <div>
+                    <span>Route</span>
+                    <strong>{selectedTripForPath.routeName}</strong>
+                  </div>
+                  <div>
+                    <span>Trip Status</span>
+                    <strong>{formatTripDisplayStatus(getTripDisplayStatus(selectedTripForPath))}</strong>
+                  </div>
+                  <div>
                     <span>Start</span>
                     <strong>{formatDateTime(selectedTripForPath.tripStart)}</strong>
                   </div>
@@ -4522,29 +5402,103 @@ export default function AdminShell({
                     <strong>{formatDateTime(selectedTripForPath.tripEnd)}</strong>
                   </div>
                   <div>
-                    <span>Points</span>
+                    <span>Fare</span>
+                    <strong>
+                      {selectedTripForPath.fareAmount !== undefined
+                        ? `PHP ${selectedTripForPath.fareAmount.toFixed(2)}`
+                        : "-"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Duration</span>
+                    <strong>
+                      {selectedTripForPath.durationMinutes !== undefined
+                        ? `${selectedTripForPath.durationMinutes} min`
+                        : "-"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Distance</span>
+                    <strong>
+                      {selectedTripForPath.distanceKm !== undefined
+                        ? `${selectedTripForPath.distanceKm.toFixed(2)} km`
+                        : "-"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Matched Points</span>
                     <strong>{tripPathData?.pointCount ?? selectedTripForPath.pathPointCount ?? "-"}</strong>
                   </div>
                   <div>
-                    <span>Alerts</span>
+                    <span>Alert Count</span>
                     <strong>{selectedTripForPath.violationCount}</strong>
+                  </div>
+                  <div>
+                    <span>Start Location</span>
+                    <strong>{selectedTripStartLocationLabel}</strong>
+                  </div>
+                  <div>
+                    <span>End Location</span>
+                    <strong>{selectedTripEndLocationLabel}</strong>
                   </div>
                 </div>
 
-                {tripPathError && (
-                  <div className="trip-path-modal__notice" role="status">
-                    {tripPathError.replace(/^Error:\s*/, "")}
+                <section className="trip-path-modal__section">
+                  <div className="trip-path-modal__section-head">
+                    <h3>Completed Trip Map Preview</h3>
+                    <span>{tripPathData?.pointCount ?? selectedTripForPath.pathPointCount ?? 0} points</span>
                   </div>
-                )}
 
-                {tripPathLoading ? (
-                  <div className="trip-path-modal__empty">Loading saved trip path...</div>
-                ) : tripPathData ? (
-                  <TripPathMap tripPath={tripPathData} />
-                ) : (
-                  <div className="trip-path-modal__empty">
-                    No saved path is available for this trip yet.
-                  </div>
+                  {tripPathError && (
+                    <div className="trip-path-modal__notice" role="status">
+                      {tripPathError.replace(/^Error:\s*/, "")}
+                    </div>
+                  )}
+
+                  {shouldShowMatchedRouteNotice && (
+                    <div className="trip-path-modal__notice" role="status">
+                      Matched route is not available yet. Showing the stored GPS route.
+                    </div>
+                  )}
+
+                  {tripPathLoading ? (
+                    <div className="trip-path-modal__empty">Loading matched trip route...</div>
+                  ) : tripPathData ? (
+                    <TripPathMap tripPath={tripPathData} violations={selectedTripViolations} />
+                  ) : (
+                    <div className="trip-path-modal__empty">
+                      Matched route is not available yet.
+                    </div>
+                  )}
+                </section>
+
+                {selectedTripViolations.length > 0 && (
+                  <section className="trip-path-modal__section">
+                    <div className="trip-path-modal__section-head">
+                      <h3>Linked Violations</h3>
+                      <span>{selectedTripViolations.length} linked</span>
+                    </div>
+                    <div className="trip-path-modal__violations">
+                      {selectedTripViolations.map((violation) => (
+                        <article key={`${violation.alertSource}-${violation.violationId}`}>
+                          <strong>{violation.violationTypeLabel}</strong>
+                          <span>{formatDateTime(violation.detectedAt)}</span>
+                          <p>
+                            {[
+                              violation.description,
+                              violation.locationLabel,
+                              typeof violation.latitude === "number" &&
+                              typeof violation.longitude === "number"
+                                ? `${violation.latitude.toFixed(6)}, ${violation.longitude.toFixed(6)}`
+                                : undefined
+                            ]
+                              .filter(Boolean)
+                              .join(" | ") || "No additional violation details."}
+                          </p>
+                        </article>
+                      ))}
+                    </div>
+                  </section>
                 )}
               </div>
             </section>
@@ -4674,6 +5628,344 @@ export default function AdminShell({
                     View Map
                   </button>
                 </div>
+              </div>
+            </section>
+          </div>
+        )}
+        {selectedAlertDetails && (
+          <div
+            className="alert-detail-modal-backdrop"
+            role="presentation"
+            onClick={() => setSelectedAlertDetails(null)}
+          >
+            <section
+              className="alert-detail-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="alert-detail-modal-title"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="alert-detail-modal__header">
+                <div>
+                  <span className="alert-detail-modal__badge">
+                    {selectedAlertDetails.kind === "emergency"
+                      ? "Passenger Emergency"
+                      : selectedAlertDetails.record.violationTypeLabel}
+                  </span>
+                  <h2 id="alert-detail-modal-title">
+                    {selectedAlertDetails.record.driverName ??
+                      selectedAlertDetails.record.driverCode ??
+                      "Alert details"}
+                  </h2>
+                  <p>
+                    {[selectedAlertDetails.record.plateNo, selectedAlertDetails.record.routeName]
+                      .filter(Boolean)
+                      .join(" / ") || "No plate or route context"}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="violation-modal__close"
+                  onClick={() => setSelectedAlertDetails(null)}
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="alert-detail-modal__body">
+                <div className="alert-detail-modal__grid">
+                  <div>
+                    <span>Driver</span>
+                    <strong>
+                      {selectedAlertDetails.record.driverName ??
+                        selectedAlertDetails.record.driverCode ??
+                        "Unassigned driver"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Driver ID</span>
+                    <strong>{selectedAlertDetails.record.driverId ?? "-"}</strong>
+                  </div>
+                  <div>
+                    <span>Tricycle Details</span>
+                    <strong>
+                      {selectedAlertDetails.record.tricycleId
+                        ? `Tricycle #${selectedAlertDetails.record.tricycleId}`
+                        : "No tricycle ID"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Plate Number</span>
+                    <strong>{selectedAlertDetails.record.plateNo ?? "-"}</strong>
+                  </div>
+                  <div>
+                    <span>Route</span>
+                    <strong>{selectedAlertDetails.record.routeName ?? "-"}</strong>
+                  </div>
+                  <div>
+                    <span>Alert Type</span>
+                    <strong>
+                      {selectedAlertDetails.kind === "emergency"
+                        ? selectedAlertDetails.record.alertType
+                        : selectedAlertDetails.record.violationTypeLabel}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Reason</span>
+                    <strong>
+                      {selectedAlertDetails.kind === "emergency"
+                        ? "Passenger Emergency"
+                        : selectedAlertDetails.record.description ?? "Geofence Boundary"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Time</span>
+                    <strong>
+                      {new Date(
+                        selectedAlertDetails.kind === "emergency"
+                          ? selectedAlertDetails.record.createdAt
+                          : selectedAlertDetails.record.detectedAt
+                      ).toLocaleString()}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Location Coordinates</span>
+                    <strong>
+                      {typeof selectedAlertDetails.record.latitude === "number" &&
+                      typeof selectedAlertDetails.record.longitude === "number"
+                        ? `${selectedAlertDetails.record.latitude.toFixed(6)}, ${selectedAlertDetails.record.longitude.toFixed(6)}`
+                        : selectedAlertDetails.record.locationLabel ?? "-"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Scope</span>
+                    <strong>
+                      {[selectedAlertDetails.record.barangayName, selectedAlertDetails.record.todaName]
+                        .filter(Boolean)
+                        .join(" / ") || "-"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Trip</span>
+                    <strong>
+                      {selectedAlertTrip
+                        ? `#${selectedAlertTrip.tripId} ${selectedAlertTrip.tripStatus}`
+                        : selectedAlertDetails.record.tripId
+                          ? `#${selectedAlertDetails.record.tripId}`
+                          : "No trip linked"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Trip Details</span>
+                    <strong>
+                      {selectedAlertTrip
+                        ? `${selectedAlertTrip.routeName} / ${new Date(
+                            selectedAlertTrip.tripStart
+                          ).toLocaleString()}`
+                        : "No recent trip record available"}
+                    </strong>
+                  </div>
+                </div>
+
+                {selectedAlertDetails.kind === "violation" &&
+                  isGeofenceBoundaryViolation(selectedAlertDetails.record) && (
+                    <label className="alert-detail-modal__status">
+                      <span>Violation Status</span>
+                      <select
+                        value={selectedAlertDetails.record.status}
+                        disabled={alertStatusBusy || dashboardReadOnly}
+                        onChange={(event) =>
+                          void handleViolationStatusChange(
+                            selectedAlertDetails.record,
+                            event.target.value as Extract<
+                              DashboardViolationRecord["status"],
+                              "open" | "under_review" | "resolved"
+                            >
+                          )
+                        }
+                      >
+                        <option value="open">Take Action</option>
+                        <option value="under_review">Under Review</option>
+                        <option value="resolved">Resolved</option>
+                      </select>
+                    </label>
+                  )}
+
+                {alertDetailsError && (
+                  <div className="emergency-modal__error" role="alert">
+                    {alertDetailsError}
+                  </div>
+                )}
+
+                {typeof selectedAlertDetails.record.latitude === "number" &&
+                typeof selectedAlertDetails.record.longitude === "number" ? (
+                  <div className="alert-detail-modal__map">
+                    <iframe
+                      title="Alert location map preview"
+                      loading="lazy"
+                      src={`https://www.openstreetmap.org/export/embed.html?bbox=${selectedAlertDetails.record.longitude - 0.004}%2C${selectedAlertDetails.record.latitude - 0.004}%2C${selectedAlertDetails.record.longitude + 0.004}%2C${selectedAlertDetails.record.latitude + 0.004}&layer=mapnik&marker=${selectedAlertDetails.record.latitude}%2C${selectedAlertDetails.record.longitude}`}
+                    />
+                  </div>
+                ) : (
+                  <div className="dashboard-table-empty">
+                    No GPS coordinates are stored for this alert.
+                  </div>
+                )}
+
+                <div className="violation-modal__actions">
+                  <button
+                    type="button"
+                    className="violation-modal__button violation-modal__button--secondary"
+                    onClick={() => setSelectedAlertDetails(null)}
+                  >
+                    Close
+                  </button>
+                  <button
+                    type="button"
+                    className="violation-modal__button violation-modal__button--primary"
+                    disabled={
+                      typeof selectedAlertDetails.record.latitude !== "number" ||
+                      typeof selectedAlertDetails.record.longitude !== "number"
+                    }
+                    onClick={() => focusSelectedAlertOnMap(selectedAlertDetails)}
+                  >
+                    View on Live Map
+                  </button>
+                </div>
+              </div>
+            </section>
+          </div>
+        )}
+        {activePasswordResetRequest && (
+          <div className="password-reset-modal-backdrop" role="presentation">
+            <section
+              className="password-reset-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="admin-password-reset-modal-title"
+            >
+              <div className="password-reset-modal__header">
+                <span className="password-reset-modal__badge">Password Reset Request</span>
+                <button
+                  type="button"
+                  className="password-reset-modal__close"
+                  onClick={closePasswordResetRequestModal}
+                  aria-label="Close password reset request"
+                >
+                  x
+                </button>
+              </div>
+
+              <div className="password-reset-modal__body">
+                <h2 id="admin-password-reset-modal-title">
+                  Driver needs password reset approval
+                </h2>
+                <p>
+                  Verify the driver before approving. Approval generates a one-time temporary
+                  password and sends it to the driver for use on the Login screen.
+                </p>
+
+                <div className="password-reset-modal__details">
+                  <div>
+                    <span>Driver</span>
+                    <strong>{activePasswordResetRequest.driverName}</strong>
+                  </div>
+                  <div>
+                    <span>Driver Code</span>
+                    <strong>{activePasswordResetRequest.driverCode}</strong>
+                  </div>
+                  <div>
+                    <span>TODA</span>
+                    <strong>{activePasswordResetRequest.todaName}</strong>
+                  </div>
+                  <div>
+                    <span>Requested</span>
+                    <strong>{formatDateTime(activePasswordResetRequest.requestedAt)}</strong>
+                  </div>
+                </div>
+
+                {passwordResetError && (
+                  <div className="password-reset-modal__error" role="alert">
+                    {passwordResetError}
+                  </div>
+                )}
+
+                {approvedTemporaryPassword?.requestId ===
+                  activePasswordResetRequest.requestId && (
+                  <div className="password-reset-modal__temp" role="status">
+                    <span>Temporary reset password</span>
+                    <strong>{approvedTemporaryPassword.temporaryPassword}</strong>
+                    <small>
+                      {approvedTemporaryPassword.pushNotificationSent
+                        ? "A push notification with this one-time code was sent to the verified driver."
+                        : `Push notification was not delivered${approvedTemporaryPassword.pushNotificationError ? `: ${approvedTemporaryPassword.pushNotificationError}` : "."} Share this one-time code with the verified driver.`}{" "}
+                      It expires
+                      {approvedTemporaryPassword.expiresAt
+                        ? ` at ${formatDateTime(approvedTemporaryPassword.expiresAt)}.`
+                        : " soon."}
+                    </small>
+                  </div>
+                )}
+              </div>
+
+              <div className="password-reset-modal__actions">
+                {approvedTemporaryPassword?.requestId ===
+                activePasswordResetRequest.requestId ? (
+                  <button
+                    type="button"
+                    className="password-reset-modal__primary"
+                    onClick={closePasswordResetRequestModal}
+                  >
+                    Done
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className="password-reset-modal__secondary"
+                      onClick={() => openPasswordResetDriverDetails(activePasswordResetRequest)}
+                    >
+                      View Driver
+                    </button>
+                    <button
+                      type="button"
+                      className="password-reset-modal__danger"
+                      disabled={
+                        passwordResetBusyId === activePasswordResetRequest.requestId ||
+                        dashboardReadOnly
+                      }
+                      onClick={async () => {
+                        const updated = await handlePasswordResetDecision(
+                          activePasswordResetRequest.requestId,
+                          "deny"
+                        )
+                        if (updated) setActivePasswordResetRequest(null)
+                      }}
+                    >
+                      {passwordResetBusyId === activePasswordResetRequest.requestId
+                        ? "Denying..."
+                        : "Deny"}
+                    </button>
+                    <button
+                      type="button"
+                      className="password-reset-modal__primary"
+                      disabled={
+                        passwordResetBusyId === activePasswordResetRequest.requestId ||
+                        dashboardReadOnly
+                      }
+                      onClick={() =>
+                        void handlePasswordResetDecision(
+                          activePasswordResetRequest.requestId,
+                          "approve"
+                        )
+                      }
+                    >
+                      {passwordResetBusyId === activePasswordResetRequest.requestId
+                        ? "Approving..."
+                        : "Approve Reset"}
+                    </button>
+                  </>
+                )}
               </div>
             </section>
           </div>

@@ -2,9 +2,7 @@
   "compilerOptions": {
     "target": "ES2020",
     "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "module": "ESNext",
-    "baseUrl": ".",
     "paths": {
       "maplibre-gl": ["./node_modules/maplibre-gl"],
       "maplibre-gl/*": ["./node_modules/maplibre-gl/*"]
@@ -19,5 +17,6 @@
     "strict": true,
     "types": ["vite/client"]
   },
-  "include": ["src", "../../common/**/*.ts", "../../common/**/*.tsx"]
+  "include": ["src", "../../common/**/*.ts", "../../common/**/*.tsx"],
+  "exclude": ["node_modules"]
 }
