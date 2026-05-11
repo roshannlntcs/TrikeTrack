@@ -1274,6 +1274,10 @@
   font-weight: 800;
 }
 
+.violation-popup__eyebrow--emergency {
+  color: #b91c1c;
+}
+
 .violation-popup__close {
   position: absolute;
   top: 10px;
@@ -2047,6 +2051,39 @@
 
 .emergency-modal__meta {
   text-align: center;
+}
+
+.emergency-modal__map {
+  margin: 20px 0 0;
+  overflow: hidden;
+  border-radius: 10px;
+  border: 1px solid #dbe4ef;
+  background: #f5f8fc;
+  min-height: 280px;
+}
+
+.emergency-modal__map-header {
+  font-size: 0.95rem;
+  font-weight: 600;
+  padding: 12px 14px 8px;
+  color: #172033;
+}
+
+.emergency-modal__map iframe {
+  width: 100%;
+  height: 320px;
+  border: 0;
+  display: block;
+}
+
+.emergency-modal__map--empty {
+  min-height: 140px;
+  padding: 24px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: #8b96ab;
 }
 
 .emergency-modal__error {

@@ -107,9 +107,7 @@ export default function TripLogs({
             >
               <div>{new Date(point.ts).toLocaleTimeString()}</div>
               <div>{point.driverId}</div>
-              <div>
-                {point.lat.toFixed(5)}, {point.lng.toFixed(5)}
-              </div>
+              <div>Location name unavailable</div>
               <div style={{ color: point.violation ? "#b91c1c" : "#15803d" }}>
                 {point.violation ? "VIOLATION" : "OK"}
               </div>

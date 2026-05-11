@@ -24,6 +24,12 @@ export async function GET(request: Request) {
       limit: 50
     })
 
+    console.log("🚨 BACKEND: Returning emergencies with location data:", emergencies.map(e => ({
+      emergencyId: e.emergencyId,
+      latitude: e.latitude,
+      longitude: e.longitude
+    })))
+
     return NextResponse.json({
       ok: true,
       data: emergencies

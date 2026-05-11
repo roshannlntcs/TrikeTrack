@@ -125,12 +125,20 @@ export async function POST(request: Request) {
     return invalid(request, "qrToken is required.")
   }
 
-  const latitude = Number(payload.latitude)
-  const longitude = Number(payload.longitude)
+  const latitude = Number(payload.passenger_latitude ?? payload.passengerLatitude ?? payload.latitude)
+  const longitude = Number(
+    payload.passenger_longitude ?? payload.passengerLongitude ?? payload.longitude
+  )
+  const rawAccuracy = payload.location_accuracy ?? payload.locationAccuracy ?? payload.accuracy
   const accuracy =
-    payload.accuracy === undefined || payload.accuracy === null
+    rawAccuracy === undefined || rawAccuracy === null
       ? undefined
-      : Number(payload.accuracy)
+      : Number(rawAccuracy)
+  const rawCapturedAt = payload.location_captured_at ?? payload.locationCapturedAt
+  const locationCapturedAt =
+    typeof rawCapturedAt === "string" || rawCapturedAt instanceof Date
+      ? new Date(rawCapturedAt)
+      : undefined
 
   if (
     !Number.isFinite(latitude) ||
@@ -160,10 +168,21 @@ export async function POST(request: Request) {
   try {
     const emergency = await createPassengerEmergencyAlert({
       qrToken: payload.qrToken.trim(),
-      latitude,
-      longitude,
+      passengerLatitude: latitude,
+      passengerLongitude: longitude,
       accuracy: Number.isFinite(accuracy) ? accuracy : undefined,
+      locationCapturedAt:
+        locationCapturedAt && Number.isFinite(locationCapturedAt.getTime())
+          ? locationCapturedAt
+          : undefined,
       deviceInfo
+    })
+
+    console.log("🚨 BACKEND: Emergency created with location:", {
+      emergencyId: emergency.emergencyId,
+      latitude: emergency.latitude,
+      longitude: emergency.longitude,
+      locationLabel: emergency.locationLabel
     })
 
     return jsonResponse(request, {

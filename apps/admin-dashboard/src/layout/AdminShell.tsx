@@ -252,8 +252,7 @@ const formatLastSeen = (lastSeenTs: number, nowTs: number) => {
   return `${diffHours}h ago`
 }
 
-const formatPoint = (point: DriverLocationEvent) =>
-  `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`
+const formatPoint = (_point: DriverLocationEvent) => "Location captured"
 
 const textMatchesSearch = (
   normalizedSearchQuery: string,
@@ -332,8 +331,30 @@ type TripDisplayStatus = "ongoing" | "completed" | "incomplete" | "cancelled"
 const formatTripDisplayStatus = (value: TripDisplayStatus) =>
   value.charAt(0).toUpperCase() + value.slice(1)
 
-const getCoordinateLabel = (coordinate?: [number, number]) =>
-  coordinate ? `${coordinate[1].toFixed(6)}, ${coordinate[0].toFixed(6)}` : "-"
+const COORDINATE_TEXT_PATTERN =
+  /(?:Coordinates:\s*)?-?\d{1,3}(?:\.\d+)?\s*,\s*-?\d{1,3}(?:\.\d+)?\.?/gi
+
+const isCoordinateText = (value?: string | null) =>
+  Boolean(value?.trim().match(/^-?\d{1,3}(?:\.\d+)?\s*,\s*-?\d{1,3}(?:\.\d+)?$/))
+
+const removeCoordinateText = (value?: string | null) =>
+  value
+    ?.replace(COORDINATE_TEXT_PATTERN, "")
+    .replace(/\s+\|\s+\|/g, " | ")
+    .replace(/^\s*\|\s*|\s*\|\s*$/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+
+const getReadableLocationLabel = (
+  label?: string | null,
+  fallback = "Location name unavailable"
+) => {
+  const cleaned = removeCoordinateText(label)
+  return cleaned && !isCoordinateText(cleaned) ? cleaned : fallback
+}
+
+const getTripLocationName = (label?: string | null, fallback = "Location name unavailable") =>
+  getReadableLocationLabel(label, fallback)
 
 const createViolationMarkerElement = () => {
   const markerEl = document.createElement("div")
@@ -503,10 +524,6 @@ const hasViolationCoordinates = (
   typeof alert.lng === "number" &&
   Number.isFinite(alert.lng)
 
-const formatViolationCoordinates = (
-  alert: Pick<ViolationAlertDetails, "lat" | "lng">
-) => (hasViolationCoordinates(alert) ? `${alert.lat.toFixed(6)}, ${alert.lng.toFixed(6)}` : undefined)
-
 const normalizeDriverToken = (value?: string | number | null) => {
   if (value === undefined || value === null) return null
   const normalized = String(value).trim().toUpperCase()
@@ -575,6 +592,21 @@ const formatAlertStatusLabel = (status?: string) => {
       return "Resolved"
     default:
       return status ? status.replace(/_/g, " ") : "Take Action"
+  }
+}
+
+const formatEmergencyStatusLabel = (status?: string) => {
+  switch (status) {
+    case "responding":
+      return "Taking Action"
+    case "pending_admin":
+      return "Pending Admin"
+    case "acknowledged":
+      return "Acknowledged"
+    case "resolved":
+      return "Resolved"
+    default:
+      return status ? status.replace(/_/g, " ") : "Unknown"
   }
 }
 
@@ -751,7 +783,7 @@ type SelectedAlertDetails =
 
 type ViolationAlertDetails = {
   key: string
-  source: "live_geofence" | DashboardViolationRecord["alertSource"]
+  source: "live_geofence" | DashboardViolationRecord["alertSource"] | "passenger_emergency"
   driverId?: number
   driverCode?: string
   driverName?: string
@@ -921,9 +953,12 @@ const createStoredAlertListItem = (alert: DashboardViolationRecord): AlertListIt
   routeName: alert.routeName,
   ts: new Date(alert.detectedAt).getTime(),
   reason: alert.violationTypeLabel,
-  description: alert.locationLabel
-    ? [alert.locationLabel, alert.description].filter(Boolean).join(" | ")
-    : alert.description,
+  description: [
+    getReadableLocationLabel(alert.locationLabel, ""),
+    removeCoordinateText(alert.description)
+  ]
+    .filter(Boolean)
+    .join(" | "),
   status: alert.status,
   lat: alert.latitude,
   lng: alert.longitude
@@ -945,15 +980,50 @@ const createStoredEmergencyAlertListItem = (
   reason: "Passenger Emergency",
   description: [
     "Passenger triggered the emergency action from the QR web form.",
-    alert.locationLabel,
+    getReadableLocationLabel(
+      alert.passengerLocationName ?? alert.passenger_location_name ?? alert.locationLabel,
+      ""
+    ),
     alert.routeName
   ]
     .filter(Boolean)
     .join(" | "),
   status: alert.status,
-  lat: alert.latitude,
-  lng: alert.longitude
+  lat: alert.passengerLatitude ?? alert.passenger_latitude ?? alert.latitude,
+  lng: alert.passengerLongitude ?? alert.passenger_longitude ?? alert.longitude
 })
+
+const getEmergencyAlertLocation = (
+  alert: Pick<
+    DashboardEmergencyRecord,
+    | "passengerLatitude"
+    | "passengerLongitude"
+    | "passenger_latitude"
+    | "passenger_longitude"
+    | "latitude"
+    | "longitude"
+  >
+) => {
+  const latitude = alert.passengerLatitude ?? alert.passenger_latitude ?? alert.latitude
+  const longitude = alert.passengerLongitude ?? alert.passenger_longitude ?? alert.longitude
+
+  if (typeof latitude === "number" && typeof longitude === "number") {
+    return { latitude, longitude }
+  }
+
+  return null
+}
+
+const getEmergencyLocationName = (
+  alert: Pick<
+    DashboardEmergencyRecord,
+    "passengerLocationName" | "passenger_location_name" | "locationLabel"
+  >
+) =>
+  getReadableLocationLabel(
+    alert.passengerLocationName ?? alert.passenger_location_name ?? alert.locationLabel,
+    "Passenger location name unavailable"
+  )
 
 const getStoredViolationKey = (
   alertSource: DashboardViolationRecord["alertSource"],
@@ -1047,6 +1117,14 @@ export default function AdminShell({
   const [selectedAlertDetails, setSelectedAlertDetails] =
     useState<SelectedAlertDetails | null>(null)
   const [alertStatusBusy, setAlertStatusBusy] = useState(false)
+
+  const activeEmergencyLocation = activeEmergencyModal
+    ? getEmergencyAlertLocation(activeEmergencyModal)
+    : null
+
+  const selectedAlertLocation = selectedAlertDetails
+    ? getEmergencyAlertLocation(selectedAlertDetails.record)
+    : null
   const [alertDetailsError, setAlertDetailsError] = useState<string | null>(null)
   const [activeViolationAlert, setActiveViolationAlert] =
     useState<ViolationAlertDetails | null>(null)
@@ -2296,7 +2374,7 @@ export default function AdminShell({
             status: "active",
             violationId: `live-${event.driverId}-${activeTripId ?? "no-trip"}-${event.ts}`,
             source: "live_geofence",
-            locationLabel: formatViolationCoordinates({ lat: event.lat, lng: event.lng }),
+            locationLabel: "Location name unavailable",
             tripId: activeTripId,
             routeName: trip?.routeName ?? operationalState?.activeRouteName,
             resolvedAt: null,
@@ -2325,7 +2403,7 @@ export default function AdminShell({
           routeName: trip?.routeName ?? operationalState?.activeRouteName,
           violationType: "Geofence Deviation",
           timestamp,
-          locationLabel: formatViolationCoordinates({ lat: event.lat, lng: event.lng }),
+          locationLabel: "Location name unavailable",
           description: "Driver went outside the active geofence boundary.",
           lat: event.lat,
           lng: event.lng
@@ -2885,10 +2963,6 @@ export default function AdminShell({
   const filteredAlerts = useMemo(() => {
     if (!hasSearchQuery) return alertRows
     return alertRows.filter((alert) => {
-      const point =
-        alert.lat !== undefined && alert.lng !== undefined
-          ? `${alert.lat.toFixed(5)}, ${alert.lng.toFixed(5)}`
-          : ""
       return (
         textMatchesSearch(
           normalizedSearchQuery,
@@ -2904,7 +2978,7 @@ export default function AdminShell({
           alert.status,
           alert.source,
           alert.emergencyId,
-          point
+          alert.description
         )
       )
     })
@@ -2986,6 +3060,7 @@ export default function AdminShell({
         (item) => item.emergencyId === alert.emergencyId
       )
       if (record) {
+        console.log("🚨 OPENING EMERGENCY DETAILS:", { emergencyId: record.emergencyId, latitude: record.latitude, longitude: record.longitude })
         setSelectedAlertDetails({ kind: "emergency", item: alert, record })
       }
       return
@@ -3150,8 +3225,7 @@ export default function AdminShell({
           status: violation.status,
           violationId: String(violation.violationId),
           source: violation.alertSource,
-          locationLabel:
-            violation.locationLabel ?? formatViolationCoordinates({ lat: latitude, lng: longitude }),
+          locationLabel: getReadableLocationLabel(violation.locationLabel),
           tripId: violation.tripId,
           routeName: violation.routeName ?? operationalState?.activeRouteName,
           resolvedAt,
@@ -3245,8 +3319,6 @@ export default function AdminShell({
 
       const lat = violation.latitude ?? operationalState?.latitude
       const lng = violation.longitude ?? operationalState?.longitude
-      const coordinates = formatViolationCoordinates({ lat, lng })
-
       queueViolationAlert({
         key: `stored-${violation.alertSource}-${violation.violationId}`,
         source: violation.alertSource,
@@ -3263,8 +3335,8 @@ export default function AdminShell({
         routeName: violation.routeName ?? trip?.routeName ?? operationalState?.activeRouteName,
         violationType: violation.violationTypeLabel,
         timestamp: violation.detectedAt,
-        locationLabel: violation.locationLabel ?? coordinates,
-        description: violation.description,
+        locationLabel: getReadableLocationLabel(violation.locationLabel),
+        description: removeCoordinateText(violation.description),
         lat,
         lng
       })
@@ -3291,6 +3363,7 @@ export default function AdminShell({
 
     const closeStream = connectAdminEmergencyStream(accessToken, {
       onSnapshot: (items) => {
+        console.log("🚨 EMERGENCIES SNAPSHOT RECEIVED:", items.map(item => ({ emergencyId: item.emergencyId, latitude: item.latitude, longitude: item.longitude })))
         const pending = items
           .filter((item) => item.status === "created" || item.status === "pending_admin")
           .sort(
@@ -3396,18 +3469,67 @@ export default function AdminShell({
     }
     setEmergencyActionBusyId(alert.emergencyId)
     try {
-      await updateEmergencyAlertStatus(accessToken, alert.emergencyId, "responding")
+      const updatedAlert = await updateEmergencyAlertStatus(
+        accessToken,
+        alert.emergencyId,
+        "responding"
+      )
       await refreshDashboardData()
+
+      const alertItem: AlertListItem = {
+        key: `emergency-${updatedAlert.emergencyId}`,
+        source: "emergency",
+        emergencyId: updatedAlert.emergencyId,
+        driverId: String(updatedAlert.driverId),
+        driverName: updatedAlert.driverName,
+        todaName: updatedAlert.todaName,
+        barangayName: updatedAlert.barangayName,
+        plateNo: updatedAlert.plateNo,
+        routeName: updatedAlert.routeName,
+        ts: new Date(updatedAlert.createdAt).getTime(),
+        reason: "Passenger Emergency",
+        status: updatedAlert.status,
+        lat: updatedAlert.passengerLatitude ?? updatedAlert.passenger_latitude ?? updatedAlert.latitude,
+        lng: updatedAlert.passengerLongitude ?? updatedAlert.passenger_longitude ?? updatedAlert.longitude
+      }
+
+      setSelectedAlertDetails({ kind: "emergency", item: alertItem, record: updatedAlert })
+      setActivePage("live-map")
+      focusSelectedAlertOnMap({ kind: "emergency", item: alertItem, record: updatedAlert })
+
       setActiveEmergencyModal((current) =>
-        current?.emergencyId === alert.emergencyId ? null : current
+        current?.emergencyId === updatedAlert.emergencyId ? null : current
       )
       setEmergencyQueue((current) =>
-        current.filter((item) => item.emergencyId !== alert.emergencyId)
+        current.filter((item) => item.emergencyId !== updatedAlert.emergencyId)
       )
     } catch (error) {
       setDashboardError(String(error))
     } finally {
       setEmergencyActionBusyId(null)
+    }
+  }
+
+  const handleEmergencyResolve = async (details: SelectedAlertDetails) => {
+    if (details.kind !== "emergency") return
+    if (dashboardReadOnly) {
+      setDashboardError("Offline mode is read-only. Reconnect to resolve emergencies.")
+      return
+    }
+
+    setAlertStatusBusy(true)
+    try {
+      const resolvedAlert = await updateEmergencyAlertStatus(
+        accessToken,
+        details.record.emergencyId,
+        "resolved"
+      )
+      await refreshDashboardData()
+      setSelectedAlertDetails({ kind: "emergency", item: details.item, record: resolvedAlert })
+    } catch (error) {
+      setDashboardError(String(error))
+    } finally {
+      setAlertStatusBusy(false)
     }
   }
 
@@ -3463,9 +3585,11 @@ export default function AdminShell({
 
   const focusSelectedAlertOnMap = (details: SelectedAlertDetails) => {
     const record = details.record
-    const lat = record.latitude
-    const lng = record.longitude
-    if (typeof lat !== "number" || typeof lng !== "number") return
+    const location = getEmergencyAlertLocation(record)
+    if (!location) return
+
+    const lat = location.latitude
+    const lng = location.longitude
 
     const alert: ViolationAlertDetails = {
       key:
@@ -3475,7 +3599,7 @@ export default function AdminShell({
       source:
         details.kind === "violation"
           ? details.record.alertSource
-          : "system_violation",
+          : "passenger_emergency",
       driverId: record.driverId,
       driverCode: record.driverCode,
       driverName: record.driverName,
@@ -3491,7 +3615,10 @@ export default function AdminShell({
         details.kind === "violation"
           ? details.record.detectedAt
           : details.record.createdAt,
-      locationLabel: record.locationLabel ?? `${lat.toFixed(5)}, ${lng.toFixed(5)}`,
+      locationLabel:
+        details.kind === "emergency"
+          ? getEmergencyLocationName(details.record)
+          : getReadableLocationLabel(details.record.locationLabel),
       description:
         details.kind === "violation"
           ? details.record.description
@@ -3528,6 +3655,14 @@ export default function AdminShell({
       violationId: alert.key,
       source: alert.source,
       locationLabel: alert.locationLabel,
+      driverCode: alert.driverCode,
+      plateNo: alert.plateNo,
+      todaName: record.todaName,
+      barangayName: record.barangayName,
+      emergencyStatus:
+        details.kind === "emergency"
+          ? formatEmergencyStatusLabel(details.record.status)
+          : undefined,
       tripId: alert.tripId,
       routeName: alert.routeName,
       resolvedAt: null,
@@ -3680,14 +3815,12 @@ export default function AdminShell({
     const ongoing = tripRows.filter((trip) => getTripDisplayStatus(trip) === "ongoing").length
     const completed = tripRows.filter((trip) => getTripDisplayStatus(trip) === "completed").length
     const incomplete = tripRows.filter((trip) => getTripDisplayStatus(trip) === "incomplete").length
-    const cancelled = tripRows.filter((trip) => getTripDisplayStatus(trip) === "cancelled").length
 
     return {
       total: tripRows.length,
       ongoing,
       completed,
-      incomplete,
-      cancelled
+      incomplete
     }
   }, [tripRows, activeTripIds])
 
@@ -3846,19 +3979,12 @@ export default function AdminShell({
     )
   }, [dashboardData?.recentViolations, selectedTripForPath])
 
-  const selectedTripPathCoordinates = useMemo(
-    () => (tripPathData ? getTripPathCoordinates(tripPathData.pathGeojson) : []),
-    [tripPathData]
-  )
-  const selectedTripStartCoordinate = selectedTripPathCoordinates[0]
-  const selectedTripEndCoordinate =
-    selectedTripPathCoordinates[selectedTripPathCoordinates.length - 1]
   const selectedTripStartLocationLabel = tripPathLoading
-    ? "Loading route coordinates..."
-    : getCoordinateLabel(selectedTripStartCoordinate)
+    ? "Loading location name..."
+    : getTripLocationName(tripPathData?.startLocationName, "Start location name unavailable")
   const selectedTripEndLocationLabel = tripPathLoading
-    ? "Loading route coordinates..."
-    : getCoordinateLabel(selectedTripEndCoordinate)
+    ? "Loading location name..."
+    : getTripLocationName(tripPathData?.endLocationName, "End location name unavailable")
   const shouldShowMatchedRouteNotice =
     !tripPathLoading && Boolean(tripPathData) && !selectedTripForPath?.hasPath
 
@@ -3870,9 +3996,6 @@ export default function AdminShell({
     }
   }, [selectedTripForPath, tripRows])
 
-  const activeViolationCoordinates = activeViolationAlert
-    ? formatViolationCoordinates(activeViolationAlert)
-    : undefined
   const activeViolationDriverLabel =
     activeViolationAlert?.driverName ??
     activeViolationAlert?.driverCode ??
@@ -4353,11 +4476,6 @@ export default function AdminShell({
                           <div className="alert-row__meta">{alert.reason}</div>
                           {alert.description && (
                             <div className="alert-row__meta">{alert.description}</div>
-                          )}
-                          {alert.lat !== undefined && alert.lng !== undefined && (
-                            <div className="alert-row__meta">
-                              {alert.lat.toFixed(5)}, {alert.lng.toFixed(5)}
-                            </div>
                           )}
                         </div>
                       ))
@@ -5195,9 +5313,9 @@ export default function AdminShell({
                             <td>{alert.reason}</td>
                             <td>{[alert.plateNo, alert.routeName].filter(Boolean).join(" / ") || "-"}</td>
                             <td>
-                              {alert.lat !== undefined && alert.lng !== undefined
-                                ? `${alert.lat.toFixed(5)}, ${alert.lng.toFixed(5)}`
-                                : alert.description ?? "-"}
+                              {alert.description
+                                ? getReadableLocationLabel(alert.description)
+                                : "Location name unavailable"}
                             </td>
                             <td>{[alert.barangayName, alert.todaName].filter(Boolean).join(" / ") || "-"}</td>
                             <td>{new Date(alert.ts).toLocaleString()}</td>
@@ -5248,10 +5366,6 @@ export default function AdminShell({
                 <article className="dashboard-table-summary__card">
                   <span>Incomplete</span>
                   <strong>{tripLogStats.incomplete}</strong>
-                </article>
-                <article className="dashboard-table-summary__card">
-                  <span>Cancelled</span>
-                  <strong>{tripLogStats.cancelled}</strong>
                 </article>
               </div>
               <div className="dashboard-table-shell">
@@ -5426,8 +5540,8 @@ export default function AdminShell({
                     </strong>
                   </div>
                   <div>
-                    <span>Matched Points</span>
-                    <strong>{tripPathData?.pointCount ?? selectedTripForPath.pathPointCount ?? "-"}</strong>
+                    <span>Raw gps</span>
+                    <strong>{tripPathData?.rawPointCount ?? selectedTripForPath.pathPointCount ?? "-"}</strong>
                   </div>
                   <div>
                     <span>Alert Count</span>
@@ -5446,7 +5560,7 @@ export default function AdminShell({
                 <section className="trip-path-modal__section">
                   <div className="trip-path-modal__section-head">
                     <h3>Completed Trip Map Preview</h3>
-                    <span>{tripPathData?.pointCount ?? selectedTripForPath.pathPointCount ?? 0} points</span>
+                    <span>{tripPathData?.rawPointCount ?? selectedTripForPath.pathPointCount ?? 0} points</span>
                   </div>
 
                   {tripPathError && (
@@ -5485,12 +5599,8 @@ export default function AdminShell({
                           <span>{formatDateTime(violation.detectedAt)}</span>
                           <p>
                             {[
-                              violation.description,
-                              violation.locationLabel,
-                              typeof violation.latitude === "number" &&
-                              typeof violation.longitude === "number"
-                                ? `${violation.latitude.toFixed(6)}, ${violation.longitude.toFixed(6)}`
-                                : undefined
+                              removeCoordinateText(violation.description),
+                              getReadableLocationLabel(violation.locationLabel, "")
                             ]
                               .filter(Boolean)
                               .join(" | ") || "No additional violation details."}
@@ -5590,14 +5700,8 @@ export default function AdminShell({
                   <div>
                     <span>Current Location</span>
                     <strong>
-                      {activeViolationAlert.locationLabel ??
-                        activeViolationCoordinates ??
-                        "Location not available"}
+                      {getReadableLocationLabel(activeViolationAlert.locationLabel)}
                     </strong>
-                  </div>
-                  <div>
-                    <span>Coordinates</span>
-                    <strong>{activeViolationCoordinates ?? "Not available"}</strong>
                   </div>
                   <div>
                     <span>Route</span>
@@ -5607,7 +5711,7 @@ export default function AdminShell({
 
                 {activeViolationAlert.description && (
                   <p className="violation-modal__description">
-                    {activeViolationAlert.description}
+                    {removeCoordinateText(activeViolationAlert.description)}
                   </p>
                 )}
 
@@ -5683,88 +5787,75 @@ export default function AdminShell({
                     </strong>
                   </div>
                   <div>
-                    <span>Driver ID</span>
-                    <strong>{selectedAlertDetails.record.driverId ?? "-"}</strong>
+                    <span>Driver Code</span>
+                    <strong>{selectedAlertDetails.record.driverCode ?? "-"}</strong>
                   </div>
                   <div>
-                    <span>Tricycle Details</span>
-                    <strong>
-                      {selectedAlertDetails.record.tricycleId
-                        ? `Tricycle #${selectedAlertDetails.record.tricycleId}`
-                        : "No tricycle ID"}
-                    </strong>
+                    <span>Driver ID</span>
+                    <strong>{selectedAlertDetails.record.driverId ?? "-"}</strong>
                   </div>
                   <div>
                     <span>Plate Number</span>
                     <strong>{selectedAlertDetails.record.plateNo ?? "-"}</strong>
                   </div>
                   <div>
-                    <span>Route</span>
-                    <strong>{selectedAlertDetails.record.routeName ?? "-"}</strong>
-                  </div>
-                  <div>
-                    <span>Alert Type</span>
+                    <span>TODA / Barangay</span>
                     <strong>
-                      {selectedAlertDetails.kind === "emergency"
-                        ? selectedAlertDetails.record.alertType
-                        : selectedAlertDetails.record.violationTypeLabel}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Reason</span>
-                    <strong>
-                      {selectedAlertDetails.kind === "emergency"
-                        ? "Passenger Emergency"
-                        : selectedAlertDetails.record.description ?? "Geofence Boundary"}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Time</span>
-                    <strong>
-                      {new Date(
-                        selectedAlertDetails.kind === "emergency"
-                          ? selectedAlertDetails.record.createdAt
-                          : selectedAlertDetails.record.detectedAt
-                      ).toLocaleString()}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Location Coordinates</span>
-                    <strong>
-                      {typeof selectedAlertDetails.record.latitude === "number" &&
-                      typeof selectedAlertDetails.record.longitude === "number"
-                        ? `${selectedAlertDetails.record.latitude.toFixed(6)}, ${selectedAlertDetails.record.longitude.toFixed(6)}`
-                        : selectedAlertDetails.record.locationLabel ?? "-"}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Scope</span>
-                    <strong>
-                      {[selectedAlertDetails.record.barangayName, selectedAlertDetails.record.todaName]
+                      {[selectedAlertDetails.record.todaName, selectedAlertDetails.record.barangayName]
                         .filter(Boolean)
                         .join(" / ") || "-"}
                     </strong>
                   </div>
+                  {selectedAlertDetails.record.routeName ? (
+                    <div>
+                      <span>Route</span>
+                      <strong>{selectedAlertDetails.record.routeName}</strong>
+                    </div>
+                  ) : null}
                   <div>
-                    <span>Trip</span>
+                    <span>
+                      {selectedAlertDetails.kind === "emergency"
+                        ? "Passenger Location"
+                        : "Location"}
+                    </span>
                     <strong>
-                      {selectedAlertTrip
-                        ? `#${selectedAlertTrip.tripId} ${selectedAlertTrip.tripStatus}`
-                        : selectedAlertDetails.record.tripId
-                          ? `#${selectedAlertDetails.record.tripId}`
-                          : "No trip linked"}
+                      {selectedAlertDetails.kind === "emergency"
+                        ? getEmergencyLocationName(selectedAlertDetails.record)
+                        : getReadableLocationLabel(selectedAlertDetails.record.locationLabel)}
                     </strong>
                   </div>
                   <div>
-                    <span>Trip Details</span>
+                    <span>Time reported</span>
                     <strong>
-                      {selectedAlertTrip
-                        ? `${selectedAlertTrip.routeName} / ${new Date(
-                            selectedAlertTrip.tripStart
-                          ).toLocaleString()}`
-                        : "No recent trip record available"}
+                      {selectedAlertDetails.kind === "emergency"
+                        ? new Date(selectedAlertDetails.record.createdAt).toLocaleString()
+                        : new Date(selectedAlertDetails.record.detectedAt).toLocaleString()}
                     </strong>
                   </div>
+                  <div>
+                    <span>Status</span>
+                    <strong>
+                      {selectedAlertDetails.kind === "emergency"
+                        ? formatEmergencyStatusLabel(selectedAlertDetails.record.status)
+                        : selectedAlertDetails.record.status}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Report reason</span>
+                    <strong>
+                      {selectedAlertDetails.kind === "emergency"
+                        ? "Passenger Emergency"
+                        : selectedAlertDetails.record.violationTypeLabel}
+                    </strong>
+                  </div>
+                  {selectedAlertTrip ? (
+                    <div>
+                      <span>Trip</span>
+                      <strong>
+                        #{selectedAlertTrip.tripId} {selectedAlertTrip.tripStatus}
+                      </strong>
+                    </div>
+                  ) : null}
                 </div>
 
                 {selectedAlertDetails.kind === "violation" &&
@@ -5797,18 +5888,19 @@ export default function AdminShell({
                   </div>
                 )}
 
-                {typeof selectedAlertDetails.record.latitude === "number" &&
-                typeof selectedAlertDetails.record.longitude === "number" ? (
+                {selectedAlertLocation ? (
                   <div className="alert-detail-modal__map">
+                    <div className="alert-detail-modal__map-header">Passenger location</div>
                     <iframe
-                      title="Alert location map preview"
+                      title="Passenger location map preview"
                       loading="lazy"
-                      src={`https://www.openstreetmap.org/export/embed.html?bbox=${selectedAlertDetails.record.longitude - 0.004}%2C${selectedAlertDetails.record.latitude - 0.004}%2C${selectedAlertDetails.record.longitude + 0.004}%2C${selectedAlertDetails.record.latitude + 0.004}&layer=mapnik&marker=${selectedAlertDetails.record.latitude}%2C${selectedAlertDetails.record.longitude}`}
+                      src={`https://www.openstreetmap.org/export/embed.html?bbox=${selectedAlertLocation.longitude - 0.004}%2C${selectedAlertLocation.latitude - 0.004}%2C${selectedAlertLocation.longitude + 0.004}%2C${selectedAlertLocation.latitude + 0.004}&layer=mapnik&marker=${selectedAlertLocation.latitude}%2C${selectedAlertLocation.longitude}`}
                     />
                   </div>
                 ) : (
-                  <div className="dashboard-table-empty">
-                    No GPS coordinates are stored for this alert.
+                  <div style={{padding: '12px', backgroundColor: '#fff3cd', borderRadius: '4px', fontSize: '13px', borderLeft: '4px solid #ffc107'}}>
+                    <strong>Passenger location was not captured.</strong><br/>
+                    Latitude and longitude are missing from this emergency request.
                   </div>
                 )}
 
@@ -5820,13 +5912,20 @@ export default function AdminShell({
                   >
                     Close
                   </button>
+                  {selectedAlertDetails.kind === "emergency" && (
+                    <button
+                      type="button"
+                      className="violation-modal__button"
+                      disabled={alertStatusBusy || dashboardReadOnly}
+                      onClick={() => void handleEmergencyResolve(selectedAlertDetails)}
+                    >
+                      {alertStatusBusy ? "Resolving..." : "Mark as Resolved"}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="violation-modal__button violation-modal__button--primary"
-                    disabled={
-                      typeof selectedAlertDetails.record.latitude !== "number" ||
-                      typeof selectedAlertDetails.record.longitude !== "number"
-                    }
+                    disabled={!selectedAlertLocation}
                     onClick={() => focusSelectedAlertOnMap(selectedAlertDetails)}
                   >
                     View on Live Map
@@ -6010,6 +6109,10 @@ export default function AdminShell({
                     <span>Route</span>
                     <strong>{activeEmergencyModal.routeName ?? "No route context"}</strong>
                   </div>
+                  <div>
+                    <span>Passenger Location</span>
+                    <strong>{getEmergencyLocationName(activeEmergencyModal)}</strong>
+                  </div>
                 </div>
 
                 <div className="emergency-modal__meta">
@@ -6017,6 +6120,17 @@ export default function AdminShell({
                     .filter(Boolean)
                     .join(" | ")}
                 </div>
+
+                {activeEmergencyLocation ? (
+                  <div className="emergency-modal__map">
+                    <div className="emergency-modal__map-header">Passenger location</div>
+                    <iframe
+                      title="Passenger emergency location preview"
+                      loading="lazy"
+                      src={`https://www.openstreetmap.org/export/embed.html?bbox=${activeEmergencyLocation.longitude - 0.004}%2C${activeEmergencyLocation.latitude - 0.004}%2C${activeEmergencyLocation.longitude + 0.004}%2C${activeEmergencyLocation.latitude + 0.004}&layer=mapnik&marker=${activeEmergencyLocation.latitude}%2C${activeEmergencyLocation.longitude}`}
+                    />
+                  </div>
+                ) : null}
 
                 {dashboardError && (
                   <div className="emergency-modal__error" role="alert">

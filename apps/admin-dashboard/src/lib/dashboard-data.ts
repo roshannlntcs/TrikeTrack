@@ -108,6 +108,16 @@ export type DashboardEmergencyRecord = {
   source: string
   alertType: string
   status: "created" | "pending_admin" | "acknowledged" | "responding" | "resolved"
+  passengerLatitude?: number
+  passengerLongitude?: number
+  passenger_latitude?: number
+  passenger_longitude?: number
+  locationAccuracy?: number
+  location_accuracy?: number
+  locationCapturedAt?: string
+  location_captured_at?: string
+  passengerLocationName?: string
+  passenger_location_name?: string
   latitude?: number
   longitude?: number
   locationLabel?: string
@@ -201,9 +211,13 @@ export type TripPathRecord = {
   tripPathId: number
   tripId: number
   pointCount: number
+  rawPointCount?: number
+  matchedPointCount?: number
   pathGeojson: unknown
   startedAt?: string
   endedAt?: string
+  startLocationName?: string
+  endLocationName?: string
   updatedAt: string
   cacheMeta?: CacheMeta
 }

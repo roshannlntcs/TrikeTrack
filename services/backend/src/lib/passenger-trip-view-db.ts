@@ -154,7 +154,35 @@ const getTripContextByQrToken = async (qrToken: string) => {
     [qrToken]
   )
 
-  return result.rows[0] ?? null
+  if (result.rows[0]) {
+    return result.rows[0]
+  }
+
+  const fuzzyResult = await query<TripContextRow>(
+    `
+      SELECT
+        qr.qr_id,
+        qr.qr_token,
+        d.driver_id,
+        d.driver_code,
+        d.first_name,
+        d.last_name,
+        tr.tricycle_id,
+        tr.plate_no
+      FROM public.qr_codes qr
+      JOIN public.drivers d
+        ON d.driver_id = qr.driver_id
+      LEFT JOIN public.tricycles tr
+        ON tr.tricycle_id = COALESCE(qr.tricycle_id, d.tricycle_id)
+      WHERE translate(qr.qr_token, '0O1Il', 'OOlll') = translate($1, '0O1Il', 'OOlll')
+        AND qr.status = 'active'
+        AND (qr.expires_at IS NULL OR qr.expires_at > NOW())
+      LIMIT 2
+    `,
+    [qrToken]
+  )
+
+  return fuzzyResult.rows.length === 1 ? fuzzyResult.rows[0] : null
 }
 
 const getTripRow = async (driverId: number, preferredTripId?: number) => {

@@ -25,6 +25,14 @@ export type EmergencyAlertRecord = {
   source: string
   alertType: string
   status: EmergencyAlertStatus
+  passengerLatitude?: number
+  passengerLongitude?: number
+  passenger_latitude?: number
+  passenger_longitude?: number
+  locationAccuracy?: number
+  location_accuracy?: number
+  locationCapturedAt?: string
+  location_captured_at?: string
   latitude?: number
   longitude?: number
   locationLabel?: string
@@ -92,25 +100,37 @@ export const createPassengerEmergency = async (
     accuracy?: number
   }
 ) => {
+  const submittedAt = new Date().toISOString()
+  const requestBody = {
+    qrToken,
+    passenger_latitude: location.latitude,
+    passenger_longitude: location.longitude,
+    location_accuracy: location.accuracy,
+    location_captured_at: submittedAt,
+    accuracy: location.accuracy,
+    deviceInfo: {
+      locationCapturedAt: submittedAt,
+      submittedAt,
+      userAgent: navigator.userAgent,
+      language: navigator.language
+    }
+  }
+  console.log("🚨 SENDING EMERGENCY REQUEST WITH LOCATION:", requestBody)
+  
   const response = await fetch(buildEmergencyBaseUrl(apiBaseUrl), {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({
-      qrToken,
-      latitude: location.latitude,
-      longitude: location.longitude,
-      accuracy: location.accuracy,
-      deviceInfo: {
-        submittedAt: new Date().toISOString(),
-        userAgent: navigator.userAgent,
-        language: navigator.language
-      }
-    })
+    body: JSON.stringify(requestBody)
   })
 
   const payload = (await response.json().catch(() => ({}))) as EmergencyResponse
+  console.log("🚨 EMERGENCY API RESPONSE:", payload)
+  if (payload.data) {
+    console.log("🚨 EMERGENCY DATA - Latitude:", payload.data.latitude, "Longitude:", payload.data.longitude)
+  }
+  
   if (!response.ok || !payload.data) {
     throw new Error(payload.message ?? `Emergency API returned HTTP ${response.status}.`)
   }

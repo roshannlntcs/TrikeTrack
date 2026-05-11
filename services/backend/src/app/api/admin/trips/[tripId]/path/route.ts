@@ -18,6 +18,7 @@ type TripScopeRow = {
 
 type TripRouteTraceRow = {
   route_trace_geojson: unknown
+  raw_gps_point_count: number | null
   matched_point_count: number | null
   trip_start: Date
   trip_end: Date | null
@@ -64,6 +65,7 @@ const getSyncedTripRouteTrace = async (tripId: number) => {
     `
       SELECT
         tp.route_trace_geojson,
+        tp.raw_gps_point_count,
         tp.matched_point_count,
         tp.trip_start,
         tp.trip_end,
@@ -81,20 +83,37 @@ const getSyncedTripRouteTrace = async (tripId: number) => {
   const pathGeojson = normalizeRouteTraceGeojson(row.route_trace_geojson)
   if (!pathGeojson) return null
 
-  const pointCount =
-    typeof row.matched_point_count === "number" && row.matched_point_count > 1
+  const rawPointCount =
+    typeof row.raw_gps_point_count === "number" && row.raw_gps_point_count > 0
+      ? Number(row.raw_gps_point_count)
+      : pathGeojson.geometry.coordinates.length
+  const matchedPointCount =
+    typeof row.matched_point_count === "number" && row.matched_point_count > 0
       ? Number(row.matched_point_count)
       : pathGeojson.geometry.coordinates.length
 
   return {
     tripPathId: 0,
     tripId,
-    pointCount,
+    pointCount: rawPointCount,
+    rawPointCount,
+    matchedPointCount,
     pathGeojson,
     startedAt: row.trip_start.toISOString(),
     endedAt: row.trip_end?.toISOString(),
     updatedAt: (row.updated_at ?? row.trip_end ?? row.trip_start).toISOString()
   }
+}
+
+const isRawTripPath = (tripPath: { pathGeojson: unknown }) => {
+  if (!tripPath || typeof tripPath !== "object") return false
+  const candidate = tripPath.pathGeojson as Record<string, unknown>
+  const properties =
+    candidate && typeof candidate === "object" && "properties" in candidate
+      ? (candidate.properties as Record<string, unknown>)
+      : null
+
+  return properties?.source === "raw_gps_points"
 }
 
 const canReadTripPath = async (
@@ -160,10 +179,24 @@ export async function GET(request: Request, context: TripPathRouteContext) {
   }
 
   try {
-    const data =
-      (await getSyncedTripRouteTrace(tripId)) ??
-      (await getTripPathByTripId(tripId)) ??
-      (await rebuildTripPathForTrip(tripId))
+    const existingPath = await getTripPathByTripId(tripId)
+    const syncedTrace = await getSyncedTripRouteTrace(tripId)
+
+    let data = existingPath
+
+    if (existingPath && isRawTripPath(existingPath)) {
+      const rebuiltPath = await rebuildTripPathForTrip(tripId)
+      data = rebuiltPath ?? existingPath
+    }
+
+    if (!data) {
+      data = (await rebuildTripPathForTrip(tripId)) ?? syncedTrace
+    }
+
+    if (!data) {
+      return NextResponse.json({ ok: false, message: "No trip path data available." }, { status: 404 })
+    }
+
     return NextResponse.json({
       ok: true,
       data

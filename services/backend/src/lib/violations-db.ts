@@ -2,6 +2,7 @@ import type { PoolClient } from "pg"
 import type { AdminProfile } from "./admin-auth-db"
 import { ensureDatabaseReady, query, withTransaction } from "./database"
 import { resolveDriverIdFromIdentifier } from "./driver-identifier-db"
+import { reverseGeocodeLocationName } from "./reverse-geocode"
 
 export type ViolationBatchItem = {
   id: string
@@ -190,11 +191,18 @@ export const storeViolationBatch = async (violations: ViolationBatchItem[]) => {
         continue
       }
 
+      const locationLabel = await reverseGeocodeLocationName({
+        latitude: violation.lat,
+        longitude: violation.lng,
+        fallbackLabel: "Location name unavailable"
+      })
       const description = [
         "Automatic geofence deviation detected.",
-        `Coordinates: ${violation.lat.toFixed(5)}, ${violation.lng.toFixed(5)}.`,
+        locationLabel ? `Location: ${locationLabel}.` : undefined,
         `Route ref: ${violation.routeId}.`
-      ].join(" ")
+      ]
+        .filter(Boolean)
+        .join(" ")
 
       await client.query(
         `
@@ -219,7 +227,7 @@ export const storeViolationBatch = async (violations: ViolationBatchItem[]) => {
           description,
           violation.lat,
           violation.lng,
-          `${violation.lat.toFixed(5)}, ${violation.lng.toFixed(5)}`,
+          locationLabel,
           dedupeKey,
           detectedAtIso
         ]
@@ -266,10 +274,14 @@ export const storeGeofenceDeviationViolation = async (
       }
     }
 
-    const locationLabel = `${violation.lat.toFixed(5)}, ${violation.lng.toFixed(5)}`
+    const locationLabel = await reverseGeocodeLocationName({
+      latitude: violation.lat,
+      longitude: violation.lng,
+      fallbackLabel: "Location name unavailable"
+    })
     const description = [
       "Automatic geofence deviation detected from trip telemetry.",
-      `Coordinates: ${locationLabel}.`,
+      locationLabel ? `Location: ${locationLabel}.` : undefined,
       violation.routeLabel ? `Route: ${violation.routeLabel}.` : undefined
     ]
       .filter(Boolean)

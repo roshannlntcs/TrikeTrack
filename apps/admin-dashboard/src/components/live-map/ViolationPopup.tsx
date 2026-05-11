@@ -22,6 +22,8 @@ export default function ViolationPopup({
   position,
   onClose
 }: ViolationPopupProps) {
+  const isEmergency = violator.source === "passenger_emergency"
+
   return (
     <section
       className={`violation-popup violation-popup--${position.align}`}
@@ -31,7 +33,9 @@ export default function ViolationPopup({
       }}
       aria-live="polite"
     >
-      <div className="violation-popup__eyebrow">Outside geofence</div>
+      <div className={`violation-popup__eyebrow${isEmergency ? " violation-popup__eyebrow--emergency" : ""}`}>
+        {isEmergency ? "Passenger current location" : "Outside geofence"}
+      </div>
       <button
         type="button"
         className="violation-popup__close"
@@ -41,7 +45,24 @@ export default function ViolationPopup({
         Close
       </button>
       <strong className="violation-popup__name">{violator.driverName}</strong>
+      {violator.driverCode && (
+        <div className="violation-popup__meta">Driver code: {violator.driverCode}</div>
+      )}
       <div className="violation-popup__meta">Driver ID: {violator.driverId}</div>
+      {violator.plateNo && (
+        <div className="violation-popup__meta">Plate number: {violator.plateNo}</div>
+      )}
+      {(violator.todaName || violator.barangayName) && (
+        <div className="violation-popup__meta">
+          {[violator.todaName, violator.barangayName].filter(Boolean).join(" / ")}
+        </div>
+      )}
+      {violator.tripId && (
+        <div className="violation-popup__meta">Trip ID: {violator.tripId}</div>
+      )}
+      {violator.emergencyStatus && (
+        <div className="violation-popup__meta">Status: {violator.emergencyStatus}</div>
+      )}
       <div className="violation-popup__meta">{formatViolationTimestamp(violator.timestamp)}</div>
       {violator.driverOnlineStatus === "offline" && (
         <div className="violation-popup__meta">

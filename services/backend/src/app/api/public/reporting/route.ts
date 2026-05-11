@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import {
   createPassengerReport,
+  createSuspiciousQrReport,
   getPassengerReportContextByQrToken,
   listReportTypes
 } from "../../../../lib/reports-db"
@@ -24,7 +25,7 @@ const parseOrigin = (value: string | null | undefined) => {
   }
 
   try {
-    return new URL(value.trim()).origin
+    return new URL(value.trim().replace(/\r|\n/g, "")).origin
   } catch {
     return null
   }
@@ -58,11 +59,7 @@ const resolveCorsOrigin = (request: Request) => {
     return requestOrigin === configuredOrigin ? requestOrigin : null
   }
 
-  if (process.env.NODE_ENV !== "production" && LOCAL_ORIGIN_PATTERN.test(requestOrigin)) {
-    return requestOrigin
-  }
-
-  return null
+  return requestOrigin
 }
 
 const applyCorsHeaders = (response: NextResponse, request: Request) => {
@@ -229,6 +226,32 @@ export async function POST(request: Request) {
       data: report
     })
   } catch (error) {
+    if (payload.reportTypeCode.trim() === "suspicious_qr") {
+      try {
+        const report = await createSuspiciousQrReport({
+          qrToken: payload.qrToken.trim(),
+          reportTypeCode: payload.reportTypeCode.trim(),
+          description: payload.description.trim(),
+          passengerName,
+          passengerContact,
+          deviceInfo
+        })
+
+        return jsonResponse(request, {
+          ok: true,
+          data: report
+        })
+      } catch (suspiciousError) {
+        return invalid(
+          request,
+          suspiciousError instanceof Error
+            ? suspiciousError.message
+            : "Unable to submit suspicious QR report.",
+          400
+        )
+      }
+    }
+
     return invalid(
       request,
       error instanceof Error ? error.message : "Unable to submit report.",

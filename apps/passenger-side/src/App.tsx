@@ -18,10 +18,19 @@ import {
 type PassengerReportContext = {
   qrId: number
   qrToken: string
+  qrStatus?: "active" | "inactive" | "revoked" | "expired"
+  qrIsActive?: boolean
+  qrIssuedByAdmin?: boolean
   driverId: number
   driverCode: string
   driverName: string
   driverAvatarUrl?: string
+  driverStatus: string
+  driverCreatedByAdmin?: boolean
+  driverIsVerified: boolean
+  verificationStatus?: string
+  verifiedAt?: string
+  verifiedBy?: number
   tricycleId?: number
   plateNo?: string
   todaId: number
@@ -95,7 +104,12 @@ const EMERGENCY_STORAGE_PREFIX = "triketrack_passenger_emergency_"
 
 const parseQrToken = () => {
   const parts = window.location.pathname.split("/").filter(Boolean)
-  return parts[0] === "report" && parts[1] ? decodeURIComponent(parts[1]) : null
+  if (parts[0] === "report" && parts[1]) {
+    return decodeURIComponent(parts[1])
+  }
+
+  const queryToken = new URLSearchParams(window.location.search).get("qrToken")
+  return queryToken ? decodeURIComponent(queryToken) : null
 }
 
 const parseApiBaseOverride = () => {
@@ -108,7 +122,7 @@ const isNonEmptyString = (value: unknown): value is string =>
 
 const normalizePublicBaseUrl = (value: string) => {
   try {
-    const url = new URL(value.trim())
+    const url = new URL(value.trim().replace(/\\r|\\n/g, ""))
     if (!["http:", "https:"].includes(url.protocol)) {
       return null
     }
@@ -174,6 +188,25 @@ const buildReportingUrl = (apiBaseUrl: string, qrToken?: string) => {
   }
 
   return `${endpoint}?qrToken=${encodeURIComponent(qrToken)}`
+}
+
+const fetchWithTimeout = async (
+  url: string,
+  options?: RequestInit & { timeout?: number }
+): Promise<Response> => {
+  const timeout = options?.timeout ?? 10000
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), timeout)
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    })
+    return response
+  } finally {
+    window.clearTimeout(timeoutId)
+  }
 }
 
 const formatBytes = (value: number) => `${(value / (1024 * 1024)).toFixed(1)} MB`
@@ -263,6 +296,14 @@ const formatDistance = (distanceKilometers?: number) => {
   }
 
   return `${distanceKilometers.toFixed(2)} km`
+}
+
+const formatSpeed = (speedKph?: number) => {
+  if (typeof speedKph !== "number" || !Number.isFinite(speedKph) || speedKph < 0) {
+    return "Not available"
+  }
+
+  return `${speedKph.toFixed(0)} km/h`
 }
 
 const parseFareValue = (value: string) => {
@@ -568,6 +609,11 @@ export default function App() {
   const [emergencyConfirmOpen, setEmergencyConfirmOpen] = useState(false)
   const [emergencyAlert, setEmergencyAlert] = useState<EmergencyAlertRecord | null>(null)
   const [emergencyBusy, setEmergencyBusy] = useState(false)
+  const [emergencyLocation, setEmergencyLocation] = useState<{
+    latitude: number
+    longitude: number
+    accuracy?: number
+  } | null>(null)
   const [emergencyResponseOpen, setEmergencyResponseOpen] = useState(false)
   const [tripViewOpen, setTripViewOpen] = useState(false)
   const [tripTrackingState, setTripTrackingState] = useState<TripTrackingState>("idle")
@@ -599,8 +645,9 @@ export default function App() {
     const load = async () => {
       setLoading(true)
       try {
-        const response = await fetch(buildReportingUrl(reportingApi.apiBaseUrl, qrToken), {
-          cache: "no-store"
+        const response = await fetchWithTimeout(buildReportingUrl(reportingApi.apiBaseUrl, qrToken), {
+          cache: "no-store",
+          timeout: 10000
         })
         const payload = (await response.json().catch(() => ({}))) as {
           ok?: boolean
@@ -647,8 +694,9 @@ export default function App() {
     const intervalId = window.setInterval(() => {
       void (async () => {
         try {
-          const response = await fetch(buildReportingUrl(reportingApi.apiBaseUrl, qrToken), {
-            cache: "no-store"
+          const response = await fetchWithTimeout(buildReportingUrl(reportingApi.apiBaseUrl, qrToken), {
+            cache: "no-store",
+            timeout: 10000
           })
           const payload = (await response.json().catch(() => ({}))) as {
             ok?: boolean
@@ -824,7 +872,7 @@ export default function App() {
   const hasDescription = description.trim().length > 0
   const hasValidFareCharge = !isFareReport || parsedFareCharged !== null
   const canSubmit =
-    Boolean(data?.context.reportingAvailable) &&
+    Boolean(data) &&
     reportTypeCode.length > 0 &&
     hasDescription &&
     hasValidFareCharge &&
@@ -987,22 +1035,96 @@ export default function App() {
     void submitReport()
   }
 
-  const handleEmergencyRequest = () => {
+  const submitInvalidQrReport = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!qrToken || reportingApi.apiBaseUrl === null || !description.trim() || submitting) return
+
+    setSubmitting(true)
+    setFormError(null)
+    try {
+      const response = await fetch(buildReportingUrl(reportingApi.apiBaseUrl), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          qrToken,
+          reportTypeCode: "suspicious_qr",
+          passengerName: passengerName.trim() || undefined,
+          passengerContact: passengerContact.trim() || undefined,
+          description: description.trim(),
+          deviceInfo: {
+            source: "invalid_qr_report",
+            userAgent: navigator.userAgent,
+            language: navigator.language,
+            submittedAt: new Date().toISOString()
+          }
+        })
+      })
+
+      const payload = (await response.json().catch(() => ({}))) as {
+        ok?: boolean
+        message?: string
+        data?: SubmissionPayload
+      }
+
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.message ?? `Request failed with HTTP ${response.status}.`)
+      }
+
+      setSubmission(payload.data)
+      setPassengerName("")
+      setPassengerContact("")
+      setDescription("")
+    } catch (submitError) {
+      setFormError(
+        submitError instanceof Error ? submitError.message : "Unable to submit report."
+      )
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const handleEmergencyRequest = async () => {
     if (emergencyBusy || !qrToken) return
     setFormError(null)
-    setEmergencyConfirmOpen(true)
+    setEmergencyBusy(true)
+    setEmergencyLocation(null)
+
+    try {
+      const location = await requestPassengerEmergencyLocation()
+      setEmergencyLocation(location)
+      setEmergencyConfirmOpen(true)
+    } catch (error) {
+      setFormError(
+        error instanceof Error
+          ? error.message
+          : "Location access is required for urgent assistance."
+      )
+    } finally {
+      setEmergencyBusy(false)
+    }
   }
 
   const submitEmergencyAlert = async () => {
     if (!qrToken || reportingApi.apiBaseUrl === null) return
+    if (!emergencyLocation) {
+      setFormError("Passenger location is required to send an urgent assistance request.")
+      return
+    }
+
     setEmergencyBusy(true)
     setFormError(null)
 
     try {
-      const location = await requestPassengerEmergencyLocation()
-      const created = await createPassengerEmergency(reportingApi.apiBaseUrl, qrToken, location)
+      const created = await createPassengerEmergency(
+        reportingApi.apiBaseUrl,
+        qrToken,
+        emergencyLocation
+      )
       setEmergencyAlert(created)
       setEmergencyConfirmOpen(false)
+      setEmergencyLocation(null)
     } catch (error) {
       setFormError(error instanceof Error ? error.message : "Unable to send emergency alert.")
     } finally {
@@ -1011,6 +1133,7 @@ export default function App() {
   }
 
   const openTripView = () => {
+    if (!activeLiveTripAvailable) return
     setTripViewOpen(true)
     setTripTrackingError(null)
   }
@@ -1034,13 +1157,67 @@ export default function App() {
   if (pageError || !data) {
     return (
       <main className="page">
-        <section className="panel panel--centered">
-          <p className="kicker">Passenger report</p>
-          <h1>Unable to open this QR code</h1>
-          <p className="muted">
-            {pageError ?? "This passenger reporting link is no longer available."}
-          </p>
-        </section>
+        <div className="phone-shell">
+          <section className="panel panel--centered">
+            <p className="kicker">Passenger report</p>
+            <h1>{submission ? "Report Submitted" : pageError ? "Error" : "Unverified Driver"}</h1>
+            <p className="muted">
+              {submission
+                ? "Your suspicious QR report was submitted for admin review."
+                : pageError
+                  ? pageError
+                  : "This QR code is not connected to an official TODA driver record. You may still submit a report so the admin can review this issue."}
+            </p>
+          </section>
+
+          {!submission && qrToken && reportingApi.apiBaseUrl !== null ? (
+            <form className="report-form" onSubmit={submitInvalidQrReport}>
+              <section className="panel">
+                <p className="kicker">Suspicious QR Report</p>
+                <label className="field">
+                  <span>What happened?</span>
+                  <textarea
+                    value={description}
+                    onChange={(event) => setDescription(event.target.value)}
+                    rows={6}
+                    placeholder="Describe why this QR looks suspicious or does not match the driver."
+                    disabled={submitting}
+                  />
+                </label>
+                <label className="field">
+                  <span>Your name (optional)</span>
+                  <input
+                    value={passengerName}
+                    onChange={(event) => setPassengerName(event.target.value)}
+                    placeholder="Optional"
+                    disabled={submitting}
+                  />
+                </label>
+                <label className="field">
+                  <span>Contact details (optional)</span>
+                  <input
+                    value={passengerContact}
+                    onChange={(event) => setPassengerContact(event.target.value)}
+                    placeholder="Phone or email"
+                    disabled={submitting}
+                  />
+                </label>
+              </section>
+
+              {formError && <div className="notice notice--error">{formError}</div>}
+
+              <div className="sticky-submit-bar">
+                <button
+                  type="submit"
+                  className="primary-button sticky-submit-button"
+                  disabled={!description.trim() || submitting}
+                >
+                  {submitting ? "Submitting..." : "Submit Suspicious QR Report"}
+                </button>
+              </div>
+            </form>
+          ) : null}
+        </div>
       </main>
     )
   }
@@ -1065,23 +1242,44 @@ export default function App() {
         heading: context.latestDriverLocation.heading
       }
     : null
+  const isDriverActive = context.driverStatus.toLowerCase() === "active"
+  const isOfficialQr = context.qrIsActive === true && context.qrIssuedByAdmin === true
+  const isDriverVerified =
+    context.driverIsVerified === true &&
+    context.driverCreatedByAdmin === true &&
+    isOfficialQr &&
+    isDriverActive &&
+    Boolean(context.driverCode) &&
+    Boolean(context.todaName) &&
+    Boolean(context.barangayName) &&
+    Boolean(context.plateNo)
+  const verificationBadgeLabel = isDriverVerified
+    ? "Verified TODA Driver"
+    : isOfficialQr
+      ? "Driver Not Currently Authorized"
+      : "Unverified Driver"
+  const driverLocationLabel = [context.todaName, context.barangayName]
+    .filter(Boolean)
+    .join(" / ")
   const fareCheckResult = getFareCheckResult(context.fare, fareCharged)
   const isDriverLocationFresh =
     context.latestDriverLocation?.recordedAt !== undefined &&
     Date.now() - new Date(context.latestDriverLocation.recordedAt).getTime() <= 5 * 60 * 1000
   const tripStatusLabel =
     context.tripStatus === "ongoing" ? "Active trip ongoing" : "No active trip"
-  const driverPresenceLabel =
-    latestDriverPoint && isDriverLocationFresh
-      ? context.latestDriverLocation?.isOnline
-        ? "Driver online"
-        : "Driver offline"
-      : "Driver offline"
   const updatedLabel = formatRelativeTime(
     context.latestDriverLocation?.updatedAt ?? context.latestDriverLocation?.recordedAt
   )
-  const statusLine = `${tripStatusLabel} â€¢ ${driverPresenceLabel} â€¢ ${updatedLabel}`
   const activeTripAvailable = Boolean(context.tripId && context.tripStatus === "ongoing")
+  const activeLiveTripAvailable =
+    isDriverVerified &&
+    activeTripAvailable &&
+    context.latestDriverLocation?.isOnline === true &&
+    isDriverLocationFresh
+  const statusLine =
+    activeLiveTripAvailable && latestDriverPoint !== null
+      ? `${tripStatusLabel} • ${updatedLabel}`
+      : null
   const tripViewTrip = tripView?.trip
   const tripViewCurrentPoint = tripViewTrip?.location
     ? {
@@ -1094,29 +1292,7 @@ export default function App() {
   const tripViewHasLocation = Boolean(tripViewTrip?.location)
   const tripViewIsOnline =
     tripViewTrip?.location?.isOnline === true && tripViewTrip?.trackingStatus === "live"
-  const tripViewStatusTitle = !tripViewTrip
-    ? "No active trip available"
-    : !tripViewHasLocation
-      ? "Location unavailable"
-      : tripViewIsOnline
-        ? "Driver online"
-        : tripViewTrip.trackingStatus === "last_known"
-          ? "Driver offline"
-          : "Location not updated recently"
-  const tripViewStatusSubtitle = !tripViewTrip
-    ? "Live location is unavailable right now"
-    : !tripViewHasLocation
-      ? "Waiting for a driver location update"
-      : tripViewIsOnline
-        ? "Live location updating"
-        : tripViewTrip.trackingStatus === "last_known"
-          ? "Showing last known location"
-          : "Location not updated recently"
-  const tripDriverTripLine = !tripViewTrip
-    ? "No active trip available"
-    : tripViewTrip.tripStatus === "ongoing"
-      ? "Active trip"
-      : "Trip available"
+  const showTripDetails = tripTrackingState === "ready" && tripViewTrip && tripViewIsOnline
 
   return (
     <main className="page">
@@ -1175,35 +1351,57 @@ export default function App() {
                 )}
                 <div className="driver-summary">
                   <strong>{context.driverName}</strong>
+                  <span>{context.driverCode}</span>
                   <span>
-                    {context.plateNo ?? "No unit assigned"} â€¢ {context.todaName}
+                    {context.plateNo ?? "No unit assigned"} • {driverLocationLabel}
                   </span>
                 </div>
+              </div>
+              <div className="driver-verification-line">
+                <span
+                  className={`driver-verification-badge ${
+                    isDriverVerified
+                      ? "driver-verification-badge--verified"
+                      : "driver-verification-badge--unverified"
+                  }`}
+                >
+                  {verificationBadgeLabel}
+                </span>
+                {context.verificationStatus ? (
+                  <p className="driver-verification-subtext">
+                    {context.verificationStatus}
+                  </p>
+                ) : null}
               </div>
               <div className="driver-status-line">
                 <span
                   className={`status-pill ${
-                    activeTripAvailable || driverPresenceLabel === "Driver online"
-                      ? "status-pill--active"
-                      : "status-pill--neutral"
+                    activeTripAvailable ? "status-pill--active" : "status-pill--neutral"
                   }`}
                 >
                   {activeTripAvailable ? "Active" : "Inactive"}
                 </span>
-                <p>{statusLine}</p>
+                {statusLine ? <p>{statusLine}</p> : null}
               </div>
-              <div className="driver-trip-action">
-                <button
-                  type="button"
-                  className="trip-view-button"
-                  onClick={openTripView}
-                  disabled={!activeTripAvailable}
-                  aria-disabled={!activeTripAvailable}
-                >
-                  <TripViewIcon />
-                  <span>{activeTripAvailable ? "View Live Trip" : "No active trip right now"}</span>
-                </button>
-              </div>
+              {!isDriverVerified && (
+                <div className="driver-verification-note">
+                  {isOfficialQr
+                    ? "This driver exists in the system but is not currently allowed to operate. You may submit a report to notify the admin."
+                    : "This QR code is not connected to an active official TODA driver token. You may still submit a report so the admin can review this issue."}
+                </div>
+              )}
+              {activeLiveTripAvailable ? (
+                <div className="driver-trip-action">
+                  <button
+                    type="button"
+                    className="trip-view-button"
+                    onClick={openTripView}
+                  >
+                    <TripViewIcon />
+                    <span>View Live Trip</span>
+                  </button>
+                </div>
+              ) : null}
             </section>
 
             <section className="panel">
@@ -1257,7 +1455,8 @@ export default function App() {
                   <strong>
                     {typeof context.fare?.amount === "number"
                       ? formatCurrency(context.fare.amount, context.fare.currency)
-                      : "Expected fare is not available yet. We will compare this with the trip fare record once available."}
+                      : "Expected fare is not available yet. We will compare this with the trip fare record once available."
+                    }
                   </strong>
                 </div>
                 <div className={`fare-result fare-result--${fareCheckResult.state}`}>
@@ -1342,12 +1541,6 @@ export default function App() {
               </div>
             </section>
 
-            {!context.reportingAvailable && (
-              <div className="notice notice--warn">
-                {context.availabilityMessage ?? "This driver is not currently available for reporting."}
-              </div>
-            )}
-
             <section className="panel emergency-panel">
               <p className="kicker">Need urgent help?</p>
               <p className="muted">
@@ -1376,7 +1569,7 @@ export default function App() {
                   onClick={handleEmergencyRequest}
                   disabled={emergencyBusy || emergencyIsActive}
                 >
-                  {emergencyBusy ? "Sending emergency..." : "Request Admin Assistance"}
+                  {emergencyBusy && !emergencyConfirmOpen ? "Requesting location..." : emergencyBusy ? "Sending emergency..." : "Request Admin Assistance"}
                 </button>
               )}
             </section>
@@ -1420,114 +1613,81 @@ export default function App() {
           >
             <CloseIcon />
           </button>
-          <div className="trip-screen__top">
-            <section className="trip-screen__driver-card">
-              <p className="kicker">Live Trip</p>
-              <h2 id="trip-view-title">{tripViewStatusTitle}</h2>
-              <p className="muted trip-screen__subtitle">{tripViewStatusSubtitle}</p>
 
-              {tripTrackingState === "loading" && (
-                <div className="trip-screen__inline-state">
-                  <strong>Loading active trip...</strong>
-                  <span>Fetching the driver's live trip data.</span>
-                </div>
-              )}
+          {tripTrackingState === "loading" && (
+            <div className="trip-screen__top">
+              <section className="trip-screen__inline-state">
+                <strong>Loading live trip...</strong>
+                <span>Fetching the driver's live trip data.</span>
+              </section>
+            </div>
+          )}
 
-              {tripTrackingState === "error" && (
-                <div className="trip-screen__inline-state trip-screen__inline-state--error">
-                  <strong>Unable to load the trip view</strong>
-                  <span>{tripTrackingError ?? "Please try again in a moment."}</span>
-                </div>
-              )}
+          {tripTrackingState === "error" && (
+            <div className="trip-screen__top">
+              <section className="trip-screen__inline-state trip-screen__inline-state--error">
+                <strong>Unable to load live tracking</strong>
+                <span>{tripTrackingError ?? "Please try again in a moment."}</span>
+              </section>
+            </div>
+          )}
 
-              {tripTrackingState === "ready" && !tripViewTrip && (
-                <div className="trip-screen__inline-state">
-                  <strong>No active trip available</strong>
-                  <span>The driver does not have an ongoing trip at the moment.</span>
-                </div>
-              )}
+          {tripTrackingState === "ready" && !showTripDetails && (
+            <div className="trip-screen__top">
+              <section className="trip-screen__inline-state">
+                <strong>Live trip is unavailable</strong>
+                <span>The driver does not have active live tracking right now.</span>
+              </section>
+            </div>
+          )}
 
-              {tripTrackingState === "ready" && tripViewTrip && (
-                <div className="trip-screen__driver-row">
-                  {context.driverAvatarUrl ? (
-                    <img
-                      className="driver-avatar"
-                      src={context.driverAvatarUrl}
-                      alt={tripView.driverName}
-                    />
-                  ) : (
-                    <div className="driver-avatar driver-avatar--fallback" aria-hidden="true">
-                      {tripView.driverName
-                        .split(" ")
-                        .filter(Boolean)
-                        .slice(0, 2)
-                        .map((part) => part[0]?.toUpperCase() ?? "")
-                        .join("")}
+          {showTripDetails && (
+            <div className="trip-screen__bottom">
+              <section className="trip-screen__driver-card">
+                <div className="trip-screen__driver-header">
+                  <div className="trip-screen__driver-identity">
+                    {context.driverAvatarUrl ? (
+                      <img
+                        className="driver-avatar"
+                        src={context.driverAvatarUrl}
+                        alt={tripView.driverName}
+                      />
+                    ) : (
+                      <div className="driver-avatar driver-avatar--fallback" aria-hidden="true">
+                        {tripView.driverName
+                          .split(" ")
+                          .filter(Boolean)
+                          .slice(0, 2)
+                          .map((part) => part[0]?.toUpperCase() ?? "")
+                          .join("")}
+                      </div>
+                    )}
+                    <div className="trip-screen__driver-copy">
+                      <strong>{tripView.driverName}</strong>
+                      <span>{`Plate ${tripViewTrip.plateOrBodyNumber} • ${context.todaName}`}</span>
                     </div>
-                  )}
-                  <div className="trip-screen__driver-copy">
-                    <strong>{tripView.driverName}</strong>
-                    <span className="trip-screen__meta">
-                      <span>Plate {tripViewTrip.plateOrBodyNumber}</span>
-                      <span className="trip-screen__meta-separator" aria-hidden="true">
-                        &bull;
-                      </span>
-                      <span>{context.todaName}</span>
-                    </span>
-                    <span>{tripDriverTripLine}</span>
                   </div>
-                  <span
-                    className={`status-pill ${
-                      tripViewIsOnline ? "status-pill--active" : "status-pill--neutral"
-                    }`}
-                  >
-                    {tripViewIsOnline ? "Online" : "Offline"}
-                  </span>
                 </div>
-              )}
-            </section>
-          </div>
 
-          <div className="trip-screen__bottom">
-            <button
-              type="button"
-              className="primary-button trip-screen__action"
-              onClick={() => {
-                closeTripView()
-                window.scrollTo({ top: document.body.scrollHeight * 0.45, behavior: "smooth" })
-              }}
-            >
-              Report Driver
-            </button>
-
-            {emergencyIsActive && emergencyAlert ? (
-              <div className="emergency-status-card emergency-status-card--inline">
-                <strong>
-                  {emergencyAlert.status === "responding" ||
-                  emergencyAlert.status === "acknowledged"
-                    ? "Admin responding"
-                    : "Emergency request sent"}
-                </strong>
-                <span>
-                  {emergencyAlert.status === "responding" ||
-                  emergencyAlert.status === "acknowledged"
-                    ? `Emergency #${emergencyAlert.emergencyId} was sent at ${new Date(
-                        emergencyAlert.createdAt
-                      ).toLocaleTimeString()}.`
-                    : "Admin has been notified."}
-                </span>
-              </div>
-            ) : (
-              <button
-                type="button"
-                className="secondary-button trip-screen__action trip-screen__action--secondary"
-                onClick={handleEmergencyRequest}
-                disabled={emergencyBusy || emergencyIsActive}
-              >
-                {emergencyBusy ? "Sending emergency..." : "Request Admin Assistance"}
-              </button>
-            )}
-          </div>
+                <div className="trip-screen__trip-stats">
+                  <div>
+                    <span className="trip-screen__stat-label">Fare</span>
+                    <strong>{typeof tripViewTrip.fareAmount === "number"
+                      ? formatCurrency(tripViewTrip.fareAmount, context.fare?.currency ?? "PHP")
+                      : "Not available"}</strong>
+                  </div>
+                  <div>
+                    <span className="trip-screen__stat-label">Distance</span>
+                    <strong>{formatDistance(tripViewTrip.distanceKilometers)}</strong>
+                  </div>
+                  <div>
+                    <span className="trip-screen__stat-label">Speed</span>
+                    <strong>{formatSpeed(tripViewTrip.speedKph)}</strong>
+                  </div>
+                </div>
+              </section>
+            </div>
+          )}
         </section>
       )}
 
@@ -1550,13 +1710,14 @@ export default function App() {
             <h2 id="emergency-confirm-title">Send emergency alert?</h2>
             <p className="muted">
               This will immediately notify the admin dashboard that a passenger needs urgent attention for{" "}
-              <strong>{context.driverName}</strong>.
+              <strong>{context.driverName}</strong>. Your current location will be included with the request.
             </p>
 
             <div className="confirm-summary">
               <strong>Before you proceed:</strong>
               <ul>
                 <li>Use this only for urgent situations that need immediate action.</li>
+                <li>Your current GPS location has already been requested and will be sent with the alert.</li>
                 <li>The admin dashboard will receive the emergency in real time.</li>
                 <li>You will be notified here once the admin confirms they are responding.</li>
               </ul>
@@ -1566,7 +1727,12 @@ export default function App() {
               <button
                 type="button"
                 className="secondary-button"
-                onClick={() => setEmergencyConfirmOpen(false)}
+                onClick={() => {
+                  if (!emergencyBusy) {
+                    setEmergencyConfirmOpen(false)
+                    setEmergencyLocation(null)
+                  }
+                }}
                 disabled={emergencyBusy}
               >
                 Cancel
@@ -1602,7 +1768,10 @@ export default function App() {
             </div>
             <h2 id="emergency-response-title">Admin is taking action</h2>
             <p className="muted">
-              Your emergency alert has been received. The admin has already confirmed that they are responding.
+              Your emergency request has been received. The admin is now reviewing your location and driver details.
+            </p>
+            <p className="muted">
+              Please stay safe and wait for further assistance.
             </p>
             <div className="reference-box">
               <span>Status</span>

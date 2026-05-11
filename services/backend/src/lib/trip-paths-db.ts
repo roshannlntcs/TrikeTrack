@@ -1,4 +1,6 @@
 import { ensureDatabaseReady, query } from "./database"
+import { matchTripGPSToRoads, shouldAttemptMatching } from "./osrm-matching"
+import { reverseGeocodeLocationName } from "./reverse-geocode"
 
 type TripPathPointRow = {
   recorded_at: Date
@@ -13,6 +15,8 @@ type StoredTripPathRow = {
   path_geojson: unknown
   started_at: Date | null
   ended_at: Date | null
+  start_location_name: string | null
+  end_location_name: string | null
   updated_at: Date
 }
 
@@ -23,6 +27,8 @@ export type StoredTripPath = {
   pathGeojson: unknown
   startedAt?: string
   endedAt?: string
+  startLocationName?: string
+  endLocationName?: string
   updatedAt: string
 }
 
@@ -42,8 +48,15 @@ const ensureTripPathsSchemaReady = async () => {
       path_geojson jsonb NOT NULL,
       started_at timestamptz,
       ended_at timestamptz,
+      start_location_name text,
+      end_location_name text,
       updated_at timestamptz NOT NULL DEFAULT now()
     )
+  `)
+  await query(`
+    ALTER TABLE public.trip_paths
+      ADD COLUMN IF NOT EXISTS start_location_name text,
+      ADD COLUMN IF NOT EXISTS end_location_name text
   `)
   await query(`
     CREATE INDEX IF NOT EXISTS idx_trip_paths_updated_at
@@ -66,6 +79,8 @@ const mapTripPath = (row: StoredTripPathRow): StoredTripPath => ({
   pathGeojson: row.path_geojson,
   startedAt: row.started_at?.toISOString(),
   endedAt: row.ended_at?.toISOString(),
+  startLocationName: row.start_location_name ?? undefined,
+  endLocationName: row.end_location_name ?? undefined,
   updatedAt: row.updated_at.toISOString()
 })
 
@@ -110,15 +125,57 @@ export const rebuildTripPathForTrip = async (tripId: number) => {
 
   const startedAt = result.rows[0]?.recorded_at?.toISOString() ?? null
   const endedAt = result.rows[result.rows.length - 1]?.recorded_at?.toISOString() ?? null
+  const [startLng, startLat] = orderedCoordinates[0]
+  const [endLng, endLat] = orderedCoordinates[orderedCoordinates.length - 1]
+  const [startLocationName, endLocationName] = await Promise.all([
+    reverseGeocodeLocationName({
+      latitude: startLat,
+      longitude: startLng,
+      fallbackLabel: "Start location name unavailable"
+    }),
+    reverseGeocodeLocationName({
+      latitude: endLat,
+      longitude: endLng,
+      fallbackLabel: "End location name unavailable"
+    })
+  ])
+
+  // Attempt OSRM map matching for better road-aligned route
+  let finalCoordinates = orderedCoordinates
+  let routeSource = "raw_gps_points"
+
+  try {
+    const gpsPoints = result.rows.map((row) => ({
+      latitude: row.lat,
+      longitude: row.lng,
+      timestamp: row.recorded_at.getTime()
+    }))
+
+    if (shouldAttemptMatching(gpsPoints)) {
+      const matchedRoute = await matchTripGPSToRoads(gpsPoints)
+      if (matchedRoute && matchedRoute.geometry.coordinates.length >= 2) {
+        finalCoordinates = matchedRoute.geometry.coordinates
+        routeSource = "osrm_matched_route"
+        console.log(`[OSRM] Trip ${tripId}: Matched ${gpsPoints.length} GPS points to ${finalCoordinates.length} road points`)
+      }
+    }
+  } catch (error) {
+    // If OSRM matching fails, log and fallback to raw coordinates
+    console.warn(`[OSRM] Trip ${tripId}: Map matching failed, using raw GPS points:`, error instanceof Error ? error.message : error)
+  }
+
   const pathGeojson = {
     type: "Feature",
     geometry: {
       type: "LineString",
-      coordinates: orderedCoordinates
+      coordinates: finalCoordinates
     },
     properties: {
       tripId,
-      pointCount: orderedCoordinates.length
+      pointCount: finalCoordinates.length,
+      source: routeSource,
+      rawPointCount: orderedCoordinates.length,
+      matchedAt: routeSource === "osrm_matched_route" ? new Date().toISOString() : null
     }
   }
 
@@ -130,15 +187,19 @@ export const rebuildTripPathForTrip = async (tripId: number) => {
         path_geojson,
         started_at,
         ended_at,
+        start_location_name,
+        end_location_name,
         updated_at
       )
-      VALUES ($1, $2, $3::jsonb, $4::timestamptz, $5::timestamptz, now())
+      VALUES ($1, $2, $3::jsonb, $4::timestamptz, $5::timestamptz, $6, $7, now())
       ON CONFLICT (trip_id) DO UPDATE
       SET
         point_count = EXCLUDED.point_count,
         path_geojson = EXCLUDED.path_geojson,
         started_at = EXCLUDED.started_at,
         ended_at = EXCLUDED.ended_at,
+        start_location_name = EXCLUDED.start_location_name,
+        end_location_name = EXCLUDED.end_location_name,
         updated_at = now()
       RETURNING
         trip_path_id,
@@ -147,9 +208,19 @@ export const rebuildTripPathForTrip = async (tripId: number) => {
         path_geojson,
         started_at,
         ended_at,
+        start_location_name,
+        end_location_name,
         updated_at
     `,
-    [tripId, orderedCoordinates.length, JSON.stringify(pathGeojson), startedAt, endedAt]
+    [
+      tripId,
+      finalCoordinates.length,
+      JSON.stringify(pathGeojson),
+      startedAt,
+      endedAt,
+      startLocationName,
+      endLocationName
+    ]
   )
 
   const row = upsertResult.rows[0]
@@ -168,6 +239,8 @@ export const getTripPathByTripId = async (tripId: number) => {
         tp.path_geojson,
         tp.started_at,
         tp.ended_at,
+        tp.start_location_name,
+        tp.end_location_name,
         tp.updated_at
       FROM public.trip_paths tp
       WHERE tp.trip_id = $1

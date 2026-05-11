@@ -2,6 +2,7 @@ import { randomUUID } from "crypto"
 import type { PoolClient } from "pg"
 import type { AdminProfile } from "./admin-auth-db"
 import { ensureDatabaseReady, hasTable, query, withTransaction } from "./database"
+import { reverseGeocodeLocationName } from "./reverse-geocode"
 
 export type EmergencyAlertStatus =
   | "created"
@@ -30,6 +31,16 @@ export type EmergencyAlertRecord = {
   source: string
   alertType: string
   status: EmergencyAlertStatus
+  passengerLatitude?: number
+  passengerLongitude?: number
+  passenger_latitude?: number
+  passenger_longitude?: number
+  locationAccuracy?: number
+  location_accuracy?: number
+  locationCapturedAt?: string
+  location_captured_at?: string
+  passengerLocationName?: string
+  passenger_location_name?: string
   latitude?: number
   longitude?: number
   locationLabel?: string
@@ -48,9 +59,10 @@ export type EmergencyAlertRealtimeEvent = {
 
 export type CreatePassengerEmergencyAlertInput = {
   qrToken: string
-  latitude: number
-  longitude: number
+  passengerLatitude: number
+  passengerLongitude: number
   accuracy?: number
+  locationCapturedAt?: Date
   deviceInfo?: Record<string, unknown>
 }
 
@@ -94,8 +106,11 @@ type EmergencyAlertRow = {
   source: string
   alert_type: string
   status: EmergencyAlertStatus
-  latitude: number | null
-  longitude: number | null
+  passenger_latitude: number | null
+  passenger_longitude: number | null
+  location_accuracy: number | null
+  location_captured_at: Date | null
+  passenger_location_name: string | null
   location_label: string | null
   created_at: Date
   updated_at: Date
@@ -156,9 +171,19 @@ const mapEmergencyAlert = (row: EmergencyAlertRow): EmergencyAlertRecord => ({
   source: row.source,
   alertType: row.alert_type,
   status: row.status,
-  latitude: row.latitude ?? undefined,
-  longitude: row.longitude ?? undefined,
-  locationLabel: row.location_label ?? undefined,
+  passengerLatitude: row.passenger_latitude ?? undefined,
+  passengerLongitude: row.passenger_longitude ?? undefined,
+  passenger_latitude: row.passenger_latitude ?? undefined,
+  passenger_longitude: row.passenger_longitude ?? undefined,
+  locationAccuracy: row.location_accuracy ?? undefined,
+  location_accuracy: row.location_accuracy ?? undefined,
+  locationCapturedAt: row.location_captured_at?.toISOString(),
+  location_captured_at: row.location_captured_at?.toISOString(),
+  passengerLocationName: row.passenger_location_name ?? undefined,
+  passenger_location_name: row.passenger_location_name ?? undefined,
+  latitude: row.passenger_latitude ?? undefined,
+  longitude: row.passenger_longitude ?? undefined,
+  locationLabel: row.passenger_location_name ?? row.location_label ?? undefined,
   createdAt: row.created_at.toISOString(),
   updatedAt: row.updated_at.toISOString(),
   acknowledgedAt: row.acknowledged_at?.toISOString(),
@@ -215,6 +240,10 @@ const EMERGENCY_CONTEXT_SQL = `
     ON TRUE
   WHERE qr.qr_token = $1
     AND qr.status = 'active'
+    AND qr.issued_by_admin = true
+    AND d.created_by_admin = true
+    AND d.status = 'active'
+    AND tr.plate_no IS NOT NULL
     AND (qr.expires_at IS NULL OR qr.expires_at > NOW())
   LIMIT 1
 `
@@ -242,8 +271,11 @@ const EMERGENCY_SELECT = `
     e.source,
     e.alert_type,
     e.status::text AS status,
-    e.latitude,
-    e.longitude,
+    e.passenger_latitude,
+    e.passenger_longitude,
+    e.location_accuracy,
+    e.location_captured_at,
+    e.passenger_location_name,
     e.location_label,
     e.created_at,
     e.updated_at,
@@ -285,7 +317,20 @@ const queryEmergencyContext = async (
     ? await client.query<EmergencyContextRow>(EMERGENCY_CONTEXT_SQL, [qrToken])
     : await query<EmergencyContextRow>(EMERGENCY_CONTEXT_SQL, [qrToken])
 
-  return result.rows[0] ?? null
+  if (result.rows[0]) {
+    return result.rows[0]
+  }
+
+  const fuzzySql = EMERGENCY_CONTEXT_SQL.replace(
+    "WHERE qr.qr_token = $1",
+    "WHERE translate(qr.qr_token, '0O1Il', 'OOlll') = translate($1, '0O1Il', 'OOlll')"
+  ).replace(/\n  LIMIT 1\n$/, "\n  LIMIT 2\n")
+
+  const fuzzyResult = client
+    ? await client.query<EmergencyContextRow>(fuzzySql, [qrToken])
+    : await query<EmergencyContextRow>(fuzzySql, [qrToken])
+
+  return fuzzyResult.rows.length === 1 ? fuzzyResult.rows[0] : null
 }
 
 const queryEmergencyById = async (
@@ -407,6 +452,14 @@ export const createPassengerEmergencyAlert = async (
     }
 
     const trackingKey = randomUUID()
+    const fallbackLocationName = [context.barangay_name, "Davao City"]
+      .filter(Boolean)
+      .join(", ")
+    const passengerLocationName = await reverseGeocodeLocationName({
+      latitude: input.passengerLatitude,
+      longitude: input.passengerLongitude,
+      fallbackLabel: fallbackLocationName ? `Near ${fallbackLocationName}` : undefined
+    })
     const insertResult = await client.query<{ emergency_id: number }>(
       `
         INSERT INTO public.emergency_alerts (
@@ -422,8 +475,11 @@ export const createPassengerEmergencyAlert = async (
           source,
           alert_type,
           status,
-          latitude,
-          longitude,
+          passenger_latitude,
+          passenger_longitude,
+          location_accuracy,
+          location_captured_at,
+          passenger_location_name,
           location_label,
           device_info,
           updated_at
@@ -445,6 +501,9 @@ export const createPassengerEmergencyAlert = async (
           $11,
           $12,
           $13,
+          $14,
+          $15,
+          $16,
           NOW()
         )
         RETURNING emergency_id
@@ -459,9 +518,12 @@ export const createPassengerEmergencyAlert = async (
         context.route_id,
         context.toda_id,
         context.barangay_id,
-        input.latitude,
-        input.longitude,
-        `${input.latitude.toFixed(5)}, ${input.longitude.toFixed(5)}`,
+        input.passengerLatitude,
+        input.passengerLongitude,
+        input.accuracy,
+        input.locationCapturedAt ?? new Date(),
+        passengerLocationName,
+        passengerLocationName,
         {
           ...(input.deviceInfo ?? {}),
           locationAccuracyMeters: input.accuracy

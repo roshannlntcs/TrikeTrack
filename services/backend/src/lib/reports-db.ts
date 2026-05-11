@@ -22,10 +22,19 @@ export type ReportTypeRecord = {
 export type PassengerReportContext = {
   qrId: number
   qrToken: string
+  qrStatus?: "active" | "inactive" | "revoked" | "expired"
+  qrIsActive?: boolean
+  qrIssuedByAdmin?: boolean
   driverId: number
   driverCode: string
   driverName: string
   driverAvatarUrl?: string
+  driverStatus: string
+  driverCreatedByAdmin?: boolean
+  driverIsVerified: boolean
+  verificationStatus?: string
+  verifiedAt?: string
+  verifiedBy?: number
   tricycleId?: number
   plateNo?: string
   todaId: number
@@ -101,6 +110,15 @@ export type CreatePassengerReportInput = {
   }
 }
 
+export type CreateSuspiciousQrReportInput = {
+  qrToken: string
+  reportTypeCode?: string
+  description: string
+  passengerName?: string
+  passengerContact?: string
+  deviceInfo?: Record<string, unknown>
+}
+
 type ReportTypeRow = {
   report_type_id: number
   code: string
@@ -110,11 +128,20 @@ type ReportTypeRow = {
 type PassengerReportContextRow = {
   qr_id: number
   qr_token: string
+  qr_status: "active" | "inactive" | "revoked" | "expired"
+  qr_issued_by_admin: boolean
+  qr_expires_at: Date | null
   driver_id: number
   driver_code: string
   first_name: string
   last_name: string
   avatar_url: string | null
+  driver_status: string
+  driver_created_by_admin: boolean
+  driver_is_verified: boolean
+  verification_status: string
+  verified_at: Date | null
+  verified_by: number | null
   tricycle_id: number | null
   plate_no: string | null
   toda_id: number
@@ -199,11 +226,20 @@ const PASSENGER_CONTEXT_SQL = `
   SELECT
     qr.qr_id,
     qr.qr_token,
+    qr.status AS qr_status,
+    qr.issued_by_admin AS qr_issued_by_admin,
+    qr.expires_at AS qr_expires_at,
     d.driver_id,
     d.driver_code,
     d.first_name,
     d.last_name,
     d.avatar_url,
+    d.status AS driver_status,
+    d.created_by_admin AS driver_created_by_admin,
+    d.is_verified AS driver_is_verified,
+    d.verification_status,
+    d.verified_at,
+    d.verified_by,
     tr.tricycle_id,
     tr.plate_no,
     td.toda_id,
@@ -260,8 +296,6 @@ const PASSENGER_CONTEXT_SQL = `
   LEFT JOIN public.driver_locations dl
     ON dl.driver_id = d.driver_id
   WHERE qr.qr_token = $1
-    AND qr.status = 'active'
-    AND (qr.expires_at IS NULL OR qr.expires_at > NOW())
   LIMIT 1
 `
 
@@ -303,6 +337,9 @@ const mapPassengerReportContext = (
   return {
     qrId: Number(row.qr_id),
     qrToken: row.qr_token,
+    qrStatus: row.qr_status,
+    qrIsActive: row.qr_status === "active" && (!row.qr_expires_at || row.qr_expires_at > new Date()),
+    qrIssuedByAdmin: row.qr_issued_by_admin,
     driverId: Number(row.driver_id),
     driverCode: row.driver_code,
     driverName: `${row.first_name} ${row.last_name}`,
@@ -313,6 +350,20 @@ const mapPassengerReportContext = (
     todaName: row.toda_name,
     barangayId: Number(row.barangay_id),
     barangayName: row.barangay_name,
+    driverStatus: row.driver_status,
+    driverCreatedByAdmin: row.driver_created_by_admin,
+    driverIsVerified:
+      row.driver_is_verified &&
+      row.driver_created_by_admin &&
+      Boolean(row.driver_code) &&
+      row.driver_status === "active" &&
+      row.qr_status === "active" &&
+      row.qr_issued_by_admin &&
+      (!row.qr_expires_at || row.qr_expires_at > new Date()) &&
+      row.plate_no !== null,
+    verificationStatus: row.verification_status,
+    verifiedAt: row.verified_at?.toISOString(),
+    verifiedBy: row.verified_by === null ? undefined : Number(row.verified_by),
     routeId: row.route_id === null ? undefined : Number(row.route_id),
     tripId: row.trip_id === null ? undefined : Number(row.trip_id),
     tripStatus: row.trip_status ?? undefined,
@@ -396,7 +447,20 @@ const queryPassengerReportContext = async (
     ? await client.query<PassengerReportContextRow>(PASSENGER_CONTEXT_SQL, [qrToken])
     : await query<PassengerReportContextRow>(PASSENGER_CONTEXT_SQL, [qrToken])
 
-  return result.rows[0] ?? null
+  if (result.rows[0]) {
+    return result.rows[0]
+  }
+
+  const fuzzySql = PASSENGER_CONTEXT_SQL.replace(
+    "WHERE qr.qr_token = $1",
+    "WHERE translate(qr.qr_token, '0O1Il', 'OOlll') = translate($1, '0O1Il', 'OOlll')"
+  ).replace(/\n  LIMIT 1\n$/, "\n  LIMIT 2\n")
+
+  const fuzzyResult = client
+    ? await client.query<PassengerReportContextRow>(fuzzySql, [qrToken])
+    : await query<PassengerReportContextRow>(fuzzySql, [qrToken])
+
+  return fuzzyResult.rows.length === 1 ? fuzzyResult.rows[0] : null
 }
 
 const queryAdminReports = async (
@@ -835,6 +899,43 @@ export const createPassengerReport = async (input: CreatePassengerReportInput) =
     }
 
     throw error
+  }
+}
+
+export const createSuspiciousQrReport = async (input: CreateSuspiciousQrReportInput) => {
+  await ensureDatabaseReady()
+
+  const result = await query<{ suspicious_report_id: number; status: string }>(
+    `
+      INSERT INTO public.suspicious_qr_reports (
+        qr_token,
+        report_type_code,
+        passenger_name,
+        passenger_contact,
+        description,
+        device_info
+      )
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING suspicious_report_id, status
+    `,
+    [
+      input.qrToken,
+      input.reportTypeCode ?? "suspicious_qr",
+      input.passengerName ?? null,
+      input.passengerContact ?? null,
+      input.description,
+      input.deviceInfo ?? {}
+    ]
+  )
+
+  const row = result.rows[0]
+  if (!row) {
+    throw new Error("Unable to submit suspicious QR report.")
+  }
+
+  return {
+    reportId: Number(row.suspicious_report_id),
+    status: row.status
   }
 }
 

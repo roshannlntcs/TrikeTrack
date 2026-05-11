@@ -6,19 +6,22 @@ type ReportPageProps = {
   }
 }
 
+const sanitizeConfiguredUrl = (value: string | undefined) =>
+  value?.replace(/\r|\n/g, "").trim()
+
 const firstConfiguredUrl = (...values: Array<string | undefined>) =>
-  values.map((value) => value?.trim()).find((value) => Boolean(value)) ?? ""
+  values.map(sanitizeConfiguredUrl).find((value) => Boolean(value)) ?? ""
 
 const PASSENGER_APP_BASE_URL = firstConfiguredUrl(
   process.env.PUBLIC_PASSENGER_REPORT_BASE_URL,
   process.env.PASSENGER_APP_BASE_URL,
   process.env.PUBLIC_PASSENGER_REPORT_URL,
   process.env.VERCEL_PROJECT_PRODUCTION_URL
-    ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
+    ? `https://${sanitizeConfiguredUrl(process.env.VERCEL_PROJECT_PRODUCTION_URL)}`
     : undefined,
-  process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined,
-  process.env.URL,
-  process.env.DEPLOY_PRIME_URL
+  process.env.VERCEL_URL ? `https://${sanitizeConfiguredUrl(process.env.VERCEL_URL)}` : undefined,
+  sanitizeConfiguredUrl(process.env.URL),
+  sanitizeConfiguredUrl(process.env.DEPLOY_PRIME_URL)
 )
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"])

@@ -496,9 +496,10 @@ const createDriverQrCode = async (
             driver_id,
             tricycle_id,
             qr_token,
-            status
+            status,
+            issued_by_admin
           )
-          VALUES ($1, $2, $3, 'active')
+          VALUES ($1, $2, $3, 'active', true)
           RETURNING qr_id
         `,
         [driverId, tricycleId, generateDriverQrToken()]
@@ -558,6 +559,7 @@ const ensureDriverQrCode = async (
           driver_id = $2,
           tricycle_id = $3,
           status = 'active',
+          issued_by_admin = true,
           expires_at = NULL
         WHERE qr_id = $1
       `,
@@ -571,6 +573,7 @@ const ensureDriverQrCode = async (
       SET
         driver_id = $1,
         status = 'revoked',
+        revoked_at = COALESCE(revoked_at, NOW()),
         expires_at = COALESCE(expires_at, NOW())
       WHERE driver_id = $1
         AND qr_id <> $2
@@ -599,6 +602,7 @@ const regenerateDriverQrCode = async (
       UPDATE public.qr_codes
       SET
         status = 'revoked',
+        revoked_at = COALESCE(revoked_at, NOW()),
         expires_at = COALESCE(expires_at, NOW())
       WHERE driver_id = $1
         AND status = 'active'
@@ -1365,9 +1369,13 @@ export const createDriver = async (input: CreateDriverInput) => {
           tricycle_id,
           first_name,
           last_name,
-          contact_no
+          contact_no,
+          created_by_admin,
+          is_verified,
+          verification_status,
+          verified_at
         )
-        VALUES ($1, $2, $3, $4, $5)
+        VALUES ($1, $2, $3, $4, $5, true, true, 'verified', NOW())
         RETURNING driver_id
       `,
       [

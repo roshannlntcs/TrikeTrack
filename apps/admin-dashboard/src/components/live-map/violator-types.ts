@@ -9,8 +9,13 @@ export type LiveMapViolator = {
   timestamp: string
   status: string
   violationId: string
-  source: "live_geofence" | "system_violation" | "driver_violation"
+  source: "live_geofence" | "system_violation" | "driver_violation" | "passenger_emergency"
   locationLabel?: string
+  driverCode?: string
+  plateNo?: string
+  todaName?: string
+  barangayName?: string
+  emergencyStatus?: string
   tripId?: string | number
   routeName?: string
   resolvedAt?: string | null

@@ -513,6 +513,11 @@ create table if not exists public.drivers (
   avatar_url text,
   password_hash text,
   status entity_status not null default 'active',
+  created_by_admin boolean not null default true,
+  is_verified boolean not null default false,
+  verification_status text not null default 'pending',
+  verified_at timestamptz,
+  verified_by bigint references public.admin_accounts(admin_id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   deleted_at timestamptz
@@ -523,6 +528,11 @@ alter table public.drivers add column if not exists qr_id bigint;
 alter table public.drivers add column if not exists contact_no text;
 alter table public.drivers add column if not exists avatar_url text;
 alter table public.drivers add column if not exists password_hash text;
+alter table public.drivers add column if not exists created_by_admin boolean not null default true;
+alter table public.drivers add column if not exists is_verified boolean not null default false;
+alter table public.drivers add column if not exists verification_status text not null default 'pending';
+alter table public.drivers add column if not exists verified_at timestamptz;
+alter table public.drivers add column if not exists verified_by bigint references public.admin_accounts(admin_id) on delete set null;
 alter table public.drivers add column if not exists updated_at timestamptz not null default now();
 alter table public.drivers add column if not exists deleted_at timestamptz;
 
@@ -600,16 +610,36 @@ create table if not exists public.qr_codes (
   tricycle_id bigint references public.tricycles(tricycle_id) on delete set null,
   qr_token text not null unique,
   status qr_status not null default 'active',
+  issued_by_admin boolean not null default true,
   issued_at timestamptz not null default now(),
+  revoked_at timestamptz,
   expires_at timestamptz,
   created_at timestamptz not null default now()
 );
+
+alter table public.qr_codes add column if not exists issued_by_admin boolean not null default true;
+alter table public.qr_codes add column if not exists revoked_at timestamptz;
 
 create table if not exists public.report_types (
   report_type_id bigint generated always as identity primary key,
   code text not null unique,
   label text not null
 );
+
+create table if not exists public.suspicious_qr_reports (
+  suspicious_report_id bigint generated always as identity primary key,
+  qr_token text not null,
+  report_type_code text not null default 'suspicious_qr',
+  passenger_name text,
+  passenger_contact text,
+  description text not null,
+  device_info jsonb,
+  status text not null default 'submitted',
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_suspicious_qr_reports_created_at
+  on public.suspicious_qr_reports(created_at desc);
 
 create table if not exists public.violation_types (
   violation_type_id bigint generated always as identity primary key,
@@ -694,6 +724,8 @@ create table if not exists public.trip_paths (
   path_geojson jsonb not null,
   started_at timestamptz,
   ended_at timestamptz,
+  start_location_name text,
+  end_location_name text,
   updated_at timestamptz not null default now()
 );
 
@@ -839,8 +871,11 @@ create table if not exists public.emergency_alerts (
   source text not null default 'qr_emergency_button',
   alert_type text not null default 'emergency',
   status emergency_alert_status not null default 'pending_admin',
-  latitude double precision,
-  longitude double precision,
+  passenger_latitude double precision,
+  passenger_longitude double precision,
+  location_accuracy double precision,
+  location_captured_at timestamptz,
+  passenger_location_name text,
   location_label text,
   device_info jsonb,
   acknowledged_by_admin_id bigint references public.admin_accounts(admin_id) on delete set null,
@@ -1301,6 +1336,7 @@ create index if not exists idx_emergency_alerts_driver_id on public.emergency_al
 create index if not exists idx_emergency_alerts_trip_id on public.emergency_alerts(trip_id);
 create index if not exists idx_emergency_alerts_toda_id on public.emergency_alerts(toda_id);
 create index if not exists idx_emergency_alerts_barangay_id on public.emergency_alerts(barangay_id);
+create index if not exists idx_emergency_alerts_passenger_location on public.emergency_alerts(passenger_latitude, passenger_longitude) where passenger_latitude is not null and passenger_longitude is not null;
 create index if not exists idx_admin_notification_reads_admin_read_at
 on public.admin_notification_reads(admin_id, read_at desc);
 

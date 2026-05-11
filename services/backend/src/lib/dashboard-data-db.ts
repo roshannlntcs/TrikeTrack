@@ -900,11 +900,11 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
     : ""
   const tripPathSelect = hasTripPaths
     ? `
-          COALESCE(NULLIF(tp.matched_point_count, 0), path.point_count) AS path_point_count,
+          COALESCE(NULLIF(tp.raw_gps_point_count, 0), path.point_count) AS path_point_count,
           COALESCE(path.updated_at, tp.trip_end, tp.created_at) AS path_updated_at,
       `
     : `
-          NULLIF(tp.matched_point_count, 0) AS path_point_count,
+          NULLIF(tp.raw_gps_point_count, 0) AS path_point_count,
           COALESCE(tp.trip_end, tp.created_at) AS path_updated_at,
       `
   const tripPathJoin = hasTripPaths

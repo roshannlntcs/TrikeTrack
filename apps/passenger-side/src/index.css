@@ -163,6 +163,50 @@ textarea {
   color: #667085;
 }
 
+.driver-verification-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.driver-verification-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.driver-verification-badge--verified {
+  border: 1px solid #cfe1ff;
+  background: #eaf3ff;
+  color: #1d4ed8;
+}
+
+.driver-verification-badge--unverified {
+  border: 1px solid #f5c2c2;
+  background: #fff1f1;
+  color: #991b1b;
+}
+
+.driver-verification-note {
+  color: #55606d;
+  font-size: 0.94rem;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.driver-verification-subtext {
+  margin: 0;
+  color: #55606d;
+  font-size: 0.85rem;
+}
+
 .driver-status-line {
   display: flex;
   align-items: center;
@@ -854,19 +898,59 @@ textarea {
 
 .trip-screen__driver-card {
   width: min(100%, 430px);
-  margin: 52px auto 0;
-  padding: 14px 16px;
+  margin: 0 auto;
+  padding: 16px;
   border-radius: 24px;
   background: rgba(255, 255, 255, 0.96);
   border: 1px solid rgba(228, 234, 244, 0.92);
   box-shadow: 0 18px 36px rgba(15, 23, 42, 0.15);
   backdrop-filter: blur(14px);
   display: grid;
+  gap: 18px;
+}
+
+.trip-screen__driver-header {
+  display: grid;
+  gap: 14px;
+}
+
+.trip-screen__driver-identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.trip-screen__driver-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.trip-screen__driver-copy strong {
+  color: #172033;
+  font-size: 1.1rem;
+}
+
+.trip-screen__driver-copy span {
+  color: #667085;
+  line-height: 1.4;
+}
+
+.trip-screen__trip-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.trip-screen__trip-stats > div {
+  display: grid;
   gap: 6px;
 }
 
-.trip-screen__driver-card .kicker {
-  margin: 0;
+.trip-screen__stat-label {
+  color: #98a2b3;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .trip-screen__driver-card h2 {

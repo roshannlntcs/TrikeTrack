@@ -411,45 +411,49 @@ export default function TodaManagementPage({
   const filteredDriverRows = useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase()
 
-    return data.drivers.filter((row) => {
-      const matchesStatus = statusFilter === "all" || row.status === statusFilter
-      if (!matchesStatus) return false
-      if (!normalizedQuery) return true
+    return data.drivers
+      .filter((row) => {
+        const matchesStatus = statusFilter === "all" || row.status === statusFilter
+        if (!matchesStatus) return false
+        if (!normalizedQuery) return true
 
-      return (
-        String(row.driverId).toLowerCase().includes(normalizedQuery) ||
-        row.driverCode.toLowerCase().includes(normalizedQuery) ||
-        `${row.firstName} ${row.lastName}`.toLowerCase().includes(normalizedQuery) ||
-        String(row.tricycleId ?? "").toLowerCase().includes(normalizedQuery) ||
-        (row.tricycleNo?.toLowerCase().includes(normalizedQuery) ?? false) ||
-        String(row.qrId ?? "").toLowerCase().includes(normalizedQuery) ||
-        row.todaName.toLowerCase().includes(normalizedQuery) ||
-        row.barangayName.toLowerCase().includes(normalizedQuery) ||
-        (row.contactNo?.toLowerCase().includes(normalizedQuery) ?? false) ||
-        (row.passwordSet ? "password set" : "password pending").includes(normalizedQuery) ||
-        row.status.toLowerCase().includes(normalizedQuery)
-      )
-    })
+        return (
+          String(row.driverId).toLowerCase().includes(normalizedQuery) ||
+          row.driverCode.toLowerCase().includes(normalizedQuery) ||
+          `${row.firstName} ${row.lastName}`.toLowerCase().includes(normalizedQuery) ||
+          String(row.tricycleId ?? "").toLowerCase().includes(normalizedQuery) ||
+          (row.tricycleNo?.toLowerCase().includes(normalizedQuery) ?? false) ||
+          String(row.qrId ?? "").toLowerCase().includes(normalizedQuery) ||
+          row.todaName.toLowerCase().includes(normalizedQuery) ||
+          row.barangayName.toLowerCase().includes(normalizedQuery) ||
+          (row.contactNo?.toLowerCase().includes(normalizedQuery) ?? false) ||
+          (row.passwordSet ? "password set" : "password pending").includes(normalizedQuery) ||
+          row.status.toLowerCase().includes(normalizedQuery)
+        )
+      })
+      .sort((a, b) => a.driverId - b.driverId)
   }, [data.drivers, searchQuery, statusFilter])
 
   const filteredTricycleRows = useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase()
 
-    return data.tricycles.filter((row) => {
-      const matchesStatus = statusFilter === "all" || row.status === statusFilter
-      if (!matchesStatus) return false
-      if (!normalizedQuery) return true
+    return data.tricycles
+      .filter((row) => {
+        const matchesStatus = statusFilter === "all" || row.status === statusFilter
+        if (!matchesStatus) return false
+        if (!normalizedQuery) return true
 
-      return (
-        formatTricycleCode(row.tricycleId).toLowerCase().includes(normalizedQuery) ||
-        String(row.tricycleId).toLowerCase().includes(normalizedQuery) ||
-        row.plateNo.toLowerCase().includes(normalizedQuery) ||
-        (row.regNo?.toLowerCase().includes(normalizedQuery) ?? false) ||
-        row.todaName.toLowerCase().includes(normalizedQuery) ||
-        row.barangayName.toLowerCase().includes(normalizedQuery) ||
-        row.status.toLowerCase().includes(normalizedQuery)
-      )
-    })
+        return (
+          formatTricycleCode(row.tricycleId).toLowerCase().includes(normalizedQuery) ||
+          String(row.tricycleId).toLowerCase().includes(normalizedQuery) ||
+          row.plateNo.toLowerCase().includes(normalizedQuery) ||
+          (row.regNo?.toLowerCase().includes(normalizedQuery) ?? false) ||
+          row.todaName.toLowerCase().includes(normalizedQuery) ||
+          row.barangayName.toLowerCase().includes(normalizedQuery) ||
+          row.status.toLowerCase().includes(normalizedQuery)
+        )
+      })
+      .sort((a, b) => a.tricycleId - b.tricycleId)
   }, [data.tricycles, searchQuery, statusFilter])
 
   const tricycleOptions = useMemo(() => data.tricycles, [data.tricycles])
