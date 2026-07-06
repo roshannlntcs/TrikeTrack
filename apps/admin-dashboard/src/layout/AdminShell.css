@@ -164,6 +164,26 @@
 
 .sidebar-nav__item-label {
   min-width: 0;
+  position: relative;
+}
+
+.sidebar-nav__item-badge {
+  position: absolute;
+  top: -4px;
+  right: -8px;
+  background: #dc2626;
+  color: #ffffff;
+  font-size: 0.625rem;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 10px;
+  min-width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
 .sidebar-nav__item-chevron {
@@ -956,6 +976,217 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.analytics-panel {
+  overflow: hidden;
+}
+
+.analytics-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px;
+}
+
+.analytics-card {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #e6edf5;
+  border-radius: 8px;
+  background: #fbfdff;
+}
+
+.analytics-card--wide {
+  grid-column: span 2;
+}
+
+.analytics-card__top {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.analytics-card__top div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.analytics-card__top span,
+.analytics-metrics span {
+  color: #64748b;
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.analytics-card__top strong {
+  color: #0f172a;
+  font-size: 1.45rem;
+  line-height: 1;
+}
+
+.analytics-card__top small {
+  color: #64748b;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-align: right;
+}
+
+.analytics-bars {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(44px, 1fr);
+  gap: 8px;
+  min-height: 154px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.analytics-bar {
+  display: grid;
+  grid-template-rows: 1fr auto auto;
+  gap: 6px;
+  justify-items: center;
+  min-width: 44px;
+}
+
+.analytics-bar__track {
+  width: 100%;
+  min-height: 104px;
+  display: flex;
+  align-items: flex-end;
+  border-radius: 8px;
+  background: #eef6f3;
+  overflow: hidden;
+}
+
+.analytics-bar__track span {
+  width: 100%;
+  min-height: 12px;
+  border-radius: 8px 8px 0 0;
+  background: #4fc6a4;
+}
+
+.analytics-bar__track--issue span {
+  background: #ef6f6c;
+}
+
+.analytics-bar strong {
+  color: #0f172a;
+  font-size: 0.8rem;
+}
+
+.analytics-bar small {
+  color: #64748b;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.analytics-list {
+  display: grid;
+  gap: 8px;
+}
+
+.analytics-list__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: #ffffff;
+  border: 1px solid #edf2f7;
+}
+
+.analytics-list__row span {
+  min-width: 0;
+  color: #334155;
+  font-size: 0.8rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analytics-list__row strong {
+  color: #0f172a;
+  font-size: 0.85rem;
+}
+
+.analytics-list__row--button {
+  width: 100%;
+  border: 1px solid #edf2f7;
+  cursor: pointer;
+  text-align: left;
+}
+
+.analytics-list__row--button:hover {
+  background: #f8fafc;
+}
+
+.analytics-metrics {
+  display: grid;
+  gap: 8px;
+}
+
+.analytics-metrics div {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid #edf2f7;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.analytics-metrics strong {
+  color: #0f172a;
+  font-size: 1rem;
+}
+
+.analytics-empty {
+  display: grid;
+  place-items: center;
+  min-height: 78px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #7a8797;
+  font-size: 0.82rem;
+  text-align: center;
+}
+
+.reliability-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  min-height: 28px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.reliability-pill--low {
+  color: #166534;
+  background: #dcfce7;
+}
+
+.reliability-pill--medium {
+  color: #92400e;
+  background: #fef3c7;
+}
+
+.reliability-pill--high {
+  color: #991b1b;
+  background: #fee2e2;
 }
 
 .activity-list {
@@ -2769,6 +3000,67 @@
   text-transform: none;
 }
 
+.driver-reliability-panel {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.7fr) minmax(0, 1.3fr);
+  gap: 12px;
+}
+
+.driver-reliability-score,
+.driver-reliability-metrics div {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fbfcfe;
+}
+
+.driver-reliability-score span,
+.driver-reliability-metrics span {
+  color: #64748b;
+  font-size: 0.74rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.driver-reliability-score strong {
+  color: #0f172a;
+  font-size: 1.8rem;
+  line-height: 1;
+}
+
+.driver-reliability-score small {
+  color: #334155;
+  font-weight: 800;
+}
+
+.driver-reliability-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.driver-reliability-metrics strong {
+  color: #0f172a;
+  font-size: 1rem;
+}
+
+.driver-reliability-issues {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.driver-reliability-issues span {
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: #eef6f3;
+  color: #334155;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
 .driver-modal__empty {
   padding: 18px;
   border: 1px dashed #cbd5e1;
@@ -3008,7 +3300,8 @@
   gap: 10px;
 }
 
-.trip-path-modal__meta div {
+.trip-path-modal__meta div,
+.trip-path-modal__places div {
   display: grid;
   gap: 4px;
   padding: 12px;
@@ -3017,11 +3310,23 @@
   background: #f8fafc;
 }
 
-.trip-path-modal__meta span {
+.trip-path-modal__places {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.trip-path-modal__meta span,
+.trip-path-modal__places span {
   font-size: 0.75rem;
   font-weight: 700;
   text-transform: uppercase;
   color: #64748b;
+}
+
+.trip-path-modal__places strong {
+  color: #0f172a;
+  line-height: 1.45;
 }
 
 .trip-path-modal__notice,
@@ -3031,6 +3336,44 @@
   background: #eff6ff;
   color: #1e3a8a;
   font-weight: 700;
+}
+
+.trip-replay-panel {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+
+.trip-replay-panel__top {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.trip-replay-panel__top div {
+  display: grid;
+  gap: 4px;
+}
+
+.trip-replay-panel__top span {
+  color: #64748b;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.trip-replay-panel__top strong {
+  color: #0f172a;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.trip-replay-panel__slider {
+  width: 100%;
+  accent-color: #2563eb;
 }
 
 .trip-path-modal__section {
@@ -3071,8 +3414,17 @@
   background: #fff7ed;
 }
 
+.trip-path-modal__violations--reports article {
+  border-color: #dbeafe;
+  background: #eff6ff;
+}
+
 .trip-path-modal__violations strong {
   color: #7f1d1d;
+}
+
+.trip-path-modal__violations--reports strong {
+  color: #1e3a8a;
 }
 
 .trip-path-modal__violations span,
@@ -3091,6 +3443,15 @@
   border-radius: 14px;
 }
 
+.trip-path-map__replay-marker {
+  width: 22px;
+  height: 22px;
+  border: 3px solid #ffffff;
+  border-radius: 50%;
+  background: #f97316;
+  box-shadow: 0 0 0 4px rgba(249, 115, 22, 0.24), 0 10px 22px rgba(15, 23, 42, 0.3);
+}
+
 @media (max-width: 1280px) {
   .overview-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3106,6 +3467,14 @@
 
   .home-summary-grid {
     grid-template-columns: 1fr;
+  }
+
+  .analytics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .analytics-card--wide {
+    grid-column: span 2;
   }
 
   .live-map-grid {
@@ -3194,6 +3563,14 @@
     grid-template-columns: 1fr;
   }
 
+  .analytics-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .analytics-card--wide {
+    grid-column: auto;
+  }
+
   .live-map-side {
     grid-template-columns: 1fr;
   }
@@ -3227,8 +3604,12 @@
 
   .driver-modal__contact-strip,
   .driver-modal__info-grid,
+  .driver-reliability-panel,
+  .driver-reliability-metrics,
   .driver-trip-card__grid,
   .trip-path-modal__meta,
+  .trip-path-modal__places,
+  .trip-replay-panel__top,
   .alert-detail-modal__grid,
   .emergency-modal__details {
     grid-template-columns: 1fr;

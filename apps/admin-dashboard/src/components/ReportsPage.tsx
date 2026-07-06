@@ -4,6 +4,7 @@ import {
   getCachedAdminReports,
   markAdminAppealViewed,
   updateAdminReportStatus,
+  markAdminReportViewed,
   type AdminAppealRecord,
   type AdminReportRecord,
   type AppealStatus,
@@ -20,6 +21,7 @@ type ReportsPageProps = {
   onSearchQueryChange?: (query: string) => void
   onSearchPlaceholderChange?: (placeholder: string) => void
   onDataChanged?: () => void
+  onReportCountChange?: (count: number) => void
   readOnly?: boolean
 }
 
@@ -102,6 +104,7 @@ export default function ReportsPage({
   onSearchQueryChange,
   onSearchPlaceholderChange,
   onDataChanged,
+  onReportCountChange,
   readOnly = false
 }: ReportsPageProps) {
   const [reports, setReports] = useState<AdminReportRecord[]>([])
@@ -133,6 +136,11 @@ export default function ReportsPage({
         : "Search appeal ID, driver, violation, route..."
     )
   }, [activeSection, onSearchPlaceholderChange])
+
+  useEffect(() => {
+    const submittedCount = reports.filter((report) => report.status === "submitted").length
+    onReportCountChange?.(submittedCount)
+  }, [onReportCountChange, reports])
 
   useEffect(() => {
     let active = true
@@ -391,9 +399,29 @@ export default function ReportsPage({
     setSelectedAppeal(null)
   }
 
-  const handleOpenReport = (report: AdminReportRecord) => {
+  const handleOpenReport = async (report: AdminReportRecord) => {
     setSelectedAppeal(null)
     setSelectedReport(report)
+
+    // Mark report as viewed if not already viewed
+    if (!readOnly && !report.viewedAt) {
+      try {
+        const viewState = await markAdminReportViewed(accessToken, report.reportId)
+        const nextReport = { ...report, viewedAt: viewState.viewedAt, viewedByAdminId: viewState.viewedByAdminId }
+
+        setReports((current) =>
+          current.map((item) =>
+            item.reportId === report.reportId ? nextReport : item
+          )
+        )
+
+        // Trigger data change to refresh unread count in parent
+        onDataChanged?.()
+      } catch (error) {
+        console.error("Failed to mark report as viewed:", error)
+        // Continue showing the report even if marking as viewed fails
+      }
+    }
   }
 
   const handleOpenAppeal = async (appeal: AdminAppealRecord) => {

@@ -2,6 +2,7 @@ import type { TripPointEvent } from "./operational-types"
 import { ensureDatabaseReady, query } from "./database"
 import { resolveDriverIdFromIdentifier } from "./driver-identifier-db"
 import { upsertDriverLocation } from "./driver-locations-db"
+import { runOperationalAnomalyDetection } from "./operational-anomalies-db"
 import { rebuildTripPathForTrip } from "./trip-paths-db"
 
 export type TripPointBatchResult = {
@@ -233,6 +234,10 @@ export const storeTripPointBatch = async (points: TripPointEvent[]) => {
 
   for (const tripId of affectedTripIds) {
     await rebuildTripPathForTrip(tripId)
+  }
+
+  if (affectedTripIds.size > 0) {
+    await runOperationalAnomalyDetection()
   }
 
   return results

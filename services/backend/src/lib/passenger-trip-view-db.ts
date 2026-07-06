@@ -187,11 +187,11 @@ const getTripContextByQrToken = async (qrToken: string) => {
 
 const getTripRow = async (driverId: number, preferredTripId?: number) => {
   const params: unknown[] = [driverId]
-  let tripFilter = `t.trip_status::text IN ('active', 'ongoing')`
+  let tripFilter = `t.trip_status = 'ongoing'`
 
   if (preferredTripId) {
     params.push(preferredTripId)
-    tripFilter = `t.trip_id = $${params.length}`
+    tripFilter = `t.trip_id = $${params.length} AND t.trip_status = 'ongoing'`
   }
 
   const result = await query<TripViewRow>(
@@ -241,8 +241,7 @@ const getTripRow = async (driverId: number, preferredTripId?: number) => {
       WHERE t.driver_id = $1
         AND ${tripFilter}
       ORDER BY
-        CASE WHEN t.trip_status::text IN ('active', 'ongoing') THEN 0 ELSE 1 END,
-        COALESCE(t.trip_end, t.trip_start) DESC,
+        t.trip_start DESC,
         t.trip_id DESC
       LIMIT 1
     `,

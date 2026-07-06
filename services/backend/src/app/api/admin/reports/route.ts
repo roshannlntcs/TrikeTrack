@@ -5,6 +5,9 @@ import {
   isReportStatus,
   listReportTypes,
   listReportsForAdmin,
+  markReportViewedForAdmin,
+  getUnreadReportCount,
+  getReportCount,
   updateReportStatusForAdmin
 } from "../../../../lib/reports-db"
 
@@ -24,7 +27,31 @@ export async function GET(request: Request) {
   const session = await requireAdminSession(request)
   if (session.response) return session.response
 
+  const url = new URL(request.url)
+  const getUnreadCount = url.searchParams.get("getUnreadCount") === "true"
+  const getCount = url.searchParams.get("getCount") === "true"
+
   try {
+    if (getUnreadCount) {
+      const unreadCount = await getUnreadReportCount(session.profile)
+      return jsonNoStore({
+        ok: true,
+        data: {
+          unreadCount
+        }
+      })
+    }
+
+    if (getCount) {
+      const reportCount = await getReportCount(session.profile)
+      return jsonNoStore({
+        ok: true,
+        data: {
+          reportCount
+        }
+      })
+    }
+
     const [reports, reportTypes, appeals] = await Promise.all([
       listReportsForAdmin(session.profile),
       listReportTypes(),
@@ -63,6 +90,28 @@ export async function PATCH(request: Request) {
   }
 
   const payload = body as Record<string, unknown>
+  
+  if (payload.action === "markReportViewed") {
+    const reportId = typeof payload.reportId === "number" ? payload.reportId : undefined
+
+    if (!reportId || reportId <= 0) {
+      return invalid("reportId must be a positive integer.")
+    }
+
+    try {
+      const reportViewState = await markReportViewedForAdmin(session.profile, reportId)
+      return NextResponse.json({
+        ok: true,
+        data: reportViewState
+      })
+    } catch (error) {
+      return invalid(
+        error instanceof Error ? error.message : "Unable to mark report as viewed.",
+        400
+      )
+    }
+  }
+
   if (payload.action === "markAppealViewed") {
     const appealId = typeof payload.appealId === "string" ? payload.appealId.trim() : ""
 

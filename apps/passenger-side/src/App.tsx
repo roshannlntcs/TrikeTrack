@@ -87,7 +87,6 @@ type EvidenceImage = {
 }
 
 type CategoryTone = "danger" | "info" | "warning" | "neutral"
-type FareCheckState = "ok" | "warning" | "neutral"
 type TripTrackingState = "idle" | "loading" | "ready" | "error"
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"])
@@ -97,9 +96,12 @@ const ACCEPTED_FILE_TYPES = new Set([
   "image/jpeg",
   "image/png",
   "image/webp",
-  "application/pdf"
+  "application/pdf",
+  "video/mp4",
+  "video/webm",
+  "video/quicktime"
 ])
-const MAX_FILE_SIZE = 5 * 1024 * 1024
+const MAX_FILE_SIZE = 50 * 1024 * 1024 // Increased to 50MB for videos
 const EMERGENCY_STORAGE_PREFIX = "triketrack_passenger_emergency_"
 
 const parseQrToken = () => {
@@ -140,13 +142,6 @@ const normalizePublicBaseUrl = (value: string) => {
 
 const resolveReportingApiBase = () => {
   const queryOverride = parseApiBaseOverride()
-  if (queryOverride) {
-    const normalized = normalizePublicBaseUrl(queryOverride)
-    if (normalized) {
-      return { apiBaseUrl: normalized, error: null }
-    }
-  }
-
   const configuredValue = [
     import.meta.env.VITE_PUBLIC_BACKEND_BASE_URL,
     import.meta.env.VITE_PUBLIC_API_BASE_URL,
@@ -154,14 +149,33 @@ const resolveReportingApiBase = () => {
     import.meta.env.VITE_BACKEND_BASE_URL
   ].find(isNonEmptyString)
 
-  if (configuredValue) {
-    const normalized = normalizePublicBaseUrl(configuredValue)
-    if (normalized) {
-      return { apiBaseUrl: normalized, error: null }
-    }
+  const configuredApiBaseUrl = configuredValue
+    ? normalizePublicBaseUrl(configuredValue)
+    : null
 
+  if (queryOverride) {
+    const normalizedOverride = normalizePublicBaseUrl(queryOverride)
+    if (normalizedOverride) {
+      return {
+        apiBaseUrl: normalizedOverride,
+        configuredApiBaseUrl,
+        error: null
+      }
+    }
+  }
+
+  if (configuredApiBaseUrl) {
+    return {
+      apiBaseUrl: configuredApiBaseUrl,
+      configuredApiBaseUrl,
+      error: null
+    }
+  }
+
+  if (configuredValue) {
     return {
       apiBaseUrl: null,
+      configuredApiBaseUrl: null,
       error:
         "Passenger reporting is not configured correctly. Ask the admin to set VITE_PUBLIC_BACKEND_BASE_URL to a public backend URL."
     }
@@ -269,12 +283,7 @@ const formatCurrency = (amount?: number, currency = "PHP") => {
     return "Unavailable"
   }
 
-  return new Intl.NumberFormat("en-PH", {
-    style: "currency",
-    currency,
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-  }).format(amount)
+  return `${currency} ${amount.toFixed(2)}`
 }
 
 const formatDuration = (totalSeconds: number) => {
@@ -318,47 +327,20 @@ const parseFareValue = (value: string) => {
   return parsed
 }
 
-const getFareCheckResult = (
-  fare: PassengerReportContext["fare"],
-  chargedFare: string
-): {
-  state: FareCheckState
-  title: string
-  detail: string
-} => {
-  const enteredFare = parseFareValue(chargedFare)
-  if (enteredFare === null) {
-    return {
-      state: "neutral",
-      title: "Enter the fare you were asked to pay",
-      detail: "We will compare it against the encoded trip fare when available."
-    }
-  }
+const isFreshLocation = (recordedAt?: string) =>
+  recordedAt !== undefined &&
+  Date.now() - new Date(recordedAt).getTime() <= 5 * 60 * 1000
 
-  if (!fare?.amount || fare.source === "unavailable") {
-    return {
-      state: "neutral",
-      title: "No encoded fare available yet",
-      detail: "This route has no backend fare reference yet, so the amount cannot be validated automatically."
-    }
-  }
-
-  const difference = Number((enteredFare - fare.amount).toFixed(2))
-  const referenceLabel = fare.source === "route" ? "route default fare" : "encoded trip fare"
-  if (difference <= 0) {
-    return {
-      state: "ok",
-      title: "Fare looks within the backend fare reference",
-      detail: `Entered fare ${formatCurrency(enteredFare, fare.currency)} versus ${referenceLabel} ${formatCurrency(fare.amount, fare.currency)}.`
-    }
-  }
-
-  return {
-    state: "warning",
-    title: "Possible fare overpricing",
-    detail: `Entered fare ${formatCurrency(enteredFare, fare.currency)} is ${formatCurrency(difference, fare.currency)} above the ${referenceLabel}.`
-  }
-}
+const hasActiveLiveTrip = (
+  trip?: PassengerTripView["trip"] | null
+) =>
+  Boolean(
+    trip &&
+      trip.tripStatus === "ongoing" &&
+      trip.trackingStatus === "live" &&
+      trip.location?.isOnline === true &&
+      isFreshLocation(trip.location.recordedAt)
+  )
 
 const getCategoryMeta = (
   code: string
@@ -593,6 +575,8 @@ const handleBack = () => {
 export default function App() {
   const qrToken = useMemo(parseQrToken, [])
   const reportingApi = useMemo(resolveReportingApiBase, [])
+  const [effectiveReportingApiBaseUrl, setEffectiveReportingApiBaseUrl] = useState<string | null>(null)
+  const apiBaseUrl = effectiveReportingApiBaseUrl ?? reportingApi.apiBaseUrl
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [data, setData] = useState<ReportingPayload | null>(null)
   const [loading, setLoading] = useState(true)
@@ -617,7 +601,6 @@ export default function App() {
   const [emergencyResponseOpen, setEmergencyResponseOpen] = useState(false)
   const [tripViewOpen, setTripViewOpen] = useState(false)
   const [tripTrackingState, setTripTrackingState] = useState<TripTrackingState>("idle")
-  const [tripTrackingError, setTripTrackingError] = useState<string | null>(null)
   const [tripView, setTripView] = useState<PassengerTripView | null>(null)
 
   useEffect(() => {
@@ -631,7 +614,7 @@ export default function App() {
       }
     }
 
-    if (reportingApi.error || reportingApi.apiBaseUrl === null) {
+    if (reportingApi.error || apiBaseUrl === null) {
       setPageError(
         reportingApi.error ??
           "Passenger reporting is not configured right now. Please try again later."
@@ -644,8 +627,9 @@ export default function App() {
 
     const load = async () => {
       setLoading(true)
-      try {
-        const response = await fetchWithTimeout(buildReportingUrl(reportingApi.apiBaseUrl, qrToken), {
+
+      const attemptLoad = async (apiBaseUrl: string) => {
+        const response = await fetchWithTimeout(buildReportingUrl(apiBaseUrl, qrToken), {
           cache: "no-store",
           timeout: 10000
         })
@@ -660,10 +644,36 @@ export default function App() {
         }
 
         if (!active) return
+        
+        // Check if driver status is inactive
+        if (payload.data.context?.driverStatus === "inactive") {
+          setPageError("This driver is currently inactive and not accepting reports.")
+          return
+        }
+        
         setData(payload.data)
         setReportTypeCode((current) => current || payload.data?.reportTypes[0]?.code || "")
         setPageError(null)
+        if (active) {
+          setEffectiveReportingApiBaseUrl(apiBaseUrl)
+        }
+      }
+
+      try {
+        await attemptLoad(apiBaseUrl)
       } catch (loadError) {
+        if (
+          reportingApi.configuredApiBaseUrl &&
+          reportingApi.configuredApiBaseUrl !== apiBaseUrl
+        ) {
+          try {
+            await attemptLoad(reportingApi.configuredApiBaseUrl)
+            return
+          } catch {
+            // Fall through to original error.
+          }
+        }
+
         if (!active) return
         setPageError(
           loadError instanceof Error ? loadError.message : "Unable to load report page."
@@ -680,12 +690,12 @@ export default function App() {
     return () => {
       active = false
     }
-  }, [qrToken, reportingApi.apiBaseUrl, reportingApi.error])
+  }, [qrToken, apiBaseUrl, reportingApi.error])
 
   useEffect(() => {
     let active = true
 
-    if (!qrToken || reportingApi.apiBaseUrl === null || !data) {
+    if (!qrToken || apiBaseUrl === null || !data) {
       return () => {
         active = false
       }
@@ -694,7 +704,7 @@ export default function App() {
     const intervalId = window.setInterval(() => {
       void (async () => {
         try {
-          const response = await fetchWithTimeout(buildReportingUrl(reportingApi.apiBaseUrl, qrToken), {
+          const response = await fetchWithTimeout(buildReportingUrl(apiBaseUrl, qrToken), {
             cache: "no-store",
             timeout: 10000
           })
@@ -705,6 +715,12 @@ export default function App() {
           }
 
           if (!response.ok || !payload.data || !active) {
+            return
+          }
+
+          // Check if driver status is inactive
+          if (payload.data.context?.driverStatus === "inactive") {
+            setPageError("This driver is currently inactive and not accepting reports.")
             return
           }
 
@@ -720,12 +736,12 @@ export default function App() {
       active = false
       window.clearInterval(intervalId)
     }
-  }, [data, qrToken, reportingApi.apiBaseUrl])
+  }, [data, qrToken, apiBaseUrl])
 
   useEffect(() => {
     let active = true
 
-    if (!qrToken || reportingApi.apiBaseUrl === null) {
+    if (!qrToken || apiBaseUrl === null) {
       return () => {
         active = false
       }
@@ -740,7 +756,7 @@ export default function App() {
       }
     }
 
-    void getPassengerEmergency(reportingApi.apiBaseUrl, storedTrackingKey)
+    void getPassengerEmergency(apiBaseUrl, storedTrackingKey)
       .then((alert) => {
         if (!active) return
         if (alert.status === "resolved") {
@@ -756,15 +772,15 @@ export default function App() {
     return () => {
       active = false
     }
-  }, [qrToken, reportingApi.apiBaseUrl])
+  }, [qrToken, apiBaseUrl])
 
   useEffect(() => {
-    if (!qrToken || !emergencyAlert || reportingApi.apiBaseUrl === null) {
+    if (!qrToken || !emergencyAlert || apiBaseUrl === null) {
       return
     }
 
     const closeStream = connectPassengerEmergencyStream(
-      reportingApi.apiBaseUrl,
+      apiBaseUrl,
       emergencyAlert.passengerTrackingKey,
       {
         onSnapshot: (alert) => {
@@ -792,7 +808,7 @@ export default function App() {
     return () => {
       closeStream()
     }
-  }, [qrToken, emergencyAlert?.passengerTrackingKey, reportingApi.apiBaseUrl])
+  }, [qrToken, emergencyAlert?.passengerTrackingKey, apiBaseUrl])
 
   useEffect(() => {
     if (!qrToken) return
@@ -809,63 +825,76 @@ export default function App() {
   }, [emergencyAlert, qrToken])
 
   useEffect(() => {
-    if (!tripViewOpen || !qrToken || reportingApi.apiBaseUrl === null) {
+    if (!tripViewOpen || !qrToken || apiBaseUrl === null) {
       return
     }
 
     let active = true
     setTripTrackingState("loading")
-    setTripTrackingError(null)
 
-    void getPassengerTripView(reportingApi.apiBaseUrl, qrToken)
+    void getPassengerTripView(apiBaseUrl, qrToken)
       .then((view) => {
         if (!active) return
+        if (!hasActiveLiveTrip(view.trip)) {
+          setTripViewOpen(false)
+          setTripView(null)
+          setTripTrackingState("idle")
+          return
+        }
         setTripView(view)
         setTripTrackingState("ready")
       })
       .catch((error) => {
         if (!active) return
-        setTripTrackingError(
-          error instanceof Error ? error.message : "Unable to load the active trip."
-        )
+        console.error("Unable to load the active trip.", error)
+        setTripViewOpen(false)
+        setTripView(null)
         setTripTrackingState("error")
       })
 
     return () => {
       active = false
     }
-  }, [qrToken, reportingApi.apiBaseUrl, tripViewOpen])
+  }, [qrToken, apiBaseUrl, tripViewOpen])
 
   useEffect(() => {
-    if (!tripViewOpen || !qrToken || reportingApi.apiBaseUrl === null || !tripView?.trip?.tripId) {
+    if (!tripViewOpen || !qrToken || apiBaseUrl === null || !tripView?.trip?.tripId) {
       return
     }
 
     const closeStream = connectPassengerTripStream(
-      reportingApi.apiBaseUrl,
+      apiBaseUrl,
       qrToken,
       tripView.trip.tripId,
       {
         onSnapshot: (view) => {
+          if (!hasActiveLiveTrip(view.trip)) {
+            setTripViewOpen(false)
+            setTripView(null)
+            setTripTrackingState("idle")
+            return
+          }
           setTripView(view)
           setTripTrackingState("ready")
-          setTripTrackingError(null)
         },
         onTrip: (view) => {
+          if (!hasActiveLiveTrip(view.trip)) {
+            setTripViewOpen(false)
+            setTripView(null)
+            setTripTrackingState("idle")
+            return
+          }
           setTripView(view)
           setTripTrackingState("ready")
-          setTripTrackingError(null)
         },
-        onError: () => {
-          setTripTrackingError("Live trip updates are reconnecting.")
-        }
+        onError: () => {}
       }
     )
 
     return () => {
       closeStream()
     }
-  }, [qrToken, reportingApi.apiBaseUrl, tripView?.trip?.tripId, tripViewOpen])
+  }, [qrToken, apiBaseUrl, tripView?.trip?.tripId, tripViewOpen])
 
   const parsedFareCharged = parseFareValue(fareCharged)
   const isFareReport = reportTypeCode === "fare_overpricing"
@@ -900,13 +929,13 @@ export default function App() {
     }
 
     if (!ACCEPTED_FILE_TYPES.has(file.type)) {
-      setFormError("Only JPG, PNG, WEBP, or PDF files are supported.")
+      setFormError("Only JPG, PNG, WEBP, PDF, MP4, WebM, or MOV files are supported.")
       event.target.value = ""
       return
     }
 
     if (file.size > MAX_FILE_SIZE) {
-      setFormError("Evidence must be 5MB or smaller.")
+      setFormError("Evidence must be 50MB or smaller.")
       event.target.value = ""
       return
     }
@@ -971,7 +1000,7 @@ export default function App() {
         created_at: new Date().toISOString()
       }
 
-      const response = await fetch(buildReportingUrl(reportingApi.apiBaseUrl ?? ""), {
+      const response = await fetch(buildReportingUrl(apiBaseUrl ?? ""), {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -1037,12 +1066,12 @@ export default function App() {
 
   const submitInvalidQrReport = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!qrToken || reportingApi.apiBaseUrl === null || !description.trim() || submitting) return
+    if (!qrToken || apiBaseUrl === null || !description.trim() || submitting) return
 
     setSubmitting(true)
     setFormError(null)
     try {
-      const response = await fetch(buildReportingUrl(reportingApi.apiBaseUrl), {
+      const response = await fetch(buildReportingUrl(apiBaseUrl), {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -1107,7 +1136,7 @@ export default function App() {
   }
 
   const submitEmergencyAlert = async () => {
-    if (!qrToken || reportingApi.apiBaseUrl === null) return
+    if (!qrToken || apiBaseUrl === null) return
     if (!emergencyLocation) {
       setFormError("Passenger location is required to send an urgent assistance request.")
       return
@@ -1118,7 +1147,7 @@ export default function App() {
 
     try {
       const created = await createPassengerEmergency(
-        reportingApi.apiBaseUrl,
+        apiBaseUrl,
         qrToken,
         emergencyLocation
       )
@@ -1135,11 +1164,12 @@ export default function App() {
   const openTripView = () => {
     if (!activeLiveTripAvailable) return
     setTripViewOpen(true)
-    setTripTrackingError(null)
   }
 
   const closeTripView = () => {
     setTripViewOpen(false)
+    setTripView(null)
+    setTripTrackingState("idle")
   }
 
   if (loading) {
@@ -1170,7 +1200,7 @@ export default function App() {
             </p>
           </section>
 
-          {!submission && qrToken && reportingApi.apiBaseUrl !== null ? (
+          {!submission && qrToken && apiBaseUrl !== null ? (
             <form className="report-form" onSubmit={submitInvalidQrReport}>
               <section className="panel">
                 <p className="kicker">Suspicious QR Report</p>
@@ -1261,10 +1291,7 @@ export default function App() {
   const driverLocationLabel = [context.todaName, context.barangayName]
     .filter(Boolean)
     .join(" / ")
-  const fareCheckResult = getFareCheckResult(context.fare, fareCharged)
-  const isDriverLocationFresh =
-    context.latestDriverLocation?.recordedAt !== undefined &&
-    Date.now() - new Date(context.latestDriverLocation.recordedAt).getTime() <= 5 * 60 * 1000
+  const isDriverLocationFresh = isFreshLocation(context.latestDriverLocation?.recordedAt)
   const tripStatusLabel =
     context.tripStatus === "ongoing" ? "Active trip ongoing" : "No active trip"
   const updatedLabel = formatRelativeTime(
@@ -1289,10 +1316,8 @@ export default function App() {
         heading: tripViewTrip.location.heading
       }
     : null
-  const tripViewHasLocation = Boolean(tripViewTrip?.location)
-  const tripViewIsOnline =
-    tripViewTrip?.location?.isOnline === true && tripViewTrip?.trackingStatus === "live"
-  const showTripDetails = tripTrackingState === "ready" && tripViewTrip && tripViewIsOnline
+  const showTripDetails = tripTrackingState === "ready" && hasActiveLiveTrip(tripViewTrip)
+  const tripScreenPoint = showTripDetails ? tripViewCurrentPoint : latestDriverPoint
 
   return (
     <main className="page">
@@ -1332,6 +1357,7 @@ export default function App() {
         ) : (
           <form className="form-stack" onSubmit={handleSubmitRequest}>
             <section className="panel profile-panel profile-panel--compact">
+              <p className="kicker">Driver Information</p>
               <div className="driver-identity">
                 {context.driverAvatarUrl ? (
                   <img
@@ -1404,6 +1430,23 @@ export default function App() {
               ) : null}
             </section>
 
+            <section className="panel fare-info-panel">
+              <p className="kicker">Fare Information</p>
+              <div className="fare-info-grid">
+                <div className="fare-info-item">
+                  <span className="fare-info-label">Full tricycle fare:</span>
+                  <strong className="fare-info-value">PHP 10.00 per passenger</strong>
+                </div>
+                <div className="fare-info-item">
+                  <span className="fare-info-label">Solo passenger fare:</span>
+                  <strong className="fare-info-value">PHP 15.00</strong>
+                </div>
+              </div>
+              <p className="fare-info-note">
+                These are the standard fares for tricycle rides. If you believe you were overcharged, select "Fare Overpricing" as the report reason.
+              </p>
+            </section>
+
             <section className="panel">
               <p className="kicker">Why are you reporting this?</p>
               <div className="category-list" role="radiogroup" aria-label="Report category">
@@ -1445,24 +1488,14 @@ export default function App() {
                   <input
                     value={fareCharged}
                     onChange={(event) => setFareCharged(event.target.value)}
-                    placeholder="â‚±0.00"
+                    placeholder="PHP 0.00"
                     inputMode="decimal"
                     disabled={submitting}
                   />
                 </label>
-                <div className="fare-result">
-                  <span>Expected fare</span>
-                  <strong>
-                    {typeof context.fare?.amount === "number"
-                      ? formatCurrency(context.fare.amount, context.fare.currency)
-                      : "Expected fare is not available yet. We will compare this with the trip fare record once available."
-                    }
-                  </strong>
-                </div>
-                <div className={`fare-result fare-result--${fareCheckResult.state}`}>
-                  <strong>{fareCheckResult.title}</strong>
-                  <span>{fareCheckResult.detail}</span>
-                </div>
+                <p className="fare-helper">
+                  Enter the fare you were asked to pay. Admin will review this with your report.
+                </p>
               </section>
             )}
 
@@ -1505,7 +1538,7 @@ export default function App() {
                   ref={fileInputRef}
                   className="hidden-input"
                   type="file"
-                  accept="image/jpeg,image/png,image/webp,application/pdf"
+                  accept="image/jpeg,image/png,image/webp,application/pdf,video/mp4,video/webm,video/quicktime"
                   onChange={handleEvidenceChange}
                 />
                 <button
@@ -1516,8 +1549,8 @@ export default function App() {
                   <div className="upload-box__icon">
                     <UploadIcon />
                   </div>
-                  <strong>Upload photo, screenshot, or document</strong>
-                  <span>JPG, PNG, WEBP, or PDF up to 5MB</span>
+                  <strong>Upload photo, video, screenshot, or document</strong>
+                  <span>JPG, PNG, WEBP, PDF, MP4, WebM, or MOV up to 50MB</span>
                 </button>
 
                 {evidenceImage && (
@@ -1526,6 +1559,13 @@ export default function App() {
                       <div className="upload-preview__document" aria-hidden="true">
                         PDF
                       </div>
+                    ) : evidenceImage.mimeType.startsWith("video/") ? (
+                      <video
+                        src={evidenceImage.dataUrl}
+                        controls
+                        style={{ maxWidth: "100%", maxHeight: "200px" }}
+                        aria-label="Selected video evidence"
+                      />
                     ) : (
                       <img src={evidenceImage.dataUrl} alt="Selected proof" />
                     )}
@@ -1594,7 +1634,7 @@ export default function App() {
         >
           <div className="trip-screen__map">
             <TriketrackMap
-              currentLocation={tripViewCurrentPoint}
+              currentLocation={tripScreenPoint}
               breadcrumbPoints={[]}
               routeCoordinates={[]}
               mapStyle="street"
@@ -1614,62 +1654,38 @@ export default function App() {
             <CloseIcon />
           </button>
 
-          {tripTrackingState === "loading" && (
-            <div className="trip-screen__top">
-              <section className="trip-screen__inline-state">
-                <strong>Loading live trip...</strong>
-                <span>Fetching the driver's live trip data.</span>
-              </section>
-            </div>
-          )}
-
-          {tripTrackingState === "error" && (
-            <div className="trip-screen__top">
-              <section className="trip-screen__inline-state trip-screen__inline-state--error">
-                <strong>Unable to load live tracking</strong>
-                <span>{tripTrackingError ?? "Please try again in a moment."}</span>
-              </section>
-            </div>
-          )}
-
-          {tripTrackingState === "ready" && !showTripDetails && (
-            <div className="trip-screen__top">
-              <section className="trip-screen__inline-state">
-                <strong>Live trip is unavailable</strong>
-                <span>The driver does not have active live tracking right now.</span>
-              </section>
-            </div>
-          )}
-
-          {showTripDetails && (
+          {showTripDetails && tripView && tripViewTrip && (
             <div className="trip-screen__bottom">
               <section className="trip-screen__driver-card">
-                <div className="trip-screen__driver-header">
-                  <div className="trip-screen__driver-identity">
-                    {context.driverAvatarUrl ? (
-                      <img
-                        className="driver-avatar"
-                        src={context.driverAvatarUrl}
-                        alt={tripView.driverName}
-                      />
-                    ) : (
-                      <div className="driver-avatar driver-avatar--fallback" aria-hidden="true">
-                        {tripView.driverName
-                          .split(" ")
-                          .filter(Boolean)
-                          .slice(0, 2)
-                          .map((part) => part[0]?.toUpperCase() ?? "")
-                          .join("")}
-                      </div>
-                    )}
-                    <div className="trip-screen__driver-copy">
-                      <strong>{tripView.driverName}</strong>
-                      <span>{`Plate ${tripViewTrip.plateOrBodyNumber} • ${context.todaName}`}</span>
+                <div className="trip-screen__driver-identity">
+                  {context.driverAvatarUrl ? (
+                    <img
+                      className="driver-avatar"
+                      src={context.driverAvatarUrl}
+                      alt={tripView.driverName}
+                    />
+                  ) : (
+                    <div className="driver-avatar driver-avatar--fallback" aria-hidden="true">
+                      {tripView.driverName
+                        .split(" ")
+                        .filter(Boolean)
+                        .slice(0, 2)
+                        .map((part) => part[0]?.toUpperCase() ?? "")
+                        .join("")}
                     </div>
+                  )}
+                  <div className="trip-screen__driver-copy">
+                    <strong>{tripView.driverName}</strong>
+                    <span>{tripView.driverCode}</span>
+                    <span>{tripViewTrip.plateOrBodyNumber} • {driverLocationLabel}</span>
                   </div>
                 </div>
 
                 <div className="trip-screen__trip-stats">
+                  <div>
+                    <span className="trip-screen__stat-label">Status</span>
+                    <strong>Active Trip</strong>
+                  </div>
                   <div>
                     <span className="trip-screen__stat-label">Fare</span>
                     <strong>{typeof tripViewTrip.fareAmount === "number"

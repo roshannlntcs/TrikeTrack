@@ -4,7 +4,7 @@ import * as turf from "@turf/turf"
 import type { GeoJSON as MapGeoJSON } from "../types/geojson"
 import type { DriverLocationEvent } from "../lib/shared-types"
 import type { AdminProfile } from "../lib/admin-profile"
-import { markAdminAppealViewed } from "../lib/reports"
+import { markAdminAppealViewed, fetchAdminReports, fetchReportCount, type AdminReportRecord } from "../lib/reports"
 import {
   fetchDashboardData,
   getCachedDashboardData,
@@ -17,6 +17,7 @@ import {
   type DashboardViolationRecord,
   type DriverPasswordResetRequestRecord,
   type TripPathRecord,
+  type TripPathSavedLocationRecord,
   fetchTripPath,
   markDashboardNotificationsRead,
   updateViolationAlertStatus,
@@ -223,6 +224,43 @@ const ALERT_REASON_PRIORITY: Record<string, number> = {
   OUTSIDE_ROUTE_CORRIDOR: 60
 }
 
+type DriverReliability = {
+  score: number
+  level: "Low Risk" | "Medium Risk" | "High Risk"
+  className: string
+  tripCount: number
+  completedTrips: number
+  issueCount: number
+  phaseFiveIssueCount: number
+  topIssues: Array<{ label: string; count: number }>
+}
+
+const PHASE_FIVE_LABEL_HINTS = [
+  "gps updates paused",
+  "long stop",
+  "trip running too long",
+  "suspicious movement speed",
+  "repeated geofence boundary"
+]
+const DEDUPE_ANALYTIC_ISSUE_LABEL_HINTS = [
+  ...PHASE_FIVE_LABEL_HINTS,
+  "trip timeout",
+  "gps silence"
+]
+
+const getReliabilityLevel = (score: number): DriverReliability["level"] => {
+  if (score < 65) return "High Risk"
+  if (score < 85) return "Medium Risk"
+  return "Low Risk"
+}
+
+const getReliabilityClassName = (level: DriverReliability["level"]) =>
+  level === "High Risk"
+    ? "reliability-pill reliability-pill--high"
+    : level === "Medium Risk"
+      ? "reliability-pill reliability-pill--medium"
+      : "reliability-pill reliability-pill--low"
+
 const FRESH_VIOLATION_WINDOW_MS = 30 * 60 * 1000
 const VIOLATOR_DISMISSALS_STORAGE_KEY_PREFIX = "triketrack-admin-violator-dismissals"
 const LIVE_VIOLATORS_STORAGE_KEY_PREFIX = "triketrack-admin-live-violators"
@@ -392,10 +430,12 @@ const getTripPathCoordinates = (pathGeojson: unknown): Array<[number, number]> =
 
 function TripPathMap({
   tripPath,
-  violations = []
+  violations = [],
+  activeLocation
 }: {
   tripPath: TripPathRecord
   violations?: DashboardViolationRecord[]
+  activeLocation?: TripPathSavedLocationRecord
 }) {
   const mapRootRef = useRef<HTMLDivElement | null>(null)
 
@@ -473,6 +513,9 @@ function TripPathMap({
       for (const violation of violationCoordinates) {
         bounds.extend([violation.longitude, violation.latitude])
       }
+      if (activeLocation) {
+        bounds.extend([activeLocation.longitude, activeLocation.latitude])
+      }
       map.fitBounds(bounds, {
         padding: 54,
         maxZoom: 16,
@@ -494,6 +537,20 @@ function TripPathMap({
           .addTo(map)
       }
 
+      if (activeLocation) {
+        const markerEl = document.createElement("div")
+        markerEl.className = "trip-path-map__replay-marker"
+        markerEl.setAttribute("aria-label", "Selected saved location")
+        new maplibregl.Marker({ element: markerEl })
+          .setLngLat([activeLocation.longitude, activeLocation.latitude])
+          .setPopup(
+            new maplibregl.Popup({ offset: 12 }).setText(
+              `Saved location | ${formatDateTime(activeLocation.recordedAt)}`
+            )
+          )
+          .addTo(map)
+      }
+
       for (const violation of violationCoordinates) {
         const markerEl = createViolationMarkerElement()
         markerEl.setAttribute("aria-label", violation.violationTypeLabel)
@@ -511,7 +568,7 @@ function TripPathMap({
     return () => {
       map.remove()
     }
-  }, [tripPath, violations])
+  }, [tripPath, violations, activeLocation])
 
   return <div className="trip-path-map" ref={mapRootRef} />
 }
@@ -765,6 +822,7 @@ type AlertListItem = {
   alertSource?: DashboardViolationRecord["alertSource"]
   driverId: string
   driverName?: string
+  tripId?: number
   todaName?: string
   barangayName?: string
   plateNo?: string
@@ -947,6 +1005,7 @@ const createStoredAlertListItem = (alert: DashboardViolationRecord): AlertListIt
   alertSource: alert.alertSource,
   driverId: String(alert.driverId ?? "N/A"),
   driverName: alert.driverName ?? alert.driverCode,
+  tripId: alert.tripId,
   todaName: alert.todaName,
   barangayName: alert.barangayName,
   plateNo: alert.plateNo,
@@ -972,6 +1031,7 @@ const createStoredEmergencyAlertListItem = (
   emergencyId: alert.emergencyId,
   driverId: String(alert.driverId),
   driverName: alert.driverName,
+  tripId: alert.tripId,
   todaName: alert.todaName,
   barangayName: alert.barangayName,
   plateNo: alert.plateNo,
@@ -1109,11 +1169,20 @@ export default function AdminShell({
   const [tripPathData, setTripPathData] = useState<TripPathRecord | null>(null)
   const [tripPathLoading, setTripPathLoading] = useState(false)
   const [tripPathError, setTripPathError] = useState<string | null>(null)
+  const [selectedTripReplayIndex, setSelectedTripReplayIndex] = useState(0)
   const [livePresenceHydrated, setLivePresenceHydrated] = useState(false)
   const [activeEmergencyModal, setActiveEmergencyModal] =
     useState<DashboardEmergencyRecord | null>(null)
   const [emergencyQueue, setEmergencyQueue] = useState<DashboardEmergencyRecord[]>([])
   const [emergencyActionBusyId, setEmergencyActionBusyId] = useState<number | null>(null)
+  const [activeReportModal, setActiveReportModal] = useState<AdminReportRecord | null>(null)
+  const [reportAlertQueue, setReportAlertQueue] = useState<AdminReportRecord[]>([])
+  const [reportCount, setReportCount] = useState<number>(0)
+  const reportCountFromPageRef = useRef(false)
+  const handleReportCountChange = (count: number) => {
+    reportCountFromPageRef.current = true
+    setReportCount(count)
+  }
   const [selectedAlertDetails, setSelectedAlertDetails] =
     useState<SelectedAlertDetails | null>(null)
   const [alertStatusBusy, setAlertStatusBusy] = useState(false)
@@ -1158,7 +1227,7 @@ export default function AdminShell({
   const trimmedSearchQuery = searchQuery.trim()
   const normalizedSearchQuery = trimmedSearchQuery.toLowerCase()
   const hasSearchQuery = normalizedSearchQuery.length > 0
-  const showLiveMapView = activePage === "home" || activePage === "live-map"
+  const showLiveMapView = activePage === "live-map"
   const showViolatorOverlay = activePage === "live-map"
   const violatorDismissalsStorageKey = `${VIOLATOR_DISMISSALS_STORAGE_KEY_PREFIX}:${adminProfile.adminId}`
   const liveViolatorsStorageKey = `${LIVE_VIOLATORS_STORAGE_KEY_PREFIX}:${adminProfile.adminId}`
@@ -1373,6 +1442,43 @@ export default function AdminShell({
     })
   }
 
+  const queueReportAlert = (alert: AdminReportRecord) => {
+    console.log("🎯 queueReportAlert called with:", alert.reportId, alert.driverName)
+    setActiveReportModal((current) => {
+      if (!current) {
+        console.log("📩 Setting activeReportModal (was empty):", alert.reportId)
+        return alert
+      }
+      if (current.reportId === alert.reportId) {
+        console.log("⏭️ Skipping duplicate report:", alert.reportId)
+        return current
+      }
+      console.log("📋 Adding report to queue:", alert.reportId)
+      setReportAlertQueue((queue) =>
+        queue.some((item) => item.reportId === alert.reportId) ? queue : [...queue, alert]
+      )
+      return current
+    })
+  }
+
+  const closeReportAlert = () => {
+    console.log("❌ Closing report alert")
+    setActiveReportModal(null)
+    setReportAlertQueue((queue) => {
+      const [next, ...rest] = queue
+      if (next) {
+        console.log("⏰ Showing next report in queue:", next.reportId)
+        window.setTimeout(() => setActiveReportModal(next), 0)
+      }
+      return rest
+    })
+  }
+
+  const openReportOnDashboard = () => {
+    setActivePage("reports")
+    closeReportAlert()
+  }
+
   const focusViolationOnMap = (alert: ViolationAlertDetails) => {
     if (!hasViolationCoordinates(alert)) return
     closeViolationAlert()
@@ -1576,6 +1682,64 @@ export default function AdminShell({
   useEffect(() => {
     dashboardDataRef.current = dashboardData
   }, [dashboardData])
+
+  // Refresh unread report count
+  const refreshReportCount = async () => {
+    try {
+      const count = await fetchReportCount(accessToken)
+      if (!reportCountFromPageRef.current) {
+        setReportCount(count)
+      }
+    } catch (error) {
+      console.error("Failed to refresh report count:", error)
+    }
+  }
+
+  useEffect(() => {
+    if (!accessToken) return
+
+    void refreshReportCount()
+  }, [accessToken])
+
+  useEffect(() => {
+    if (!accessToken || offlineViewerMode) return
+
+    const reportsChannel = supabase
+      .channel("admin-reports-count")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "reports"
+        },
+        () => {
+          void refreshReportCount()
+        }
+      )
+      .subscribe()
+
+    const tripsChannel = supabase
+      .channel("admin-trips-updates")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "trips"
+        },
+        () => {
+          // Refresh dashboard data to update trip logs
+          void refreshDashboardData()
+        }
+      )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(reportsChannel)
+      void supabase.removeChannel(tripsChannel)
+    }
+  }, [accessToken, offlineViewerMode])
 
   useEffect(() => {
     if (!dashboardData || activePasswordResetRequest) return
@@ -1792,11 +1956,7 @@ export default function AdminShell({
       const cachedPath = await getCachedTripPath(selectedTripForPath.tripId)
       if (!active || !cachedPath) return
       setTripPathData(cachedPath)
-      setTripPathError(
-        cachedPath.cacheMeta
-          ? `Offline-ready trip path loaded from ${formatDateTime(cachedPath.cacheMeta.savedAt)}.`
-          : null
-      )
+      setTripPathError(null)
       setTripPathLoading(false)
     })()
 
@@ -1810,14 +1970,10 @@ export default function AdminShell({
       .then((path) => {
         if (!active) return
         setTripPathData(path)
-        setTripPathError(
-          path?.cacheMeta
-            ? `Showing cached trip path from ${formatDateTime(path.cacheMeta.savedAt)}.`
-            : null
-        )
+        setTripPathError(null)
       })
-      .catch((error) => {
-        if (active) setTripPathError(String(error))
+      .catch(() => {
+        if (active) setTripPathError("Trip route preview could not be loaded.")
       })
       .finally(() => {
         if (active) setTripPathLoading(false)
@@ -1827,6 +1983,38 @@ export default function AdminShell({
       active = false
     }
   }, [accessToken, selectedTripForPath, offlineViewerMode])
+
+  const getDriverRecord = (driverIdentifier: string) => {
+    const normalizedIdentifier = driverIdentifier.trim().toUpperCase()
+    return dashboardDriversRef.current.find((driver) => {
+      const normalizedCode = driver.driverCode.trim().toUpperCase()
+      return (
+        normalizedCode === normalizedIdentifier ||
+        String(driver.driverId) === driverIdentifier
+      )
+    })
+  }
+
+  const getDriverLabel = (driverIdentifier: string) => {
+    const driver = getDriverRecord(driverIdentifier)
+    if (!driver) return driverIdentifier
+    return `${driver.firstName} ${driver.lastName}`
+  }
+
+  const getDriverInitials = (driverIdentifier: string) => {
+    const driver = getDriverRecord(driverIdentifier)
+    if (driver) {
+      return `${driver.firstName.charAt(0)}${driver.lastName.charAt(0)}`
+        .toUpperCase()
+        .slice(0, 2)
+    }
+    return driverIdentifier.replace(/[^A-Z0-9]/gi, "").slice(0, 2).toUpperCase() || "D"
+  }
+
+  const getDriverAvatarUrl = (driverIdentifier: string) => {
+    const avatarUrl = getDriverRecord(driverIdentifier)?.avatarUrl?.trim()
+    return avatarUrl ? avatarUrl : null
+  }
 
   useEffect(() => {
     if (!mapEl.current) return
@@ -1980,38 +2168,6 @@ export default function AdminShell({
         dashboardRefreshTimer = undefined
         void refreshDashboardData()
       }, 250)
-    }
-
-    const getDriverRecord = (driverIdentifier: string) => {
-      const normalizedIdentifier = driverIdentifier.trim().toUpperCase()
-      return dashboardDriversRef.current.find((driver) => {
-        const normalizedCode = driver.driverCode.trim().toUpperCase()
-        return (
-          normalizedCode === normalizedIdentifier ||
-          String(driver.driverId) === driverIdentifier
-        )
-      })
-    }
-
-    const getDriverLabel = (driverIdentifier: string) => {
-      const driver = getDriverRecord(driverIdentifier)
-      if (!driver) return driverIdentifier
-      return `${driver.firstName} ${driver.lastName}`
-    }
-
-    const getDriverInitials = (driverIdentifier: string) => {
-      const driver = getDriverRecord(driverIdentifier)
-      if (driver) {
-        return `${driver.firstName.charAt(0)}${driver.lastName.charAt(0)}`
-          .toUpperCase()
-          .slice(0, 2)
-      }
-      return driverIdentifier.replace(/[^A-Z0-9]/gi, "").slice(0, 2).toUpperCase() || "D"
-    }
-
-    const getDriverAvatarUrl = (driverIdentifier: string) => {
-      const avatarUrl = getDriverRecord(driverIdentifier)?.avatarUrl?.trim()
-      return avatarUrl ? avatarUrl : null
     }
 
     const createDriverPopupContent = (driverIdentifier: string) => {
@@ -2618,6 +2774,86 @@ export default function AdminShell({
             {
               event: "*",
               schema: "public",
+              table: "reports"
+            },
+            async (payload) => {
+              if (!active) return
+
+              if (payload.eventType === "INSERT") {
+                const insertedRow = payload.new as { report_id?: number | string } | undefined
+                const reportId = insertedRow?.report_id
+                console.log("🔔 Report INSERT event detected:", { reportId })
+                if (reportId !== undefined && reportId !== null && String(reportId).trim()) {
+                  try {
+                    console.log("📥 Fetching admin reports for report ID:", reportId)
+                    const reportsData = await fetchAdminReports(accessToken)
+                    console.log("📊 Fetched reports count:", reportsData.reports.length)
+                    const report = reportsData.reports.find(
+                      (item) => item.reportId === Number(reportId)
+                    )
+                    if (report) {
+                      console.log("✅ Report found, queueing alert:", report.reportId)
+                      queueReportAlert(report)
+                    } else {
+                      console.warn("⚠️ Report not found in fetched data. ReportId:", reportId, "Available IDs:", reportsData.reports.map(r => r.reportId))
+                      console.info("💡 This might be due to permissions. Admin might not have access to this driver's TODA/Barangay.")
+                      // Fallback: Create a minimal report object to display the alert
+                      const minimalReport: AdminReportRecord = {
+                        reportId: Number(reportId),
+                        scanId: 0,
+                        reportTypeId: 0,
+                        reportTypeCode: "unknown",
+                        reportTypeLabel: "Report",
+                        description: "New passenger report submitted",
+                        reportedAt: new Date().toISOString(),
+                        status: "submitted",
+                        driverId: 0,
+                        driverCode: "Unknown",
+                        driverName: "Unknown Driver",
+                        todaId: 0,
+                        todaName: "Unknown TODA",
+                        barangayId: 0,
+                        barangayName: "Unknown Barangay",
+                        qrId: 0
+                      }
+                      console.log("🔄 Showing minimal report alert (may be permission issue):", minimalReport.reportId)
+                      queueReportAlert(minimalReport)
+                    }
+                  } catch (error) {
+                    console.error("❌ Realtime passenger report fetch failed:", error)
+                    // Create a minimal report object even if fetch fails
+                    const minimalReport: AdminReportRecord = {
+                      reportId: Number(reportId),
+                      scanId: 0,
+                      reportTypeId: 0,
+                      reportTypeCode: "unknown",
+                      reportTypeLabel: "Report",
+                      description: "New passenger report submitted (unable to load full details)",
+                      reportedAt: new Date().toISOString(),
+                      status: "submitted",
+                      driverId: 0,
+                      driverCode: "Unknown",
+                      driverName: "Unknown Driver",
+                      todaId: 0,
+                      todaName: "Unknown TODA",
+                      barangayId: 0,
+                      barangayName: "Unknown Barangay",
+                      qrId: 0
+                    }
+                    console.log("🔄 Showing minimal report alert (fetch error):", minimalReport.reportId)
+                    queueReportAlert(minimalReport)
+                  }
+                }
+              }
+
+              scheduleDashboardRefresh()
+            }
+          )
+          .on(
+            "postgres_changes",
+            {
+              event: "*",
+              schema: "public",
               table: "violations"
             },
             (payload) => {
@@ -2960,6 +3196,25 @@ export default function AdminShell({
       .sort((a, b) => b.ts - a.ts)
   }, [dashboardData?.recentEmergencies, dashboardData?.recentViolations])
 
+  const analyticIssueRows = useMemo(() => {
+    const seen = new Set<string>()
+
+    return alertRows.filter((alert) => {
+      const normalizedReason = alert.reason.toLowerCase()
+      const shouldDedupe =
+        alert.source === "violation" &&
+        alert.tripId !== undefined &&
+        DEDUPE_ANALYTIC_ISSUE_LABEL_HINTS.some((hint) => normalizedReason.includes(hint))
+      const key = shouldDedupe
+        ? `${alert.source}:${alert.driverId}:${alert.tripId}:${normalizedReason}`
+        : alert.key
+
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }, [alertRows])
+
   const filteredAlerts = useMemo(() => {
     if (!hasSearchQuery) return alertRows
     return alertRows.filter((alert) => {
@@ -3007,6 +3262,9 @@ export default function AdminShell({
     return dashboardData?.recentTrips ?? []
   }, [dashboardData?.recentTrips])
 
+  const getTripIssueCount = (trip: DashboardTripRecord) =>
+    trip.issueCount ?? trip.violationCount + (trip.reportCount ?? 0)
+
   const activeTripIds = useMemo(() => {
     return new Set(
       (dashboardData?.operationalDrivers ?? [])
@@ -3026,6 +3284,199 @@ export default function AdminShell({
     }
     return "incomplete"
   }
+
+  const driverReliabilityById = useMemo(() => {
+    const map = new Map<number, DriverReliability>()
+
+    for (const driver of driverDirectoryRows) {
+      const driverTrips = tripRows.filter((trip) => trip.driverId === driver.driverId)
+      const driverAlerts = analyticIssueRows.filter((alert) => Number(alert.driverId) === driver.driverId)
+      const issueCounts = new Map<string, number>()
+      let issuePenalty = 0
+      let phaseFiveIssueCount = 0
+
+      for (const alert of driverAlerts) {
+        const label = alert.reason || "Issue"
+        const normalized = label.toLowerCase()
+        issueCounts.set(label, (issueCounts.get(label) ?? 0) + 1)
+        if (PHASE_FIVE_LABEL_HINTS.some((hint) => normalized.includes(hint))) {
+          phaseFiveIssueCount += 1
+        }
+        issuePenalty += normalized.includes("emergency")
+          ? 12
+          : normalized.includes("geofence") || normalized.includes("speed")
+            ? 8
+            : 5
+      }
+
+      const completedTrips = driverTrips.filter(
+        (trip) => getTripDisplayStatus(trip) === "completed"
+      ).length
+      const incompleteTrips = driverTrips.filter(
+        (trip) => getTripDisplayStatus(trip) === "incomplete"
+      ).length
+      const completionBonus =
+        driverTrips.length > 0 ? Math.round((completedTrips / driverTrips.length) * 8) : 0
+      const cappedIssuePenalty = Math.min(48, issuePenalty)
+      const incompletePenalty = Math.min(20, incompleteTrips * 3)
+      const score = Math.max(
+        35,
+        Math.min(
+          100,
+          92 +
+            completionBonus -
+            cappedIssuePenalty -
+            incompletePenalty
+        )
+      )
+      const level = getReliabilityLevel(score)
+
+      map.set(driver.driverId, {
+        score,
+        level,
+        className: getReliabilityClassName(level),
+        tripCount: driverTrips.length,
+        completedTrips,
+        issueCount: driverAlerts.length,
+        phaseFiveIssueCount,
+        topIssues: Array.from(issueCounts.entries())
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+          .slice(0, 3)
+          .map(([label, count]) => ({ label, count }))
+      })
+    }
+
+    return map
+  }, [analyticIssueRows, driverDirectoryRows, tripRows, activeTripIds])
+
+  const movementAnalytics = useMemo(() => {
+    const formatHour = (hour: number) =>
+      new Date(2026, 0, 1, hour).toLocaleTimeString([], {
+        hour: "numeric"
+      })
+    const formatAnalyticsRouteName = (value?: string) => {
+      const routeName = value?.trim()
+      if (!routeName) return undefined
+
+      const normalized = routeName.replace(/→/g, "->").replace(/\s+/g, " ").toLowerCase()
+      if (normalized === "test route -> live gps tracking" || normalized === "obrero -> route") {
+        return "Obrero Route"
+      }
+
+      return routeName
+    }
+    const todayKey = new Date().toLocaleDateString()
+    const todayTrips = tripRows.filter(
+      (trip) => new Date(trip.tripStart).toLocaleDateString() === todayKey
+    )
+    const analyticsTrips = todayTrips.length > 0 ? todayTrips : tripRows
+    const tripHourCounts = new Map<number, number>()
+    const issueHourCounts = new Map<number, number>()
+    const issueTypeCounts = new Map<string, number>()
+    const routeIssueCounts = new Map<string, number>()
+    const hotspotCounts = new Map<string, { label: string; count: number }>()
+    const dayIssueCounts = new Map<string, { label: string; count: number; ts: number }>()
+
+    for (const trip of analyticsTrips) {
+      const hour = new Date(trip.tripStart).getHours()
+      tripHourCounts.set(hour, (tripHourCounts.get(hour) ?? 0) + 1)
+    }
+
+    for (const alert of analyticIssueRows) {
+      const hour = new Date(alert.ts).getHours()
+      const day = new Date(alert.ts)
+      const dayKey = day.toLocaleDateString()
+      issueHourCounts.set(hour, (issueHourCounts.get(hour) ?? 0) + 1)
+      issueTypeCounts.set(alert.reason, (issueTypeCounts.get(alert.reason) ?? 0) + 1)
+      dayIssueCounts.set(dayKey, {
+        label: day.toLocaleDateString([], { month: "short", day: "numeric" }),
+        count: (dayIssueCounts.get(dayKey)?.count ?? 0) + 1,
+        ts: new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime()
+      })
+
+      const alertRouteName = formatAnalyticsRouteName(alert.routeName)
+      if (alertRouteName) {
+        routeIssueCounts.set(alertRouteName, (routeIssueCounts.get(alertRouteName) ?? 0) + 1)
+      }
+
+      const hotspotLabel =
+        [alert.barangayName, alert.todaName].filter(Boolean).join(" / ") ||
+        alert.routeName ||
+        "Unspecified area"
+      hotspotCounts.set(hotspotLabel, {
+        label: hotspotLabel,
+        count: (hotspotCounts.get(hotspotLabel)?.count ?? 0) + 1
+      })
+    }
+
+    const tripHourEntries = Array.from(tripHourCounts.entries())
+      .sort(([a], [b]) => a - b)
+      .map(([hour, count]) => ({
+        hour,
+        label: formatHour(hour),
+        count
+      }))
+    const maxTripHourCount = Math.max(1, ...tripHourEntries.map((item) => item.count))
+    const peakIssueHour = Array.from(issueHourCounts.entries()).sort(
+      (a, b) => b[1] - a[1] || a[0] - b[0]
+    )[0]
+    const completedTrips = analyticsTrips.filter(
+      (trip) => trip.durationMinutes !== undefined || trip.distanceKm !== undefined
+    )
+    const averageDuration =
+      completedTrips.reduce((total, trip) => total + (trip.durationMinutes ?? 0), 0) /
+      Math.max(1, completedTrips.filter((trip) => trip.durationMinutes !== undefined).length)
+    const averageDistance =
+      completedTrips.reduce((total, trip) => total + (trip.distanceKm ?? 0), 0) /
+      Math.max(1, completedTrips.filter((trip) => trip.distanceKm !== undefined).length)
+
+    return {
+      tripHourEntries,
+      maxTripHourCount,
+      issueTypes: Array.from(issueTypeCounts.entries())
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, 4)
+        .map(([label, count]) => ({ label, count })),
+      routeIssues: Array.from(routeIssueCounts.entries())
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, 4)
+        .map(([label, count]) => ({ label, count })),
+      hotspots: Array.from(hotspotCounts.values())
+        .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))
+        .slice(0, 3),
+      issueTrend: Array.from(dayIssueCounts.values())
+        .sort((a, b) => a.ts - b.ts)
+        .slice(-7),
+      driversNeedingReview: Array.from(driverReliabilityById.entries())
+        .map(([driverId, reliability]) => {
+          const driver = driverDirectoryRows.find((item) => item.driverId === driverId)
+          return driver
+            ? {
+                driverId,
+                label: `${driver.firstName} ${driver.lastName}`,
+                score: reliability.score,
+                level: reliability.level,
+                className: reliability.className
+              }
+            : null
+        })
+        .filter((item): item is {
+          driverId: number
+          label: string
+          score: number
+          level: DriverReliability["level"]
+          className: string
+        } => Boolean(item))
+        .filter((item) => item.level !== "Low Risk")
+        .sort((a, b) => a.score - b.score || a.label.localeCompare(b.label))
+        .slice(0, 4),
+      peakIssueTime: peakIssueHour ? formatHour(peakIssueHour[0]) : "-",
+      averageDuration: Number.isFinite(averageDuration) ? Math.round(averageDuration) : 0,
+      averageDistance: Number.isFinite(averageDistance) ? averageDistance : 0,
+      totalIssues: analyticIssueRows.length,
+      analyzedTrips: analyticsTrips.length
+    }
+  }, [analyticIssueRows, driverDirectoryRows, driverReliabilityById, tripRows])
 
   const selectedAlertTrip = useMemo(() => {
     if (!selectedAlertDetails) return undefined
@@ -3795,6 +4246,8 @@ export default function AdminShell({
         trip.fareAmount,
         trip.distanceKm,
         trip.violationCount,
+        trip.reportCount,
+        trip.issueCount,
         trip.hasPath ? "has path" : "no saved path"
       )
     })
@@ -3975,18 +4428,50 @@ export default function AdminShell({
   const selectedTripViolations = useMemo(() => {
     if (!selectedTripForPath) return []
     return (dashboardData?.recentViolations ?? []).filter(
-      (violation) => violation.tripId === selectedTripForPath.tripId
+      (violation) =>
+        violation.tripId === selectedTripForPath.tripId && violation.reportId === undefined
     )
   }, [dashboardData?.recentViolations, selectedTripForPath])
+  const selectedTripReports = selectedTripForPath?.relatedReports ?? []
+  const selectedTripIssueCount =
+    (selectedTripForPath?.issueCount ??
+      ((selectedTripForPath?.violationCount ?? 0) + (selectedTripForPath?.reportCount ?? 0))) ?? 0
 
   const selectedTripStartLocationLabel = tripPathLoading
-    ? "Loading location name..."
-    : getTripLocationName(tripPathData?.startLocationName, "Start location name unavailable")
+    ? "Loading place..."
+    : getTripLocationName(tripPathData?.startLocationName, "Start place unavailable")
   const selectedTripEndLocationLabel = tripPathLoading
-    ? "Loading location name..."
-    : getTripLocationName(tripPathData?.endLocationName, "End location name unavailable")
-  const shouldShowMatchedRouteNotice =
-    !tripPathLoading && Boolean(tripPathData) && !selectedTripForPath?.hasPath
+    ? "Loading place..."
+    : getTripLocationName(tripPathData?.endLocationName, "End place unavailable")
+  const selectedTripSavedLocations = useMemo(() => {
+    return (tripPathData?.savedLocations ?? []).filter(
+      (location) =>
+        Number.isFinite(location.latitude) &&
+        Number.isFinite(location.longitude) &&
+        !Number.isNaN(new Date(location.recordedAt).getTime())
+    )
+  }, [tripPathData?.savedLocations])
+  const selectedTripReplayLocation =
+    selectedTripSavedLocations.length > 0
+      ? selectedTripSavedLocations[
+          Math.min(selectedTripReplayIndex, selectedTripSavedLocations.length - 1)
+        ]
+      : undefined
+  const selectedTripReplayProgress =
+    selectedTripSavedLocations.length > 1
+      ? Math.round(
+          (Math.min(selectedTripReplayIndex, selectedTripSavedLocations.length - 1) /
+            (selectedTripSavedLocations.length - 1)) *
+            100
+        )
+      : 0
+  const selectedDriverReliability = selectedDriver
+    ? driverReliabilityById.get(selectedDriver.driverId)
+    : undefined
+
+  useEffect(() => {
+    setSelectedTripReplayIndex(0)
+  }, [selectedTripForPath?.tripId, tripPathData?.tripId])
 
   useEffect(() => {
     if (!selectedTripForPath) return
@@ -4041,7 +4526,17 @@ export default function AdminShell({
                 onClick={() => setActivePage(item.key)}
               >
                 <span className="sidebar-nav__item-icon">{renderNavIcon(item.key)}</span>
-                <span className="sidebar-nav__item-label">{item.label}</span>
+                <span className="sidebar-nav__item-label">
+                  {item.label}
+                  {item.key === "reports" && (
+                    <span
+                      className="sidebar-nav__item-badge"
+                      title={`${reportCount} submitted report${reportCount === 1 ? "" : "s"}`}
+                    >
+                      {reportCount}
+                    </span>
+                  )}
+                </span>
                 <span className="sidebar-nav__item-chevron" aria-hidden="true">
                   ›
                 </span>
@@ -4522,6 +5017,221 @@ export default function AdminShell({
                   </div>
                 </section>
               </section>
+
+              <section className="page-panel analytics-panel">
+                <div className="page-panel__header page-panel__header--compact">
+                  <div>
+                    <h3>Movement & Issue Analytics</h3>
+                    <p>Trips, issue patterns, and route activity from recent spatiotemporal data.</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="summary-link"
+                    onClick={() => setActivePage("trip-logs")}
+                  >
+                    View trips
+                  </button>
+                </div>
+
+                <div className="analytics-grid">
+                  <article className="analytics-card analytics-card--wide">
+                    <div className="analytics-card__top">
+                      <div>
+                        <span>Trips by Hour</span>
+                        <strong>{movementAnalytics.analyzedTrips}</strong>
+                      </div>
+                      <small>Recent trip starts</small>
+                    </div>
+                    {movementAnalytics.tripHourEntries.length === 0 ? (
+                      <div className="analytics-empty">No trip activity available yet.</div>
+                    ) : (
+                      <div className="analytics-bars" aria-label="Trips by hour">
+                        {movementAnalytics.tripHourEntries.map((item) => (
+                          <div className="analytics-bar" key={`trip-hour-${item.hour}`}>
+                            <div className="analytics-bar__track">
+                              <span
+                                style={{
+                                  height: `${Math.max(
+                                    12,
+                                    (item.count / movementAnalytics.maxTripHourCount) * 100
+                                  )}%`
+                                }}
+                              />
+                            </div>
+                            <strong>{item.count}</strong>
+                            <small>{item.label}</small>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </article>
+
+                  <article className="analytics-card">
+                    <div className="analytics-card__top">
+                      <div>
+                        <span>Issues by Type</span>
+                        <strong>{movementAnalytics.totalIssues}</strong>
+                      </div>
+                    </div>
+                    <div className="analytics-list">
+                      {movementAnalytics.issueTypes.length === 0 ? (
+                        <div className="analytics-empty">No issues recorded.</div>
+                      ) : (
+                        movementAnalytics.issueTypes.map((item) => (
+                          <div className="analytics-list__row" key={item.label}>
+                            <span>{item.label}</span>
+                            <strong>{item.count}</strong>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </article>
+
+                  <article className="analytics-card">
+                    <div className="analytics-card__top">
+                      <div>
+                        <span>
+                          {movementAnalytics.routeIssues.length === 1
+                            ? "Route With Issues"
+                            : "Top Routes with Issues"}
+                        </span>
+                        <strong>
+                          {movementAnalytics.routeIssues.length === 1
+                            ? movementAnalytics.routeIssues[0]?.count ?? 0
+                            : movementAnalytics.routeIssues.length}
+                        </strong>
+                      </div>
+                      {movementAnalytics.routeIssues.length === 1 ? <small>Issue count</small> : null}
+                    </div>
+                    <div className="analytics-list">
+                      {movementAnalytics.routeIssues.length === 0 ? (
+                        <div className="analytics-empty">No route issues recorded.</div>
+                      ) : (
+                        movementAnalytics.routeIssues.map((item) => (
+                          <div className="analytics-list__row" key={item.label}>
+                            <span>{item.label}</span>
+                            <strong>{item.count}</strong>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </article>
+
+                  <article className="analytics-card">
+                    <div className="analytics-card__top">
+                      <div>
+                        <span>Operations Snapshot</span>
+                        <strong>{movementAnalytics.peakIssueTime}</strong>
+                      </div>
+                      <small>Peak issue time</small>
+                    </div>
+                    <div className="analytics-metrics">
+                      <div>
+                        <span>Avg Duration</span>
+                        <strong>{movementAnalytics.averageDuration} min</strong>
+                      </div>
+                      <div>
+                        <span>Avg Distance</span>
+                        <strong>{movementAnalytics.averageDistance.toFixed(2)} km</strong>
+                      </div>
+                    </div>
+                  </article>
+
+                  <article className="analytics-card">
+                    <div className="analytics-card__top">
+                      <div>
+                        <span>
+                          {movementAnalytics.hotspots.length === 1
+                            ? "Primary Issue Area"
+                            : "Issue Hotspots"}
+                        </span>
+                        <strong>
+                          {movementAnalytics.hotspots.length === 1
+                            ? movementAnalytics.hotspots[0]?.count ?? 0
+                            : movementAnalytics.hotspots.length}
+                        </strong>
+                      </div>
+                      {movementAnalytics.hotspots.length === 1 ? <small>Issue count</small> : null}
+                    </div>
+                    <div className="analytics-list">
+                      {movementAnalytics.hotspots.length === 0 ? (
+                        <div className="analytics-empty">No hotspot activity yet.</div>
+                      ) : (
+                        movementAnalytics.hotspots.map((item) => (
+                          <div className="analytics-list__row" key={item.label}>
+                            <span>{item.label}</span>
+                            <strong>{item.count}</strong>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </article>
+
+                  <article className="analytics-card analytics-card--wide">
+                    <div className="analytics-card__top">
+                      <div>
+                        <span>Issue Trend</span>
+                        <strong>{movementAnalytics.issueTrend.reduce((total, item) => total + item.count, 0)}</strong>
+                      </div>
+                      <small>Recent days</small>
+                    </div>
+                    {movementAnalytics.issueTrend.length === 0 ? (
+                      <div className="analytics-empty">No issue trend available yet.</div>
+                    ) : (
+                      <div className="analytics-bars analytics-bars--compact" aria-label="Issue trend by day">
+                        {movementAnalytics.issueTrend.map((item) => {
+                          const maxTrendCount = Math.max(
+                            1,
+                            ...movementAnalytics.issueTrend.map((trend) => trend.count)
+                          )
+                          return (
+                            <div className="analytics-bar" key={`issue-trend-${item.label}`}>
+                              <div className="analytics-bar__track analytics-bar__track--issue">
+                                <span
+                                  style={{
+                                    height: `${Math.max(12, (item.count / maxTrendCount) * 100)}%`
+                                  }}
+                                />
+                              </div>
+                              <strong>{item.count}</strong>
+                              <small>{item.label}</small>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </article>
+
+                  <article className="analytics-card">
+                    <div className="analytics-card__top">
+                      <div>
+                        <span>Drivers Needing Review</span>
+                        <strong>{movementAnalytics.driversNeedingReview.length}</strong>
+                      </div>
+                    </div>
+                    <div className="analytics-list">
+                      {movementAnalytics.driversNeedingReview.length === 0 ? (
+                        <div className="analytics-empty">No drivers need review right now.</div>
+                      ) : (
+                        movementAnalytics.driversNeedingReview.map((driver) => (
+                          <button
+                            type="button"
+                            className="analytics-list__row analytics-list__row--button"
+                            key={driver.driverId}
+                            onClick={() => {
+                              setSelectedDriverId(driver.driverId)
+                              setActivePage("drivers")
+                            }}
+                          >
+                            <span>{driver.label}</span>
+                            <strong>{driver.score}%</strong>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  </article>
+                </div>
+              </section>
             </section>
           )}
 
@@ -4713,6 +5423,7 @@ export default function AdminShell({
                             <th>Barangay / TODA</th>
                             <th>Route / Point</th>
                             <th>Last Update</th>
+                            <th>Reliability</th>
                             <th>Password</th>
                             <th>Status</th>
                           </tr>
@@ -4793,6 +5504,20 @@ export default function AdminShell({
                                     : driver.operationalState?.lastUpdateAt
                                       ? formatDateTime(driver.operationalState.lastUpdateAt)
                                       : "No live point yet"}
+                                </td>
+                                <td>
+                                  {(() => {
+                                    const reliability = driverReliabilityById.get(driver.driverId)
+                                    return reliability ? (
+                                      <span className={reliability.className}>
+                                        {reliability.score}% {reliability.level}
+                                      </span>
+                                    ) : (
+                                      <span className="reliability-pill reliability-pill--low">
+                                        100% Low Risk
+                                      </span>
+                                    )
+                                  })()}
                                 </td>
                                 <td>
                                   <span className="drivers-table__pill">
@@ -4915,6 +5640,46 @@ export default function AdminShell({
                         <strong>{selectedDriverTripRows.length}</strong>
                       </div>
                     </div>
+                  </section>
+
+                  <section className="driver-modal__section">
+                    <div className="driver-modal__section-head">
+                      <h4>Reliability Review</h4>
+                    </div>
+                    <div className="driver-reliability-panel">
+                      <div className="driver-reliability-score">
+                        <span>Reliability Score</span>
+                        <strong>{selectedDriverReliability?.score ?? 100}%</strong>
+                        <small>{selectedDriverReliability?.level ?? "Low Risk"}</small>
+                      </div>
+                      <div className="driver-reliability-metrics">
+                        <div>
+                          <span>Recent Trips</span>
+                          <strong>{selectedDriverReliability?.tripCount ?? selectedDriverTripRows.length}</strong>
+                        </div>
+                        <div>
+                          <span>Completed</span>
+                          <strong>{selectedDriverReliability?.completedTrips ?? 0}</strong>
+                        </div>
+                        <div>
+                          <span>Issues</span>
+                          <strong>{selectedDriverReliability?.issueCount ?? 0}</strong>
+                        </div>
+                        <div>
+                          <span>Phase 5 Issues</span>
+                          <strong>{selectedDriverReliability?.phaseFiveIssueCount ?? 0}</strong>
+                        </div>
+                      </div>
+                    </div>
+                    {selectedDriverReliability && selectedDriverReliability.topIssues.length > 0 && (
+                      <div className="driver-reliability-issues">
+                        {selectedDriverReliability.topIssues.map((issue) => (
+                          <span key={issue.label}>
+                            {issue.label}: {issue.count}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </section>
 
                   <section className="driver-modal__section">
@@ -5116,8 +5881,8 @@ export default function AdminShell({
                                 <strong>{trip.fareAmount !== undefined ? `PHP ${trip.fareAmount.toFixed(2)}` : "-"}</strong>
                               </div>
                               <div>
-                                <span>Alerts</span>
-                                <strong>{trip.violationCount}</strong>
+                                <span>Issues</span>
+                                <strong>{getTripIssueCount(trip)}</strong>
                               </div>
                             </div>
                             <button
@@ -5126,7 +5891,7 @@ export default function AdminShell({
                               onClick={() => openTripPathModal(trip)}
                               disabled={!trip.hasPath}
                             >
-                              {trip.hasPath ? "View Trip Path" : "No saved path"}
+                              {trip.hasPath ? "View Trip Details" : "No route preview"}
                             </button>
                           </article>
                         ))}
@@ -5343,7 +6108,11 @@ export default function AdminShell({
               searchQuery={searchQuery}
               onSearchQueryChange={setSearchQuery}
               onSearchPlaceholderChange={setChildSearchPlaceholder}
-              onDataChanged={() => void refreshDashboardData()}
+              onDataChanged={async () => {
+                await refreshDashboardData()
+                await refreshReportCount()
+              }}
+              onReportCountChange={handleReportCountChange}
               readOnly={dashboardReadOnly}
             />
           )}
@@ -5389,14 +6158,14 @@ export default function AdminShell({
                           <th>Fare</th>
                           <th>Duration</th>
                           <th>Distance</th>
-                          <th>Path</th>
-                          <th>Alerts</th>
+                          <th>Issues</th>
                           <th>Status</th>
                         </tr>
                       </thead>
                       <tbody>
                         {filteredTripRows.map((trip) => {
                           const tripDisplayStatus = getTripDisplayStatus(trip)
+                          const issueCount = getTripIssueCount(trip)
                           return (
                           <tr
                             key={trip.tripId}
@@ -5427,12 +6196,11 @@ export default function AdminShell({
                                   event.stopPropagation()
                                   openTripPathModal(trip)
                                 }}
-                                disabled={!trip.hasPath}
+                                aria-label={`View ${issueCount} issue${issueCount === 1 ? "" : "s"} for trip ${trip.tripId}`}
                               >
-                                {trip.hasPath ? `${trip.pathPointCount ?? 0} pts` : "None"}
+                                {issueCount}
                               </button>
                             </td>
-                            <td>{trip.violationCount}</td>
                             <td>
                               <span className={`drivers-table__pill drivers-table__pill--status trip-status-pill trip-status-pill--${tripDisplayStatus}`}>
                                 {formatTripDisplayStatus(tripDisplayStatus)}
@@ -5482,86 +6250,141 @@ export default function AdminShell({
               </div>
 
               <div className="trip-path-modal__body">
-                <div className="trip-path-modal__meta">
-                  <div>
-                    <span>Trip ID</span>
-                    <strong>{selectedTripForPath.tripId}</strong>
+                <section className="trip-path-modal__section">
+                  <div className="trip-path-modal__section-head">
+                    <h3>Driver and Trip Info</h3>
                   </div>
-                  <div>
-                    <span>Driver</span>
-                    <strong>{selectedTripForPath.driverName}</strong>
+                  <div className="trip-path-modal__meta">
+                    <div>
+                      <span>Trip Number</span>
+                      <strong>{selectedTripForPath.tripId}</strong>
+                    </div>
+                    <div>
+                      <span>Driver</span>
+                      <strong>{selectedTripForPath.driverName}</strong>
+                    </div>
+                    <div>
+                      <span>Driver Code</span>
+                      <strong>{selectedTripForPath.driverCode}</strong>
+                    </div>
+                    <div>
+                      <span>Plate Number</span>
+                      <strong>{selectedTripForPath.plateNo}</strong>
+                    </div>
+                    <div>
+                      <span>Route</span>
+                      <strong>{selectedTripForPath.routeName}</strong>
+                    </div>
+                    <div>
+                      <span>Trip Status</span>
+                      <strong>{formatTripDisplayStatus(getTripDisplayStatus(selectedTripForPath))}</strong>
+                    </div>
                   </div>
-                  <div>
-                    <span>Driver Code</span>
-                    <strong>{selectedTripForPath.driverCode}</strong>
-                  </div>
-                  <div>
-                    <span>Plate Number</span>
-                    <strong>{selectedTripForPath.plateNo}</strong>
-                  </div>
-                  <div>
-                    <span>Route</span>
-                    <strong>{selectedTripForPath.routeName}</strong>
-                  </div>
-                  <div>
-                    <span>Trip Status</span>
-                    <strong>{formatTripDisplayStatus(getTripDisplayStatus(selectedTripForPath))}</strong>
-                  </div>
-                  <div>
-                    <span>Start</span>
-                    <strong>{formatDateTime(selectedTripForPath.tripStart)}</strong>
-                  </div>
-                  <div>
-                    <span>End</span>
-                    <strong>{formatDateTime(selectedTripForPath.tripEnd)}</strong>
-                  </div>
-                  <div>
-                    <span>Fare</span>
-                    <strong>
-                      {selectedTripForPath.fareAmount !== undefined
-                        ? `PHP ${selectedTripForPath.fareAmount.toFixed(2)}`
-                        : "-"}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Duration</span>
-                    <strong>
-                      {selectedTripForPath.durationMinutes !== undefined
-                        ? `${selectedTripForPath.durationMinutes} min`
-                        : "-"}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Distance</span>
-                    <strong>
-                      {selectedTripForPath.distanceKm !== undefined
-                        ? `${selectedTripForPath.distanceKm.toFixed(2)} km`
-                        : "-"}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Raw gps</span>
-                    <strong>{tripPathData?.rawPointCount ?? selectedTripForPath.pathPointCount ?? "-"}</strong>
-                  </div>
-                  <div>
-                    <span>Alert Count</span>
-                    <strong>{selectedTripForPath.violationCount}</strong>
-                  </div>
-                  <div>
-                    <span>Start Location</span>
-                    <strong>{selectedTripStartLocationLabel}</strong>
-                  </div>
-                  <div>
-                    <span>End Location</span>
-                    <strong>{selectedTripEndLocationLabel}</strong>
-                  </div>
-                </div>
+                </section>
 
                 <section className="trip-path-modal__section">
                   <div className="trip-path-modal__section-head">
-                    <h3>Completed Trip Map Preview</h3>
-                    <span>{tripPathData?.rawPointCount ?? selectedTripForPath.pathPointCount ?? 0} points</span>
+                    <h3>Trip Summary</h3>
                   </div>
+                  <div className="trip-path-modal__meta">
+                    <div>
+                      <span>Start Time</span>
+                      <strong>{formatDateTime(selectedTripForPath.tripStart)}</strong>
+                    </div>
+                    <div>
+                      <span>End Time</span>
+                      <strong>{formatDateTime(selectedTripForPath.tripEnd)}</strong>
+                    </div>
+                    <div>
+                      <span>Fare</span>
+                      <strong>
+                        {selectedTripForPath.fareAmount !== undefined
+                          ? `PHP ${selectedTripForPath.fareAmount.toFixed(2)}`
+                          : "-"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Duration</span>
+                      <strong>
+                        {selectedTripForPath.durationMinutes !== undefined
+                          ? `${selectedTripForPath.durationMinutes} min`
+                          : "-"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Distance</span>
+                      <strong>
+                        {selectedTripForPath.distanceKm !== undefined
+                          ? `${selectedTripForPath.distanceKm.toFixed(2)} km`
+                          : "-"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Issue Count</span>
+                      <strong>{selectedTripIssueCount}</strong>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="trip-path-modal__section">
+                  <div className="trip-path-modal__section-head">
+                    <h3>Places</h3>
+                  </div>
+                  <div className="trip-path-modal__places">
+                    <div>
+                      <span>Start Place</span>
+                      <strong>{selectedTripStartLocationLabel}</strong>
+                    </div>
+                    <div>
+                      <span>End Place</span>
+                      <strong>{selectedTripEndLocationLabel}</strong>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="trip-path-modal__section">
+                  <div className="trip-path-modal__section-head">
+                    <h3>Trip Route Preview</h3>
+                  </div>
+
+                  {selectedTripSavedLocations.length > 0 && (
+                    <div className="trip-replay-panel">
+                      <div className="trip-replay-panel__top">
+                        <div>
+                          <span>Saved Locations</span>
+                          <strong>
+                            {selectedTripReplayIndex + 1} of {selectedTripSavedLocations.length}
+                          </strong>
+                        </div>
+                        <div>
+                          <span>Selected Time</span>
+                          <strong>
+                            {selectedTripReplayLocation
+                              ? formatDateTime(selectedTripReplayLocation.recordedAt)
+                              : "-"}
+                          </strong>
+                        </div>
+                        <div>
+                          <span>Progress</span>
+                          <strong>{selectedTripReplayProgress}%</strong>
+                        </div>
+                      </div>
+                      {selectedTripSavedLocations.length > 1 && (
+                        <input
+                          className="trip-replay-panel__slider"
+                          type="range"
+                          min={0}
+                          max={selectedTripSavedLocations.length - 1}
+                          value={Math.min(
+                            selectedTripReplayIndex,
+                            selectedTripSavedLocations.length - 1
+                          )}
+                          onChange={(event) => setSelectedTripReplayIndex(Number(event.target.value))}
+                          aria-label="Trip replay timeline"
+                        />
+                      )}
+                    </div>
+                  )}
 
                   {tripPathError && (
                     <div className="trip-path-modal__notice" role="status">
@@ -5569,19 +6392,17 @@ export default function AdminShell({
                     </div>
                   )}
 
-                  {shouldShowMatchedRouteNotice && (
-                    <div className="trip-path-modal__notice" role="status">
-                      Matched route is not available yet. Showing the stored GPS route.
-                    </div>
-                  )}
-
                   {tripPathLoading ? (
-                    <div className="trip-path-modal__empty">Loading matched trip route...</div>
+                    <div className="trip-path-modal__empty">Loading trip route preview...</div>
                   ) : tripPathData ? (
-                    <TripPathMap tripPath={tripPathData} violations={selectedTripViolations} />
+                    <TripPathMap
+                      tripPath={tripPathData}
+                      violations={selectedTripViolations}
+                      activeLocation={selectedTripReplayLocation}
+                    />
                   ) : (
                     <div className="trip-path-modal__empty">
-                      Matched route is not available yet.
+                      Trip route preview is not available for this trip.
                     </div>
                   )}
                 </section>
@@ -5589,7 +6410,7 @@ export default function AdminShell({
                 {selectedTripViolations.length > 0 && (
                   <section className="trip-path-modal__section">
                     <div className="trip-path-modal__section-head">
-                      <h3>Linked Violations</h3>
+                      <h3>Geofence Violations</h3>
                       <span>{selectedTripViolations.length} linked</span>
                     </div>
                     <div className="trip-path-modal__violations">
@@ -5605,6 +6426,32 @@ export default function AdminShell({
                               .filter(Boolean)
                               .join(" | ") || "No additional violation details."}
                           </p>
+                        </article>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                {selectedTripReports.length > 0 && (
+                  <section className="trip-path-modal__section">
+                    <div className="trip-path-modal__section-head">
+                      <h3>Passenger Reports</h3>
+                      <span>{selectedTripReports.length} linked</span>
+                    </div>
+                    <div className="trip-path-modal__violations trip-path-modal__violations--reports">
+                      {selectedTripReports.map((report) => (
+                        <article key={report.reportId}>
+                          <strong>{report.reportTypeLabel}</strong>
+                          <span>{formatDateTime(report.reportedAt)}</span>
+                          <p>
+                            {[
+                              report.passengerName ? `Passenger: ${report.passengerName}` : undefined,
+                              report.status ? `Status: ${report.status}` : undefined
+                            ]
+                              .filter(Boolean)
+                              .join(" | ")}
+                          </p>
+                          <p>{report.description}</p>
                         </article>
                       ))}
                     </div>
@@ -6065,6 +6912,109 @@ export default function AdminShell({
                     </button>
                   </>
                 )}
+              </div>
+            </section>
+          </div>
+        )}
+        {activeReportModal && (
+          <div className="violation-modal-backdrop" role="presentation" onClick={closeReportAlert}>
+            <section
+              className="violation-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="admin-report-modal-title"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="violation-modal__header">
+                <div className="violation-modal__title-row">
+                  <div className="violation-modal__badge" aria-hidden="true">
+                    R
+                  </div>
+                  <div>
+                    <h2 id="admin-report-modal-title">New Passenger Report</h2>
+                    <p>Passenger report received and ready for review.</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="violation-modal__close"
+                  onClick={closeReportAlert}
+                  aria-label="Dismiss report alert"
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="violation-modal__body">
+                {reportAlertQueue.length > 0 && (
+                  <div className="violation-modal__queue">
+                    {reportAlertQueue.length} more report
+                    {reportAlertQueue.length === 1 ? " is" : "s are"} waiting.
+                  </div>
+                )}
+
+                <div className="violation-modal__driver">
+                  <div className="violation-modal__avatar" aria-hidden="true">
+                    {getDriverAvatarUrl(String(activeReportModal.driverId)) ? (
+                      <img
+                        src={getDriverAvatarUrl(String(activeReportModal.driverId)) ?? ""}
+                        alt=""
+                      />
+                    ) : (
+                      getDriverInitials(String(activeReportModal.driverId ?? activeReportModal.driverCode ?? ""))
+                    )}
+                  </div>
+                  <div className="violation-modal__driver-copy">
+                    <strong>{activeReportModal.driverName || activeReportModal.driverCode || "Unknown driver"}</strong>
+                    <span>{activeReportModal.driverCode ?? `ID: ${activeReportModal.driverId ?? "N/A"}`}</span>
+                  </div>
+                </div>
+
+                <div className="violation-modal__details">
+                  <div>
+                    <span>Category</span>
+                    <strong>{activeReportModal.reportTypeLabel ?? "Passenger report"}</strong>
+                  </div>
+                  <div>
+                    <span>Plate Number</span>
+                    <strong>{activeReportModal.plateNo ?? "Not available"}</strong>
+                  </div>
+                  <div>
+                    <span>Time</span>
+                    <strong>{formatDateTime(activeReportModal.reportedAt)}</strong>
+                  </div>
+                  <div>
+                    <span>Status</span>
+                    <strong>{activeReportModal.status}</strong>
+                  </div>
+                  <div>
+                    <span>Reference ID</span>
+                    <strong>#{activeReportModal.reportId}</strong>
+                  </div>
+                </div>
+
+                {activeReportModal.description && (
+                  <p className="violation-modal__description">
+                    {activeReportModal.description}
+                  </p>
+                )}
+
+                <div className="violation-modal__actions">
+                  <button
+                    type="button"
+                    className="violation-modal__button violation-modal__button--secondary"
+                    onClick={closeReportAlert}
+                  >
+                    Dismiss
+                  </button>
+                  <button
+                    type="button"
+                    className="violation-modal__button violation-modal__button--primary"
+                    onClick={() => openReportOnDashboard()}
+                  >
+                    View Report
+                  </button>
+                </div>
               </div>
             </section>
           </div>

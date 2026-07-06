@@ -25,6 +25,13 @@ type TripRouteTraceRow = {
   updated_at?: Date | null
 }
 
+type TripPathLocationRow = {
+  recorded_at: Date
+  lat: number
+  lng: number
+  speed: number | null
+}
+
 const isLngLatPair = (value: unknown): value is [number, number] =>
   Array.isArray(value) &&
   value.length >= 2 &&
@@ -158,6 +165,31 @@ const canReadTripPath = async (
   return Boolean(result.rows[0]?.trip_id)
 }
 
+const getTripSavedLocations = async (tripId: number) => {
+  const result = await query<TripPathLocationRow>(
+    `
+      SELECT
+        tp.recorded_at,
+        tp.lat,
+        tp.lng,
+        tp.speed
+      FROM public.trip_points tp
+      WHERE tp.trip_id = $1
+      ORDER BY tp.recorded_at ASC, tp.point_id ASC
+      LIMIT 500
+    `,
+    [tripId]
+  )
+
+  return result.rows.map((row, index) => ({
+    index,
+    recordedAt: row.recorded_at.toISOString(),
+    latitude: Number(row.lat),
+    longitude: Number(row.lng),
+    speed: row.speed === null ? undefined : Number(row.speed)
+  }))
+}
+
 export async function GET(request: Request, context: TripPathRouteContext) {
   const tripId = Number(context.params.tripId)
   if (!Number.isInteger(tripId) || tripId <= 0) {
@@ -197,9 +229,14 @@ export async function GET(request: Request, context: TripPathRouteContext) {
       return NextResponse.json({ ok: false, message: "No trip path data available." }, { status: 404 })
     }
 
+    const savedLocations = await getTripSavedLocations(tripId)
+
     return NextResponse.json({
       ok: true,
-      data
+      data: {
+        ...data,
+        savedLocations
+      }
     })
   } catch (error) {
     return NextResponse.json(

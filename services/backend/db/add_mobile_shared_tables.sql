@@ -18,7 +18,12 @@ begin
   create type public.mobile_violation_type as enum (
     'GEOFENCE_BOUNDARY',
     'ROUTE_DEVIATION',
-    'UNAUTHORIZED_STOP'
+    'UNAUTHORIZED_STOP',
+    'GPS_SILENCE',
+    'LONG_STOP',
+    'TRIP_TIMEOUT',
+    'SUSPICIOUS_SPEED',
+    'REPEATED_GEOFENCE_BOUNDARY'
   );
 exception
   when duplicate_object then null;

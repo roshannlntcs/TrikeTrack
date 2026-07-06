@@ -49,23 +49,16 @@
 
 .brand-block {
   position: absolute;
-  top: 62px;
-  left: 50%;
-  transform: translateX(-50%);
-  text-align: center;
+  top: 34px;
+  left: 42px;
+  transform: none;
+  text-align: left;
   z-index: 2;
-}
-
-.brand-logo {
-  width: 236px;
-  height: auto;
-  display: block;
-  margin: 0 auto -70px;
 }
 
 .brand-title {
   margin: 0 0 8px;
-  font-size: clamp(0.5rem, 3vw, 2.20rem);
+  font-size: clamp(1.15rem, 1.8vw, 1.65rem);
   font-weight: 800;
   line-height: 1;
   letter-spacing: -0.02em;
@@ -76,14 +69,14 @@
   color: #101317;
 }
 
-.brand-title--white {
-  color: #f2f8f6;
+.brand-title--green {
+  color: #101317;
 }
 
 .brand-subtitle {
   margin: 0;
-  font-size: clamp(0.96rem, 1.35vw, 1rem);
-  font-weight: 500;
+  font-size: clamp(0.72rem, 0.95vw, 0.9rem);
+  font-weight: 600;
   color: #09181a;
   white-space: nowrap;
 }
@@ -100,6 +93,14 @@
   display: grid;
   gap: 12px;
   color: #101317;
+}
+
+.login-form__logo {
+  width: 124px;
+  height: auto;
+  display: block;
+  justify-self: center;
+  margin: 0 0 2px;
 }
 
 .login-form h2 {
@@ -260,7 +261,8 @@
   }
 
   .brand-block {
-    top: 14px;
+    top: 18px;
+    left: 22px;
   }
 
   .brand-subtitle {
@@ -269,6 +271,10 @@
 
   .login-shell__form-wrap {
     padding: 30px 22px 34px;
+  }
+
+  .login-form__logo {
+    width: 96px;
   }
 
   .login-form__lead {

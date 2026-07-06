@@ -14,6 +14,7 @@ type BasemapConfig = {
 const configuredTileUrl = import.meta.env.VITE_MAP_TILE_URL_TEMPLATE?.trim()
 const configuredAttribution = import.meta.env.VITE_MAP_ATTRIBUTION?.trim()
 const configuredMaxZoom = Number(import.meta.env.VITE_MAP_MAX_ZOOM)
+const mapTilerKey = import.meta.env.VITE_MAPTILER_KEY?.trim()
 
 const BASEMAPS: Record<TriketrackMapStyleId, BasemapConfig> = {
   street: {
@@ -60,7 +61,11 @@ export const getBasemapConfig = (
 
 export const createRasterStyle = (
   styleId: TriketrackMapStyleId = DEFAULT_MAP_STYLE
-): StyleSpecification => {
+): StyleSpecification | string => {
+  if (styleId === "street" && mapTilerKey) {
+    return `https://api.maptiler.com/maps/streets-v4/style.json?key=${encodeURIComponent(mapTilerKey)}`
+  }
+
   const basemap = getBasemapConfig(styleId)
 
   return {

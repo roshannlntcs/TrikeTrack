@@ -1,7 +1,7 @@
 :root {
   font-family: "SF Pro Text", "Segoe UI", Arial, sans-serif;
-  color: #172033;
-  background: #f5f7fb;
+  color: #121826;
+  background: #f4f7fb;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -21,8 +21,8 @@ body {
   margin: 0;
   min-width: 320px;
   background:
-    radial-gradient(circle at top, rgba(76, 121, 255, 0.08), transparent 36%),
-    #f5f7fb;
+    linear-gradient(180deg, rgba(235, 241, 250, 0.96) 0%, rgba(247, 249, 252, 1) 42%),
+    #f4f7fb;
 }
 
 button,
@@ -34,14 +34,14 @@ textarea {
 
 .page {
   min-height: 100vh;
-  padding: 16px 16px 104px;
+  padding: 18px 16px 104px;
 }
 
 .phone-shell {
   width: min(100%, 460px);
   margin: 0 auto;
   display: grid;
-  gap: 14px;
+  gap: 16px;
 }
 
 .topbar {
@@ -49,35 +49,36 @@ textarea {
   grid-template-columns: auto 1fr;
   gap: 12px;
   align-items: start;
-  padding: 4px 0 2px;
+  padding: 4px 2px 0;
 }
 
 .topbar h1,
 .panel h1,
 .panel h2 {
   margin: 0;
-  color: #172033;
+  color: #121826;
 }
 
 .topbar h1 {
-  font-size: 1.3rem;
-  font-weight: 700;
+  font-size: 1.32rem;
+  font-weight: 750;
+  line-height: 1.2;
 }
 
 .topbar p,
 .muted {
   margin: 4px 0 0;
-  color: #667085;
+  color: #66758a;
   line-height: 1.5;
 }
 
 .icon-button {
   width: 40px;
   height: 40px;
-  border: 1px solid #dce3ef;
+  border: 1px solid #dde5f0;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.92);
-  color: #172033;
+  color: #121826;
   display: grid;
   place-items: center;
   cursor: pointer;
@@ -92,11 +93,11 @@ textarea {
 }
 
 .panel {
-  padding: 18px 16px;
-  border: 1px solid #e4eaf4;
-  border-radius: 22px;
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.05);
+  padding: 16px;
+  border: 1px solid #e1e8f2;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 12px 30px rgba(26, 38, 64, 0.06);
 }
 
 .panel--centered,
@@ -112,11 +113,11 @@ textarea {
 .button-stack,
 .form-stack {
   display: grid;
-  gap: 14px;
+  gap: 12px;
 }
 
 .profile-panel--compact {
-  gap: 16px;
+  gap: 14px;
 }
 
 .driver-identity {
@@ -127,19 +128,19 @@ textarea {
 
 .kicker {
   margin: 0;
-  font-size: 0.76rem;
+  font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #718198;
+  color: #64748b;
 }
 
 .driver-avatar {
-  width: 56px;
-  height: 56px;
-  border-radius: 18px;
+  width: 58px;
+  height: 58px;
+  border-radius: 8px;
   object-fit: cover;
-  border: 1px solid #e4eaf4;
+  border: 1px solid #dfe7f2;
   background: #eef3fb;
 }
 
@@ -152,40 +153,46 @@ textarea {
 
 .driver-summary {
   display: grid;
-  gap: 4px;
+  gap: 3px;
+  min-width: 0;
 }
 
 .driver-summary strong {
-  font-size: 1.08rem;
+  font-size: 1.15rem;
+  line-height: 1.25;
+  color: #111827;
 }
 
 .driver-summary span {
-  color: #667085;
+  color: #627086;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .driver-verification-line {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 2px;
 }
 
 .driver-verification-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 6px 12px;
+  padding: 7px 10px;
   border-radius: 999px;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
 }
 
 .driver-verification-badge--verified {
-  border: 1px solid #cfe1ff;
-  background: #eaf3ff;
-  color: #1d4ed8;
+  border: 1px solid #cfe7d6;
+  background: #edf9f1;
+  color: #16743b;
 }
 
 .driver-verification-badge--unverified {
@@ -203,7 +210,7 @@ textarea {
 
 .driver-verification-subtext {
   margin: 0;
-  color: #55606d;
+  color: #607086;
   font-size: 0.85rem;
 }
 
@@ -216,7 +223,7 @@ textarea {
 
 .driver-status-line p {
   margin: 0;
-  color: #526074;
+  color: #607086;
   line-height: 1.45;
 }
 
@@ -266,9 +273,9 @@ textarea {
 }
 
 .trip-view-button {
-  border: 1px solid #d8e4f4;
-  background: linear-gradient(180deg, #f7fbff 0%, #edf4fd 100%);
-  color: #21496f;
+  border: 1px solid #dbe6f3;
+  background: #f7fbff;
+  color: #1c4b78;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -297,7 +304,7 @@ textarea {
 
 .primary-button {
   border: 0;
-  background: linear-gradient(180deg, #1f3b8a 0%, #132d72 100%);
+  background: linear-gradient(180deg, #234ebc 0%, #173a96 100%);
   color: #ffffff;
   box-shadow: 0 10px 24px rgba(19, 45, 114, 0.24);
 }
@@ -329,15 +336,15 @@ textarea {
 
 .category-list {
   display: grid;
-  gap: 10px;
+  gap: 12px;
 }
 
 .category-card {
   width: 100%;
-  border: 1px solid #e4eaf4;
-  border-radius: 18px;
+  border: 1px solid #dfe7f2;
+  border-radius: 8px;
   background: #ffffff;
-  padding: 14px;
+  padding: 14px 12px;
   display: grid;
   grid-template-columns: auto 1fr auto;
   gap: 12px;
@@ -347,8 +354,8 @@ textarea {
 }
 
 .category-card--selected {
-  border-color: #96aefc;
-  background: linear-gradient(180deg, #f6f8ff 0%, #eef3ff 100%);
+  border-color: #8da8ff;
+  background: #f4f7ff;
   box-shadow: inset 0 0 0 1px rgba(108, 129, 255, 0.18);
 }
 
@@ -391,12 +398,12 @@ textarea {
 }
 
 .category-card__content strong {
-  color: #172033;
+  color: #111827;
   font-size: 0.98rem;
 }
 
 .category-card__content span {
-  color: #667085;
+  color: #607086;
   line-height: 1.45;
   font-size: 0.92rem;
 }
@@ -414,7 +421,7 @@ textarea {
 
 .field {
   display: grid;
-  gap: 8px;
+  gap: 7px;
 }
 
 .field span,
@@ -426,17 +433,17 @@ textarea {
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #718198;
+  color: #64748b;
 }
 
 .field input,
 .field select,
 .field textarea {
   width: 100%;
-  border: 1px solid #dce3ef;
-  border-radius: 16px;
+  border: 1px solid #d8e2ef;
+  border-radius: 8px;
   background: #ffffff;
-  color: #172033;
+  color: #121826;
   padding: 14px 15px;
   outline: 0;
 }
@@ -454,8 +461,8 @@ textarea {
 .field input:focus,
 .field select:focus,
 .field textarea:focus {
-  border-color: #9cb0d2;
-  box-shadow: 0 0 0 4px rgba(76, 121, 255, 0.09);
+  border-color: #8da8ff;
+  box-shadow: 0 0 0 4px rgba(76, 121, 255, 0.1);
 }
 
 .hidden-input {
@@ -465,7 +472,7 @@ textarea {
 .upload-box {
   width: 100%;
   border: 1.5px dashed #ccd6e5;
-  border-radius: 18px;
+  border-radius: 8px;
   background: #fafcff;
   padding: 22px 16px;
   display: grid;
@@ -488,7 +495,7 @@ textarea {
 }
 
 .upload-box strong {
-  color: #172033;
+  color: #111827;
   font-weight: 600;
 }
 
@@ -503,8 +510,8 @@ textarea {
   gap: 12px;
   align-items: center;
   padding: 12px;
-  border: 1px solid #e4eaf4;
-  border-radius: 16px;
+  border: 1px solid #e1e8f2;
+  border-radius: 8px;
   background: #ffffff;
 }
 
@@ -558,8 +565,8 @@ textarea {
 .trip-map-meta div,
 .emergency-status-card {
   padding: 14px;
-  border-radius: 16px;
-  border: 1px solid #e4eaf4;
+  border-radius: 8px;
+  border: 1px solid #e1e8f2;
   background: #fafcff;
   display: grid;
   gap: 6px;
@@ -590,6 +597,54 @@ textarea {
   color: #9a6508;
 }
 
+.fare-info-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.fare-info-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.fare-info-item {
+  padding: 14px 12px;
+  border-radius: 8px;
+  border: 1px solid #dfe7f2;
+  background: #f8fbff;
+  display: grid;
+  gap: 6px;
+  text-align: center;
+}
+
+.fare-info-item strong {
+  font-size: 1.05rem;
+  line-height: 1.25;
+  color: #111827;
+}
+
+.fare-info-item span {
+  font-size: 0.85rem;
+  color: #667085;
+  font-weight: 500;
+}
+
+.fare-info-note,
+.fare-helper {
+  margin: 0;
+  color: #607086;
+  line-height: 1.5;
+}
+
+.fare-helper {
+  padding: 12px 13px;
+  border: 1px solid #dfe7f2;
+  border-radius: 8px;
+  background: #f8fbff;
+  font-size: 0.93rem;
+}
+
 .notice {
   padding: 14px 15px;
   border-radius: 16px;
@@ -609,8 +664,8 @@ textarea {
 }
 
 .emergency-panel {
-  border-color: #f0d7d7;
-  background: linear-gradient(180deg, rgba(255, 249, 249, 0.98) 0%, rgba(255, 255, 255, 0.98) 100%);
+  border-color: #f0d2d2;
+  background: #fffafa;
 }
 
 .emergency-status-card {
@@ -650,9 +705,10 @@ textarea {
   position: sticky;
   bottom: 12px;
   z-index: 8;
-  padding: 12px;
-  border-radius: 20px;
-  background: rgba(245, 247, 251, 0.92);
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(219, 226, 238, 0.86);
+  background: rgba(246, 248, 252, 0.92);
   backdrop-filter: blur(14px);
 }
 
@@ -887,29 +943,15 @@ textarea {
   height: 18px;
 }
 
-.trip-screen__top {
-  position: absolute;
-  top: calc(env(safe-area-inset-top) + 16px);
-  left: 0;
-  right: 0;
-  z-index: 3;
-  padding: 0 16px;
-}
-
 .trip-screen__driver-card {
   width: min(100%, 430px);
   margin: 0 auto;
   padding: 16px;
-  border-radius: 24px;
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.96);
   border: 1px solid rgba(228, 234, 244, 0.92);
   box-shadow: 0 18px 36px rgba(15, 23, 42, 0.15);
   backdrop-filter: blur(14px);
-  display: grid;
-  gap: 18px;
-}
-
-.trip-screen__driver-header {
   display: grid;
   gap: 14px;
 }
@@ -922,7 +964,8 @@ textarea {
 
 .trip-screen__driver-copy {
   display: grid;
-  gap: 4px;
+  gap: 3px;
+  min-width: 0;
 }
 
 .trip-screen__driver-copy strong {
@@ -932,18 +975,23 @@ textarea {
 
 .trip-screen__driver-copy span {
   color: #667085;
-  line-height: 1.4;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .trip-screen__trip-stats {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .trip-screen__trip-stats > div {
   display: grid;
-  gap: 6px;
+  gap: 5px;
+  padding: 11px 12px;
+  border: 1px solid #e1e8f2;
+  border-radius: 8px;
+  background: #f8fbff;
 }
 
 .trip-screen__stat-label {
@@ -951,73 +999,6 @@ textarea {
   font-size: 0.82rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-}
-
-.trip-screen__driver-card h2 {
-  margin: 0;
-  font-size: 1.15rem;
-  line-height: 1.2;
-}
-
-.trip-screen__subtitle {
-  margin: 0 0 2px;
-  font-size: 0.94rem;
-  line-height: 1.35;
-}
-
-.trip-screen__driver-row {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 10px;
-  align-items: center;
-}
-
-.trip-screen__driver-copy {
-  display: grid;
-  gap: 2px;
-}
-
-.trip-screen__driver-copy strong {
-  color: #172033;
-  font-size: 1.02rem;
-}
-
-.trip-screen__driver-copy span {
-  color: #667085;
-  line-height: 1.32;
-}
-
-.trip-screen__meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.trip-screen__meta-separator {
-  color: #8fa0b7;
-}
-
-.trip-screen__inline-state {
-  display: grid;
-  gap: 4px;
-  padding: 12px 14px;
-  border-radius: 16px;
-  background: #f8fbff;
-  border: 1px solid #dde7f2;
-}
-
-.trip-screen__inline-state--error {
-  background: #fff5f5;
-  border-color: #efc9c9;
-}
-
-.trip-screen__inline-state strong {
-  color: #172033;
-}
-
-.trip-screen__inline-state span {
-  color: #667085;
 }
 
 .trip-screen__bottom {
@@ -1079,8 +1060,8 @@ textarea {
 }
 
 .triketrack-map--fullscreen .maplibregl-ctrl-top-right {
-  top: auto;
-  bottom: calc(env(safe-area-inset-bottom) + 172px);
+  top: calc(env(safe-area-inset-top) + 76px);
+  bottom: auto;
   right: 16px;
 }
 
@@ -1097,7 +1078,11 @@ textarea {
 
   .panel {
     padding: 16px 14px;
-    border-radius: 20px;
+    border-radius: 8px;
+  }
+
+  .fare-info-grid {
+    grid-template-columns: 1fr;
   }
 
   .category-card,
@@ -1121,25 +1106,10 @@ textarea {
     flex-direction: column;
   }
 
-  .trip-screen__top {
-    padding: 0 16px;
-  }
-
   .trip-screen__driver-card {
     width: calc(100% - 32px);
-    margin-top: 52px;
-    border-radius: 24px;
+    border-radius: 8px;
     padding: 14px 16px;
-  }
-
-  .trip-screen__driver-row {
-    grid-template-columns: auto 1fr;
-    align-items: start;
-  }
-
-  .trip-screen__driver-row .status-pill {
-    grid-column: 2;
-    width: fit-content;
   }
 
   .trip-screen__bottom {

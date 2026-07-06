@@ -8,6 +8,7 @@ import {
   listEmergencyAlertsForAdmin,
   type EmergencyAlertRecord
 } from "./emergency-alerts-db"
+import { runOperationalAnomalyDetection } from "./operational-anomalies-db"
 import { ensureViolationStorageReady } from "./violations-db"
 import {
   ensureDriverPasswordResetReady,
@@ -92,6 +93,7 @@ export type DashboardViolationSeverity = "high" | "medium" | "low"
 export type DashboardViolationRecord = {
   violationId: string
   alertSource: "system_violation" | "driver_violation"
+  reportId?: number
   driverId?: number
   driverCode?: string
   driverName?: string
@@ -136,7 +138,19 @@ export type DashboardTripRecord = {
   pathPointCount?: number
   pathUpdatedAt?: string
   violationCount: number
+  reportCount: number
+  issueCount: number
+  relatedReports: DashboardTripReportRecord[]
   createdAt: string
+}
+
+export type DashboardTripReportRecord = {
+  reportId: number
+  reportTypeLabel: string
+  passengerName?: string
+  description: string
+  reportedAt: string
+  status: string
 }
 
 export type DashboardNotificationRecord = {
@@ -239,6 +253,7 @@ type DashboardOperationalDriverRow = {
 type DashboardViolationRow = {
   violation_id: string
   alert_source: DashboardViolationRecord["alertSource"]
+  report_id: number | null
   driver_id: number | null
   driver_code: string | null
   first_name: string | null
@@ -284,6 +299,8 @@ type DashboardTripRow = {
   path_point_count: number | null
   path_updated_at: Date | null
   violation_count: number | null
+  report_count: number | null
+  related_reports: DashboardTripReportRecord[] | null
   created_at: Date
 }
 
@@ -361,6 +378,24 @@ const appendSqlCondition = (clause: string, condition: string) =>
 
 const toIso = (value?: Date | null) => value?.toISOString()
 
+const formatRouteName = (origin?: string | null, destination?: string | null) => {
+  const routeName = [origin, destination]
+    .map((part) => part?.trim())
+    .filter(Boolean)
+    .join(" -> ")
+  const normalized = routeName.replace(/→/g, "->").replace(/\s+/g, " ").toLowerCase()
+
+  if (normalized === "test route -> live gps tracking") {
+    return "Obrero Route"
+  }
+
+  if (normalized === "obrero -> route") {
+    return "Obrero Route"
+  }
+
+  return routeName || undefined
+}
+
 const mapDriver = (row: DashboardDriverRow): DashboardDriverRecord => ({
   driverId: Number(row.driver_id),
   driverCode: row.driver_code,
@@ -430,10 +465,7 @@ const mapOperationalDriver = (
     activeTripId: row.active_trip_id === null ? undefined : Number(row.active_trip_id),
     activeTripStartedAt: toIso(row.active_trip_start),
     activeRouteId: row.active_route_id === null ? undefined : Number(row.active_route_id),
-    activeRouteName:
-      row.active_route_origin && row.active_route_destination
-        ? `${row.active_route_origin} -> ${row.active_route_destination}`
-        : undefined,
+    activeRouteName: formatRouteName(row.active_route_origin, row.active_route_destination),
     totalAlertCount: Number(row.total_alert_count ?? 0),
     openAlertCount: Number(row.open_alert_count ?? 0)
   }
@@ -442,6 +474,7 @@ const mapOperationalDriver = (
 const mapViolation = (row: DashboardViolationRow): DashboardViolationRecord => ({
   violationId: row.violation_id,
   alertSource: row.alert_source,
+  reportId: row.report_id === null ? undefined : Number(row.report_id),
   driverId: row.driver_id === null ? undefined : Number(row.driver_id),
   driverCode: row.driver_code ?? undefined,
   driverName:
@@ -452,10 +485,7 @@ const mapViolation = (row: DashboardViolationRow): DashboardViolationRecord => (
   plateNo: row.plate_no ?? undefined,
   tripId: row.trip_id === null ? undefined : Number(row.trip_id),
   routeId: row.route_id === null ? undefined : Number(row.route_id),
-  routeName:
-    row.route_origin && row.route_destination
-      ? `${row.route_origin} -> ${row.route_destination}`
-      : undefined,
+  routeName: formatRouteName(row.route_origin, row.route_destination),
   violationTypeCode: row.violation_type_code,
   violationTypeLabel: row.violation_type_label,
   severity: row.severity,
@@ -477,7 +507,7 @@ const mapTrip = (row: DashboardTripRow): DashboardTripRecord => ({
   tricycleId: Number(row.tricycle_id),
   plateNo: row.plate_no,
   routeId: Number(row.route_id),
-  routeName: `${row.origin} -> ${row.destination}`,
+  routeName: formatRouteName(row.origin, row.destination) ?? "Obrero Route",
   tripStart: row.trip_start.toISOString(),
   tripEnd: row.trip_end?.toISOString(),
   tripStatus: row.trip_status,
@@ -489,6 +519,9 @@ const mapTrip = (row: DashboardTripRow): DashboardTripRecord => ({
     row.path_point_count === null ? undefined : Number(row.path_point_count),
   pathUpdatedAt: row.path_updated_at?.toISOString(),
   violationCount: Number(row.violation_count ?? 0),
+  reportCount: Number(row.report_count ?? 0),
+  issueCount: Number(row.violation_count ?? 0) + Number(row.report_count ?? 0),
+  relatedReports: row.related_reports ?? [],
   createdAt: row.created_at.toISOString()
 })
 
@@ -820,6 +853,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
   await ensureDatabaseReady()
   await ensureNotificationReadsReady()
   await ensureViolationStorageReady()
+  await runOperationalAnomalyDetection()
   await ensureDriverPasswordResetReady()
 
   const driverScope = buildScopeClause(profile, "d.toda_id", "b.barangay_id")
@@ -852,6 +886,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
           SELECT
             CONCAT('driver-', mv.id)::text AS violation_id,
             'driver_violation'::text AS alert_source,
+            NULL::bigint AS report_id,
             d.driver_id,
             d.driver_code,
             d.first_name,
@@ -1081,6 +1116,7 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
           SELECT
             CONCAT('system-', v.violation_id)::text AS violation_id,
             'system_violation'::text AS alert_source,
+            v.report_id,
             d.driver_id,
             d.driver_code,
             d.first_name,
@@ -1159,6 +1195,8 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
           ) AS distance_km,
           ${tripPathSelect}
           COALESCE(violations.violation_count, 0) AS violation_count,
+          COALESCE(reports.report_count, 0) AS report_count,
+          COALESCE(reports.related_reports, '[]'::jsonb) AS related_reports,
           tp.created_at
         FROM public.trips tp
         JOIN public.drivers d
@@ -1210,9 +1248,32 @@ export const getDashboardDataForAdmin = async (profile: AdminProfile) => {
             SELECT 1
             FROM public.violations v
             WHERE v.trip_id = tp.trip_id
+              AND v.report_id IS NULL
             ${mobileTripAlertsUnion}
           ) trip_alerts
         ) violations ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT
+            COUNT(*)::int AS report_count,
+            COALESCE(
+              jsonb_agg(
+                jsonb_build_object(
+                  'reportId', r.report_id,
+                  'reportTypeLabel', rt.label,
+                  'passengerName', r.passenger_name,
+                  'description', r.description,
+                  'reportedAt', r.reported_at,
+                  'status', r.status
+                )
+                ORDER BY r.reported_at DESC, r.report_id DESC
+              ),
+              '[]'::jsonb
+            ) AS related_reports
+          FROM public.reports r
+          JOIN public.report_types rt
+            ON rt.report_type_id = r.report_type_id
+          WHERE r.trip_id = tp.trip_id
+        ) reports ON TRUE
         ${tripScope.clause}
         ORDER BY COALESCE(tp.trip_end, tp.trip_start) DESC, tp.trip_id DESC
         LIMIT 100

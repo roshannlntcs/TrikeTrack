@@ -19,6 +19,18 @@ export type ReportTypeRecord = {
   label: string
 }
 
+const formatRouteName = (value?: string | null) => {
+  const routeName = value?.trim()
+  if (!routeName) return undefined
+
+  const normalized = routeName.replace(/→/g, "->").replace(/\s+/g, " ").toLowerCase()
+  if (normalized === "test route -> live gps tracking" || normalized === "obrero -> route") {
+    return "Obrero Route"
+  }
+
+  return routeName
+}
+
 export type PassengerReportContext = {
   qrId: number
   qrToken: string
@@ -94,6 +106,8 @@ export type AdminReportRecord = {
   mediaUrls?: string[]
   violationId?: number
   violationStatus?: "open" | "under_review" | "resolved" | "dismissed"
+  viewedAt?: string
+  viewedByAdminId?: number
 }
 
 export type CreatePassengerReportInput = {
@@ -194,6 +208,8 @@ type AdminReportRow = {
   media_urls: string[] | null
   violation_id: number | null
   violation_status: "open" | "under_review" | "resolved" | "dismissed" | null
+  admin_viewed_at: Date | null
+  admin_viewed_by_admin_id: number | null
 }
 
 type ReportTypeLookupRow = {
@@ -285,10 +301,9 @@ const PASSENGER_CONTEXT_SQL = `
     LEFT JOIN public.routes r
       ON r.route_id = tp.route_id
     WHERE tp.driver_id = d.driver_id
-      AND (tp.trip_status = 'ongoing' OR tp.trip_end >= NOW() - INTERVAL '24 hours')
+      AND tp.trip_status = 'ongoing'
     ORDER BY
-      CASE WHEN tp.trip_status = 'ongoing' THEN 0 ELSE 1 END,
-      COALESCE(tp.trip_end, tp.trip_start) DESC,
+      tp.trip_start DESC,
       tp.trip_id DESC
     LIMIT 1
   ) recent_trip
@@ -369,7 +384,7 @@ const mapPassengerReportContext = (
     tripStatus: row.trip_status ?? undefined,
     tripStartedAt: row.trip_start?.toISOString(),
     tripEndedAt: row.trip_end?.toISOString(),
-    routeName: row.route_name ?? undefined,
+    routeName: formatRouteName(row.route_name),
     latestDriverLocation:
       row.latest_latitude === null ||
       row.latest_longitude === null ||
@@ -433,10 +448,12 @@ const mapAdminReport = (row: AdminReportRow): AdminReportRecord => ({
   todaName: row.toda_name,
   barangayId: Number(row.barangay_id),
   barangayName: row.barangay_name,
-  routeName: row.route_name ?? undefined,
+  routeName: formatRouteName(row.route_name),
   mediaUrls: row.media_urls ?? undefined,
   violationId: row.violation_id === null ? undefined : Number(row.violation_id),
-  violationStatus: row.violation_status ?? undefined
+  violationStatus: row.violation_status ?? undefined,
+  viewedAt: row.admin_viewed_at?.toISOString(),
+  viewedByAdminId: row.admin_viewed_by_admin_id === null ? undefined : Number(row.admin_viewed_by_admin_id)
 })
 
 const queryPassengerReportContext = async (
@@ -500,7 +517,9 @@ const queryAdminReports = async (
         ro.origin || ' -> ' || ro.destination AS route_name,
         media.media_urls,
         v.violation_id,
-        v.status AS violation_status
+        v.status AS violation_status,
+        r.admin_viewed_at,
+        r.admin_viewed_by_admin_id
       FROM public.reports r
       JOIN public.report_types rt
         ON rt.report_type_id = r.report_type_id
@@ -573,7 +592,9 @@ const queryAdminReportByIdForTransaction = async (
         ro.origin || ' -> ' || ro.destination AS route_name,
         media.media_urls,
         v.violation_id,
-        v.status AS violation_status
+        v.status AS violation_status,
+        r.admin_viewed_at,
+        r.admin_viewed_by_admin_id
       FROM public.reports r
       JOIN public.report_types rt
         ON rt.report_type_id = r.report_type_id
@@ -981,4 +1002,158 @@ export const updateReportStatusForAdmin = async (
 
     return updated
   })
+}
+
+let ensureReportViewColumnsPromise: Promise<void> | undefined
+
+const ensureReportViewColumns = async () => {
+  if (ensureReportViewColumnsPromise) {
+    return ensureReportViewColumnsPromise
+  }
+
+  ensureReportViewColumnsPromise = (async () => {
+    const [hasViewedAtColumn, hasViewedByColumn] = await Promise.all([
+      hasColumn("public", "reports", "admin_viewed_at"),
+      hasColumn("public", "reports", "admin_viewed_by_admin_id")
+    ])
+
+    if (!hasViewedAtColumn) {
+      await query(`
+        ALTER TABLE public.reports
+        ADD COLUMN IF NOT EXISTS admin_viewed_at timestamptz
+      `)
+    }
+
+    if (!hasViewedByColumn) {
+      await query(`
+        ALTER TABLE public.reports
+        ADD COLUMN IF NOT EXISTS admin_viewed_by_admin_id bigint
+        REFERENCES public.admin_accounts(admin_id)
+        ON DELETE SET NULL
+      `)
+    }
+  })()
+
+  return ensureReportViewColumnsPromise
+}
+
+const hasColumn = async (schema: string, table: string, column: string): Promise<boolean> => {
+  const result = await query<{ exists: boolean }>(
+    `
+      SELECT EXISTS(
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = $1
+          AND table_name = $2
+          AND column_name = $3
+      ) AS exists
+    `,
+    [schema, table, column]
+  )
+
+  return result.rows[0]?.exists ?? false
+}
+
+export const markReportViewedForAdmin = async (
+  profile: AdminProfile,
+  reportId: number
+) => {
+  await ensureDatabaseReady()
+  await ensureReportViewColumns()
+
+  const scope = buildScopeClause(profile, "td.toda_id", "b.barangay_id")
+  const params = [reportId, profile.adminId, ...scope.params]
+
+  const result = await query<{
+    report_id: number
+    admin_viewed_at: Date | null
+    admin_viewed_by_admin_id: number | null
+  }>(
+    `
+      WITH scoped_report AS (
+        SELECT r.report_id
+        FROM public.reports r
+        JOIN public.drivers d
+          ON d.driver_id = r.driver_id
+        JOIN public.todas td
+          ON td.toda_id = d.toda_id
+        JOIN public.barangays b
+          ON b.barangay_id = td.barangay_id
+        WHERE r.report_id = $1
+        ${scope.clause ? `${scope.clause.replace(/\$(\d+)/g, (_, n: string) => `$${Number(n) + 2}`)}` : ""}
+        LIMIT 1
+      )
+      UPDATE public.reports r
+      SET
+        admin_viewed_at = COALESCE(r.admin_viewed_at, NOW()),
+        admin_viewed_by_admin_id = COALESCE(r.admin_viewed_by_admin_id, $2)
+      WHERE r.report_id IN (SELECT report_id FROM scoped_report)
+      RETURNING
+        r.report_id,
+        r.admin_viewed_at,
+        r.admin_viewed_by_admin_id
+    `,
+    params
+  )
+
+  const row = result.rows[0]
+  if (!row) {
+    throw new Error("Report not found in your admin scope.")
+  }
+
+  return {
+    reportId: Number(row.report_id),
+    viewedAt: row.admin_viewed_at?.toISOString(),
+    viewedByAdminId: row.admin_viewed_by_admin_id === null ? undefined : Number(row.admin_viewed_by_admin_id)
+  }
+}
+
+export const getUnreadReportCount = async (profile: AdminProfile) => {
+  await ensureDatabaseReady()
+  await ensureReportViewColumns()
+
+  const scope = buildScopeClause(profile, "td.toda_id", "b.barangay_id")
+  const params = scope.params
+
+  const result = await query<{ unread_count: string }>(
+    `
+      SELECT COUNT(*) AS unread_count
+      FROM public.reports r
+      JOIN public.drivers d
+        ON d.driver_id = r.driver_id
+      JOIN public.todas td
+        ON td.toda_id = d.toda_id
+      JOIN public.barangays b
+        ON b.barangay_id = td.barangay_id
+      WHERE r.admin_viewed_at IS NULL
+      ${scope.clause ? `AND ${scope.clause}` : ""}
+    `,
+    params
+  )
+
+  return Number(result.rows[0]?.unread_count ?? 0)
+}
+
+export const getReportCount = async (profile: AdminProfile) => {
+  await ensureDatabaseReady()
+
+  const scope = buildScopeClause(profile, "td.toda_id", "b.barangay_id")
+  const params = scope.params
+
+  const result = await query<{ report_count: string }>(
+    `
+      SELECT COUNT(*) AS report_count
+      FROM public.reports r
+      JOIN public.drivers d
+        ON d.driver_id = r.driver_id
+      JOIN public.todas td
+        ON td.toda_id = d.toda_id
+      JOIN public.barangays b
+        ON b.barangay_id = td.barangay_id
+      ${scope.clause}
+    `,
+    params
+  )
+
+  return Number(result.rows[0]?.report_count ?? 0)
 }

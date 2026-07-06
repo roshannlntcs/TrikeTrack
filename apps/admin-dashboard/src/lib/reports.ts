@@ -47,6 +47,8 @@ export type AdminReportRecord = {
   mediaUrls?: string[]
   violationId?: number
   violationStatus?: "open" | "under_review" | "resolved" | "dismissed"
+  viewedAt?: string
+  viewedByAdminId?: number
 }
 
 export type AdminAppealRecord = {
@@ -99,6 +101,30 @@ export type AdminReportsData = NonNullable<AdminReportsResponse["data"]> & {
 
 const REPORTS_CACHE_KEY = "admin-reports"
 
+const normalizeRouteName = (value?: string) => {
+  const routeName = value?.trim()
+  if (!routeName) return value
+
+  const normalized = routeName.replace(/→/g, "->").replace(/\s+/g, " ").toLowerCase()
+  if (normalized === "test route -> live gps tracking" || normalized === "obrero -> route") {
+    return "Obrero Route"
+  }
+
+  return routeName
+}
+
+const normalizeReportRoutes = (data: AdminReportsData): AdminReportsData => ({
+  ...data,
+  reports: data.reports.map((report) => ({
+    ...report,
+    routeName: normalizeRouteName(report.routeName)
+  })),
+  appeals: data.appeals.map((appeal) => ({
+    ...appeal,
+    routeName: normalizeRouteName(appeal.routeName)
+  }))
+})
+
 const withCacheMeta = <TData extends object>(cached: CachedSnapshot<TData>) => ({
   ...cached.data,
   cacheMeta: {
@@ -109,7 +135,7 @@ const withCacheMeta = <TData extends object>(cached: CachedSnapshot<TData>) => (
 
 export const getCachedAdminReports = async (): Promise<AdminReportsData | null> => {
   const cached = await getSnapshot<AdminReportsData>(REPORTS_CACHE_KEY)
-  return cached ? withCacheMeta(cached) : null
+  return cached ? withCacheMeta({ ...cached, data: normalizeReportRoutes(cached.data) }) : null
 }
 
 type AdminReportUpdateResponse = {
@@ -143,8 +169,9 @@ export const fetchAdminReports = async (
       throw new Error(payload.message ?? `Reports API returned HTTP ${response.status}.`)
     }
 
-    await saveSnapshot(REPORTS_CACHE_KEY, payload.data)
-    return payload.data
+    const data = normalizeReportRoutes(payload.data)
+    await saveSnapshot(REPORTS_CACHE_KEY, data)
+    return data
   } catch (error) {
     const cached = await getCachedAdminReports()
     if (cached) return cached
@@ -196,4 +223,91 @@ export const markAdminAppealViewed = async (accessToken: string, appealId: strin
   }
 
   return payload.data
+}
+
+type AdminReportViewUpdateResponse = {
+  ok?: boolean
+  message?: string
+  data?: {
+    reportId: number
+    viewedAt: string
+    viewedByAdminId?: number
+  }
+}
+
+export const markAdminReportViewed = async (accessToken: string, reportId: number) => {
+  const response = await fetch("/api/admin/reports", {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      action: "markReportViewed",
+      reportId
+    })
+  })
+
+  const payload = (await response.json().catch(() => ({}))) as AdminReportViewUpdateResponse
+  if (!response.ok || !payload.data) {
+    throw new Error(payload.message ?? `Reports API returned HTTP ${response.status}.`)
+  }
+
+  return payload.data
+}
+
+type UnreadReportCountResponse = {
+  ok?: boolean
+  message?: string
+  data?: {
+    unreadCount: number
+  }
+}
+
+type ReportCountResponse = {
+  ok?: boolean
+  message?: string
+  data?: {
+    reportCount: number
+  }
+}
+
+export const fetchUnreadReportCount = async (accessToken: string): Promise<number> => {
+  try {
+    const response = await fetch("/api/admin/reports?getUnreadCount=true", {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      }
+    })
+
+    const payload = (await response.json().catch(() => ({}))) as UnreadReportCountResponse
+    if (!response.ok || !payload.data) {
+      throw new Error(payload.message ?? `Reports API returned HTTP ${response.status}.`)
+    }
+
+    return payload.data.unreadCount
+  } catch (error) {
+    console.error("Failed to fetch unread report count:", error)
+    return 0
+  }
+}
+
+export const fetchReportCount = async (accessToken: string): Promise<number> => {
+  try {
+    const response = await fetch("/api/admin/reports?getCount=true", {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      }
+    })
+
+    const payload = (await response.json().catch(() => ({}))) as ReportCountResponse
+    if (!response.ok || !payload.data) {
+      throw new Error(payload.message ?? `Reports API returned HTTP ${response.status}.`)
+    }
+
+    return payload.data.reportCount
+  } catch (error) {
+    console.error("Failed to fetch report count:", error)
+    return 0
+  }
 }

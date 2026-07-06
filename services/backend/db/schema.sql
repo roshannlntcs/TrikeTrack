@@ -1,4 +1,5 @@
 create extension if not exists pgcrypto;
+create extension if not exists postgis;
 
 do $$
 begin
@@ -91,9 +92,89 @@ begin
   create type mobile_violation_type as enum (
     'GEOFENCE_BOUNDARY',
     'ROUTE_DEVIATION',
-    'UNAUTHORIZED_STOP'
+    'UNAUTHORIZED_STOP',
+    'GPS_SILENCE',
+    'LONG_STOP',
+    'TRIP_TIMEOUT',
+    'SUSPICIOUS_SPEED',
+    'REPEATED_GEOFENCE_BOUNDARY'
   );
 exception when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_enum e
+    join pg_type t on t.oid = e.enumtypid
+    join pg_namespace n on n.oid = t.typnamespace
+    where n.nspname = 'public'
+      and t.typname = 'mobile_violation_type'
+      and e.enumlabel = 'GPS_SILENCE'
+  ) then
+    alter type public.mobile_violation_type add value 'GPS_SILENCE';
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_enum e
+    join pg_type t on t.oid = e.enumtypid
+    join pg_namespace n on n.oid = t.typnamespace
+    where n.nspname = 'public'
+      and t.typname = 'mobile_violation_type'
+      and e.enumlabel = 'LONG_STOP'
+  ) then
+    alter type public.mobile_violation_type add value 'LONG_STOP';
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_enum e
+    join pg_type t on t.oid = e.enumtypid
+    join pg_namespace n on n.oid = t.typnamespace
+    where n.nspname = 'public'
+      and t.typname = 'mobile_violation_type'
+      and e.enumlabel = 'TRIP_TIMEOUT'
+  ) then
+    alter type public.mobile_violation_type add value 'TRIP_TIMEOUT';
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_enum e
+    join pg_type t on t.oid = e.enumtypid
+    join pg_namespace n on n.oid = t.typnamespace
+    where n.nspname = 'public'
+      and t.typname = 'mobile_violation_type'
+      and e.enumlabel = 'SUSPICIOUS_SPEED'
+  ) then
+    alter type public.mobile_violation_type add value 'SUSPICIOUS_SPEED';
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_enum e
+    join pg_type t on t.oid = e.enumtypid
+    join pg_namespace n on n.oid = t.typnamespace
+    where n.nspname = 'public'
+      and t.typname = 'mobile_violation_type'
+      and e.enumlabel = 'REPEATED_GEOFENCE_BOUNDARY'
+  ) then
+    alter type public.mobile_violation_type add value 'REPEATED_GEOFENCE_BOUNDARY';
+  end if;
 end $$;
 
 do $$
@@ -378,6 +459,116 @@ begin
 end;
 $$;
 
+create or replace function public.geofence_geojson_to_geom(p_geojson jsonb)
+returns geometry
+language plpgsql
+immutable
+as $$
+declare
+  v_type text;
+  v_item jsonb;
+  v_candidate geometry;
+  v_result geometry;
+begin
+  if p_geojson is null or jsonb_typeof(p_geojson) <> 'object' then
+    return null;
+  end if;
+
+  v_type := p_geojson ->> 'type';
+
+  if v_type = 'Feature' then
+    return public.geofence_geojson_to_geom(p_geojson -> 'geometry');
+  end if;
+
+  if v_type = 'FeatureCollection' then
+    for v_item in
+      select value from jsonb_array_elements(coalesce(p_geojson -> 'features', '[]'::jsonb))
+    loop
+      v_candidate := public.geofence_geojson_to_geom(v_item);
+      if v_candidate is not null then
+        v_result := case
+          when v_result is null then v_candidate
+          else ST_Collect(v_result, v_candidate)
+        end;
+      end if;
+    end loop;
+
+    if v_result is null then
+      return null;
+    end if;
+
+    return ST_MakeValid(ST_SetSRID(ST_CollectionExtract(v_result, 3), 4326));
+  end if;
+
+  if v_type = 'GeometryCollection' then
+    for v_item in
+      select value from jsonb_array_elements(coalesce(p_geojson -> 'geometries', '[]'::jsonb))
+    loop
+      v_candidate := public.geofence_geojson_to_geom(v_item);
+      if v_candidate is not null then
+        v_result := case
+          when v_result is null then v_candidate
+          else ST_Collect(v_result, v_candidate)
+        end;
+      end if;
+    end loop;
+
+    if v_result is null then
+      return null;
+    end if;
+
+    return ST_MakeValid(ST_SetSRID(ST_CollectionExtract(v_result, 3), 4326));
+  end if;
+
+  if v_type in ('Polygon', 'MultiPolygon') then
+    return ST_MakeValid(ST_SetSRID(ST_GeomFromGeoJSON(p_geojson::text), 4326));
+  end if;
+
+  return null;
+exception when others then
+  return null;
+end;
+$$;
+
+create or replace function public.set_route_geofence_geom()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.geofence_geom := public.geofence_geojson_to_geom(new.geofence_geojson);
+  return new;
+end;
+$$;
+
+create or replace function public.trip_path_geojson_to_line_geom(p_geojson jsonb)
+returns geometry
+language plpgsql
+immutable
+as $$
+declare
+  v_geometry jsonb;
+begin
+  if p_geojson is null or jsonb_typeof(p_geojson) <> 'object' then
+    return null;
+  end if;
+
+  v_geometry := case
+    when p_geojson ->> 'type' = 'Feature' then p_geojson -> 'geometry'
+    else p_geojson
+  end;
+
+  if v_geometry ->> 'type' <> 'LineString'
+    or jsonb_typeof(v_geometry -> 'coordinates') <> 'array'
+    or jsonb_array_length(v_geometry -> 'coordinates') < 2 then
+    return null;
+  end if;
+
+  return ST_SetSRID(ST_GeomFromGeoJSON(v_geometry::text), 4326);
+exception when others then
+  return null;
+end;
+$$;
+
 create or replace function public.create_geofence_violation_from_trip_point()
 returns trigger
 language plpgsql
@@ -387,6 +578,7 @@ as $$
 declare
   v_context record;
   v_inside boolean;
+  v_geofence geometry;
   v_bucket bigint;
   v_dedupe_key text;
   v_route_label text;
@@ -403,7 +595,8 @@ begin
     r.route_id,
     r.origin,
     r.destination,
-    r.geofence_geojson
+    r.geofence_geojson,
+    r.geofence_geom
   into v_context
   from public.trips t
   join public.routes r
@@ -412,11 +605,23 @@ begin
     and t.driver_id = new.driver_id
   limit 1;
 
-  if v_context.trip_id is null or v_context.geofence_geojson is null then
+  if v_context.trip_id is null then
     return new;
   end if;
 
-  v_inside := public.geojson_contains_lnglat(v_context.geofence_geojson, new.lng, new.lat);
+  v_geofence := coalesce(
+    v_context.geofence_geom,
+    public.geofence_geojson_to_geom(v_context.geofence_geojson)
+  );
+
+  if v_geofence is null then
+    return new;
+  end if;
+
+  v_inside := ST_Covers(
+    v_geofence,
+    coalesce(new.location, ST_SetSRID(ST_MakePoint(new.lng, new.lat), 4326))
+  );
   if v_inside is distinct from false then
     return new;
   end if;
@@ -460,6 +665,307 @@ begin
   on conflict (dedupe_key) where dedupe_key is not null do nothing;
 
   return new;
+end;
+$$;
+
+create or replace function public.insert_mobile_operational_anomaly(
+  p_driver_id bigint,
+  p_trip_id bigint,
+  p_type public.mobile_violation_type,
+  p_priority public.mobile_violation_priority,
+  p_occurred_at timestamptz,
+  p_title text,
+  p_lat double precision,
+  p_lng double precision,
+  p_location_label text,
+  p_details text,
+  p_dedupe_key text
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_inserted integer;
+begin
+  insert into public.mobile_violations (
+    driver_id,
+    trip_id,
+    type,
+    status,
+    priority,
+    occurred_at,
+    title,
+    latitude,
+    longitude,
+    location_label,
+    details,
+    dedupe_key
+  )
+  values (
+    p_driver_id,
+    p_trip_id,
+    p_type,
+    'OPEN',
+    p_priority,
+    coalesce(p_occurred_at, now()),
+    p_title,
+    p_lat,
+    p_lng,
+    p_location_label,
+    p_details,
+    p_dedupe_key
+  )
+  on conflict (dedupe_key) where dedupe_key is not null do nothing;
+
+  get diagnostics v_inserted = row_count;
+  return v_inserted > 0;
+end;
+$$;
+
+create or replace function public.detect_trip_point_operational_anomalies()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_trip record;
+  v_previous record;
+  v_gap_seconds double precision;
+  v_distance_m double precision;
+  v_speed_mps double precision;
+  v_bucket bigint;
+  v_point_count integer;
+  v_window_start timestamptz;
+  v_max_distance_m double precision;
+  v_boundary_count integer;
+  v_location_label text;
+begin
+  if new.trip_id is null then
+    return new;
+  end if;
+
+  select
+    t.trip_id,
+    t.driver_id,
+    t.trip_start,
+    t.trip_status
+  into v_trip
+  from public.trips t
+  where t.trip_id = new.trip_id
+    and t.driver_id = new.driver_id
+  limit 1;
+
+  if v_trip.trip_id is null or lower(v_trip.trip_status::text) <> 'ongoing' then
+    return new;
+  end if;
+
+  v_location_label := concat(round(new.lat::numeric, 5)::text, ', ', round(new.lng::numeric, 5)::text);
+
+  select
+    tp.recorded_at,
+    tp.location,
+    tp.lat,
+    tp.lng
+  into v_previous
+  from public.trip_points tp
+  where tp.trip_id = new.trip_id
+    and tp.point_id <> new.point_id
+    and tp.recorded_at < new.recorded_at
+  order by tp.recorded_at desc, tp.point_id desc
+  limit 1;
+
+  if v_previous.recorded_at is not null then
+    v_gap_seconds := extract(epoch from (new.recorded_at - v_previous.recorded_at));
+    if v_gap_seconds between 10 and 1800 then
+      v_distance_m := ST_Distance(
+        coalesce(new.location, ST_SetSRID(ST_MakePoint(new.lng, new.lat), 4326))::geography,
+        v_previous.location::geography
+      );
+      v_speed_mps := v_distance_m / nullif(v_gap_seconds, 0);
+
+      if v_distance_m >= 100 and v_speed_mps > 22.22 then
+        v_bucket := floor(extract(epoch from new.recorded_at) / 300)::bigint;
+        perform public.insert_mobile_operational_anomaly(
+          new.driver_id,
+          new.trip_id,
+          'SUSPICIOUS_SPEED',
+          'MEDIUM',
+          new.recorded_at,
+          'Suspicious Movement Speed',
+          new.lat,
+          new.lng,
+          v_location_label,
+          concat(
+            'GPS points imply about ',
+            round((v_speed_mps * 3.6)::numeric, 1)::text,
+            ' km/h over ',
+            round(v_distance_m::numeric, 0)::text,
+            ' meters. Review the trip if this does not match actual movement.'
+          ),
+          concat('suspicious-speed:', new.trip_id, ':', new.driver_id, ':', v_bucket)
+        );
+      end if;
+    end if;
+  end if;
+
+  select
+    count(*)::integer,
+    min(tp.recorded_at),
+    max(ST_Distance(tp.location::geography, coalesce(new.location, ST_SetSRID(ST_MakePoint(new.lng, new.lat), 4326))::geography))
+  into v_point_count, v_window_start, v_max_distance_m
+  from public.trip_points tp
+  where tp.trip_id = new.trip_id
+    and tp.recorded_at >= new.recorded_at - interval '10 minutes'
+    and tp.recorded_at <= new.recorded_at;
+
+  if v_point_count >= 3
+    and v_window_start <= new.recorded_at - interval '10 minutes'
+    and coalesce(v_max_distance_m, 999999) <= 30 then
+    v_bucket := floor(extract(epoch from new.recorded_at) / 900)::bigint;
+    perform public.insert_mobile_operational_anomaly(
+      new.driver_id,
+      new.trip_id,
+      'LONG_STOP',
+      'MEDIUM',
+      new.recorded_at,
+      'Long Stop During Trip',
+      new.lat,
+      new.lng,
+      v_location_label,
+      'The driver stayed within about 30 meters for at least 10 minutes during an ongoing trip.',
+      concat('long-stop:', new.trip_id, ':', new.driver_id, ':', v_bucket)
+    );
+  end if;
+
+  select count(*)::integer
+  into v_boundary_count
+  from public.mobile_violations mv
+  where mv.trip_id = new.trip_id
+    and mv.driver_id = new.driver_id
+    and mv.type = 'GEOFENCE_BOUNDARY'
+    and mv.occurred_at >= new.recorded_at - interval '15 minutes';
+
+  if v_boundary_count >= 3 then
+    v_bucket := floor(extract(epoch from new.recorded_at) / 900)::bigint;
+    perform public.insert_mobile_operational_anomaly(
+      new.driver_id,
+      new.trip_id,
+      'REPEATED_GEOFENCE_BOUNDARY',
+      'HIGH',
+      new.recorded_at,
+      'Repeated Geofence Boundary Issues',
+      new.lat,
+      new.lng,
+      v_location_label,
+      concat(v_boundary_count::text, ' geofence boundary issues were detected within 15 minutes.'),
+      concat('repeated-geofence-boundary:', new.trip_id, ':', new.driver_id, ':', v_bucket)
+    );
+  end if;
+
+  return new;
+end;
+$$;
+
+create or replace function public.detect_trip_operational_anomalies()
+returns integer
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_trip record;
+  v_inserted_count integer := 0;
+  v_inserted boolean;
+  v_bucket bigint;
+  v_location_label text;
+begin
+  for v_trip in
+    select
+      t.trip_id,
+      t.driver_id,
+      t.trip_start,
+      lp.recorded_at as latest_recorded_at,
+      lp.lat as latest_lat,
+      lp.lng as latest_lng
+    from public.trips t
+    left join lateral (
+      select tp.recorded_at, tp.lat, tp.lng
+      from public.trip_points tp
+      where tp.trip_id = t.trip_id
+      order by tp.recorded_at desc, tp.point_id desc
+      limit 1
+    ) lp on true
+    where lower(t.trip_status::text) = 'ongoing'
+  loop
+    v_location_label := case
+      when v_trip.latest_lat is null or v_trip.latest_lng is null then null
+      else concat(round(v_trip.latest_lat::numeric, 5)::text, ', ', round(v_trip.latest_lng::numeric, 5)::text)
+    end;
+
+    if v_trip.trip_start <= now() - interval '2 hours'
+      and v_trip.latest_recorded_at is not null
+      and not exists (
+        select 1
+        from public.mobile_violations mv
+        where mv.trip_id = v_trip.trip_id
+          and mv.driver_id = v_trip.driver_id
+          and mv.type = 'TRIP_TIMEOUT'
+          and mv.status in ('OPEN', 'UNDER_REVIEW')
+      ) then
+      v_inserted := public.insert_mobile_operational_anomaly(
+        v_trip.driver_id,
+        v_trip.trip_id,
+        'TRIP_TIMEOUT',
+        'HIGH',
+        now(),
+        'Trip Running Too Long',
+        v_trip.latest_lat,
+        v_trip.latest_lng,
+        v_location_label,
+        'The trip has been ongoing for more than 2 hours without being completed.',
+        concat('trip-timeout:', v_trip.trip_id, ':', v_trip.driver_id)
+      );
+      if v_inserted then
+        v_inserted_count := v_inserted_count + 1;
+      end if;
+    end if;
+
+    if v_trip.trip_start <= now() - interval '5 minutes'
+      and (
+        v_trip.latest_recorded_at is null
+        or v_trip.latest_recorded_at <= now() - interval '5 minutes'
+      )
+      and not exists (
+        select 1
+        from public.mobile_violations mv
+        where mv.trip_id = v_trip.trip_id
+          and mv.driver_id = v_trip.driver_id
+          and mv.type = 'GPS_SILENCE'
+          and mv.status in ('OPEN', 'UNDER_REVIEW')
+      ) then
+      v_inserted := public.insert_mobile_operational_anomaly(
+        v_trip.driver_id,
+        v_trip.trip_id,
+        'GPS_SILENCE',
+        'MEDIUM',
+        coalesce(v_trip.latest_recorded_at, now()),
+        'GPS Updates Paused',
+        v_trip.latest_lat,
+        v_trip.latest_lng,
+        v_location_label,
+        'No GPS point has been received for at least 5 minutes while the trip is still ongoing.',
+        concat('gps-silence:', v_trip.trip_id, ':', v_trip.driver_id)
+      );
+      if v_inserted then
+        v_inserted_count := v_inserted_count + 1;
+      end if;
+    end if;
+  end loop;
+
+  return v_inserted_count;
 end;
 $$;
 
@@ -595,6 +1101,7 @@ create table if not exists public.routes (
   origin text not null,
   destination text not null,
   geofence_geojson jsonb,
+  geofence_geom geometry(Geometry, 4326),
   default_fare_amount numeric(10,2),
   status entity_status not null default 'active',
   created_at timestamptz not null default now(),
@@ -603,6 +1110,19 @@ create table if not exists public.routes (
   ),
   unique (toda_id, origin, destination)
 );
+
+alter table if exists public.routes
+add column if not exists geofence_geom geometry(Geometry, 4326);
+
+update public.routes
+set geofence_geom = public.geofence_geojson_to_geom(geofence_geojson)
+where geofence_geojson is not null
+  and geofence_geom is null;
+
+drop trigger if exists trg_routes_geofence_geom on public.routes;
+create trigger trg_routes_geofence_geom
+before insert or update of geofence_geojson on public.routes
+for each row execute function public.set_route_geofence_geom();
 
 create table if not exists public.qr_codes (
   qr_id bigint generated always as identity primary key,
@@ -693,6 +1213,9 @@ create table if not exists public.trip_points (
   recorded_at timestamptz not null,
   lng double precision not null,
   lat double precision not null,
+  location geometry(Point, 4326) generated always as (
+    ST_SetSRID(ST_MakePoint(lng, lat), 4326)
+  ) stored,
   speed double precision,
   heading double precision,
   accuracy double precision,
@@ -702,12 +1225,20 @@ create table if not exists public.trip_points (
   created_at timestamptz not null default now()
 );
 
+alter table if exists public.trip_points
+add column if not exists location geometry(Point, 4326) generated always as (
+  ST_SetSRID(ST_MakePoint(lng, lat), 4326)
+) stored;
+
 create table if not exists public.driver_locations (
   driver_id bigint primary key references public.drivers(driver_id) on delete cascade,
   driver_code text not null,
   trip_id bigint references public.trips(trip_id) on delete set null,
   latitude double precision not null,
   longitude double precision not null,
+  location geometry(Point, 4326) generated always as (
+    ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
+  ) stored,
   speed double precision,
   heading double precision,
   accuracy double precision,
@@ -717,17 +1248,64 @@ create table if not exists public.driver_locations (
   updated_at timestamptz not null default now()
 );
 
+alter table if exists public.driver_locations
+add column if not exists location geometry(Point, 4326) generated always as (
+  ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
+) stored;
+
 create table if not exists public.trip_paths (
   trip_path_id bigint generated always as identity primary key,
   trip_id bigint not null unique references public.trips(trip_id) on delete cascade,
   point_count integer not null default 0,
   path_geojson jsonb not null,
+  route_geom geometry(LineString, 4326),
+  raw_point_count integer not null default 0,
+  matched_point_count integer not null default 0,
+  route_source text not null default 'saved_route',
   started_at timestamptz,
   ended_at timestamptz,
   start_location_name text,
   end_location_name text,
   updated_at timestamptz not null default now()
 );
+
+alter table if exists public.trip_paths
+add column if not exists route_geom geometry(LineString, 4326);
+
+alter table if exists public.trip_paths
+add column if not exists raw_point_count integer not null default 0;
+
+alter table if exists public.trip_paths
+add column if not exists matched_point_count integer not null default 0;
+
+alter table if exists public.trip_paths
+add column if not exists route_source text not null default 'saved_route';
+
+update public.trip_paths
+set
+  route_geom = public.trip_path_geojson_to_line_geom(path_geojson),
+  raw_point_count = greatest(
+    raw_point_count,
+    coalesce(nullif(path_geojson #>> '{properties,rawPointCount}', '')::integer, point_count, 0)
+  ),
+  matched_point_count = greatest(
+    matched_point_count,
+    coalesce(
+      case
+        when jsonb_typeof(path_geojson #> '{geometry,coordinates}') = 'array'
+          then jsonb_array_length(path_geojson #> '{geometry,coordinates}')
+        when jsonb_typeof(path_geojson -> 'coordinates') = 'array'
+          then jsonb_array_length(path_geojson -> 'coordinates')
+        else null
+      end,
+      point_count,
+      0
+    )
+  ),
+  route_source = coalesce(nullif(path_geojson #>> '{properties,source}', ''), route_source)
+where path_geojson is not null
+  and route_geom is null
+  and public.trip_path_geojson_to_line_geom(path_geojson) is not null;
 
 create table if not exists public.passenger_scans (
   scan_id bigint generated always as identity primary key,
@@ -774,6 +1352,12 @@ create table if not exists public.violations (
   description text,
   latitude double precision,
   longitude double precision,
+  location geometry(Point, 4326) generated always as (
+    case
+      when latitude is null or longitude is null then null
+      else ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
+    end
+  ) stored,
   location_label text,
   dedupe_key text,
   detected_at timestamptz not null default now(),
@@ -787,6 +1371,14 @@ create table if not exists public.violations (
     or tricycle_id is not null
   )
 );
+
+alter table if exists public.violations
+add column if not exists location geometry(Point, 4326) generated always as (
+  case
+    when latitude is null or longitude is null then null
+    else ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
+  end
+) stored;
 
 create table if not exists public.trip_route_points (
   trip_id bigint not null references public.trips(trip_id) on delete cascade,
@@ -819,12 +1411,26 @@ create table if not exists public.mobile_violations (
   title text,
   latitude double precision,
   longitude double precision,
+  location geometry(Point, 4326) generated always as (
+    case
+      when latitude is null or longitude is null then null
+      else ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
+    end
+  ) stored,
   location_label text,
   details text,
   dedupe_key text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table if exists public.mobile_violations
+add column if not exists location geometry(Point, 4326) generated always as (
+  case
+    when latitude is null or longitude is null then null
+    else ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
+  end
+) stored;
 
 create table if not exists public.violation_appeals (
   id uuid primary key default gen_random_uuid(),
@@ -873,6 +1479,12 @@ create table if not exists public.emergency_alerts (
   status emergency_alert_status not null default 'pending_admin',
   passenger_latitude double precision,
   passenger_longitude double precision,
+  passenger_location geometry(Point, 4326) generated always as (
+    case
+      when passenger_latitude is null or passenger_longitude is null then null
+      else ST_SetSRID(ST_MakePoint(passenger_longitude, passenger_latitude), 4326)
+    end
+  ) stored,
   location_accuracy double precision,
   location_captured_at timestamptz,
   passenger_location_name text,
@@ -884,6 +1496,14 @@ create table if not exists public.emergency_alerts (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table if exists public.emergency_alerts
+add column if not exists passenger_location geometry(Point, 4326) generated always as (
+  case
+    when passenger_latitude is null or passenger_longitude is null then null
+    else ST_SetSRID(ST_MakePoint(passenger_longitude, passenger_latitude), 4326)
+  end
+) stored;
 
 create table if not exists public.admin_notification_reads (
   admin_id bigint not null references public.admin_accounts(admin_id) on delete cascade,
@@ -1236,6 +1856,11 @@ create trigger trg_trip_points_geofence_violation
 after insert on public.trip_points
 for each row execute function public.create_geofence_violation_from_trip_point();
 
+drop trigger if exists trg_trip_points_operational_anomalies on public.trip_points;
+create trigger trg_trip_points_operational_anomalies
+after insert on public.trip_points
+for each row execute function public.detect_trip_point_operational_anomalies();
+
 create index if not exists idx_todas_barangay_id on public.todas(barangay_id);
 
 create index if not exists idx_admin_accounts_barangay_id on public.admin_accounts(barangay_id);
@@ -1259,6 +1884,9 @@ create index if not exists idx_tricycles_toda_id on public.tricycles(toda_id);
 create index if not exists idx_tricycles_permit_expiration_date on public.tricycles(permit_expiration_date);
 
 create index if not exists idx_routes_toda_id on public.routes(toda_id);
+create index if not exists idx_routes_geofence_geom_gist
+on public.routes using gist(geofence_geom)
+where geofence_geom is not null;
 
 create index if not exists idx_qr_codes_driver_id on public.qr_codes(driver_id);
 create index if not exists idx_qr_codes_tricycle_id on public.qr_codes(tricycle_id);
@@ -1275,11 +1903,20 @@ create index if not exists idx_trips_trip_start on public.trips(trip_start);
 create index if not exists idx_trip_points_trip_id on public.trip_points(trip_id);
 create index if not exists idx_trip_points_driver_id on public.trip_points(driver_id);
 create index if not exists idx_trip_points_recorded_at on public.trip_points(recorded_at desc);
+create index if not exists idx_trip_points_trip_recorded_at_desc
+on public.trip_points(trip_id, recorded_at desc, point_id desc);
+create index if not exists idx_trip_points_location_gist
+on public.trip_points using gist(location);
 create index if not exists idx_driver_locations_trip_id on public.driver_locations(trip_id);
 create index if not exists idx_driver_locations_recorded_at on public.driver_locations(recorded_at desc);
 create index if not exists idx_driver_locations_driver_code on public.driver_locations(driver_code);
 create index if not exists idx_driver_locations_updated_at on public.driver_locations(updated_at desc);
+create index if not exists idx_driver_locations_location_gist
+on public.driver_locations using gist(location);
 create index if not exists idx_trip_paths_updated_at on public.trip_paths(updated_at desc);
+create index if not exists idx_trip_paths_route_geom_gist
+on public.trip_paths using gist(route_geom)
+where route_geom is not null;
 
 create index if not exists idx_passenger_scans_trip_id on public.passenger_scans(trip_id);
 create index if not exists idx_passenger_scans_driver_id on public.passenger_scans(driver_id);
@@ -1303,6 +1940,9 @@ create index if not exists idx_violations_driver_id on public.violations(driver_
 create index if not exists idx_violations_tricycle_id on public.violations(tricycle_id);
 create index if not exists idx_violations_status on public.violations(status);
 create index if not exists idx_violations_detected_at on public.violations(detected_at);
+create index if not exists idx_violations_location_gist
+on public.violations using gist(location)
+where location is not null;
 create unique index if not exists uq_violations_dedupe_key
 on public.violations(dedupe_key)
 where dedupe_key is not null;
@@ -1315,6 +1955,11 @@ on public.trip_routes(local_trip_id, driver_id, recorded_at, latitude, longitude
 create index if not exists idx_mobile_violations_driver_occurred_at_desc on public.mobile_violations(driver_id, occurred_at desc);
 create index if not exists idx_mobile_violations_status on public.mobile_violations(status);
 create index if not exists idx_mobile_violations_type on public.mobile_violations(type);
+create index if not exists idx_mobile_violations_trip_type_occurred_at_desc
+on public.mobile_violations(trip_id, type, occurred_at desc);
+create index if not exists idx_mobile_violations_location_gist
+on public.mobile_violations using gist(location)
+where location is not null;
 create unique index if not exists uq_mobile_violations_dedupe_key
 on public.mobile_violations(dedupe_key)
 where dedupe_key is not null;
@@ -1337,6 +1982,9 @@ create index if not exists idx_emergency_alerts_trip_id on public.emergency_aler
 create index if not exists idx_emergency_alerts_toda_id on public.emergency_alerts(toda_id);
 create index if not exists idx_emergency_alerts_barangay_id on public.emergency_alerts(barangay_id);
 create index if not exists idx_emergency_alerts_passenger_location on public.emergency_alerts(passenger_latitude, passenger_longitude) where passenger_latitude is not null and passenger_longitude is not null;
+create index if not exists idx_emergency_alerts_passenger_location_gist
+on public.emergency_alerts using gist(passenger_location)
+where passenger_location is not null;
 create index if not exists idx_admin_notification_reads_admin_read_at
 on public.admin_notification_reads(admin_id, read_at desc);
 

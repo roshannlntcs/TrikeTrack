@@ -44,7 +44,6 @@ export default function AdminLogin({
       <section className="login-shell">
         <div className="login-shell__brand" aria-hidden="true">
           <div className="brand-block">
-            <img src="/triketrack_logo.png" alt="TrikeTrack logo" className="brand-logo" />
             <h1 className="brand-title">
               <span className="brand-title--blue">TRIKE</span>
               <span className="brand-title--green">TRACK</span>
@@ -55,6 +54,7 @@ export default function AdminLogin({
 
         <div className="login-shell__form-wrap">
           <form className="login-form" onSubmit={handleSubmit} autoComplete="off">
+            <img src="/triketrack_logo.png" alt="TrikeTrack logo" className="login-form__logo" />
             <h2>Welcome, admin.</h2>
             <p className="login-form__lead">
               Please login to access TrikeTrack dashboard.

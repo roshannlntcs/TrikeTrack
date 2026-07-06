@@ -98,6 +98,7 @@ export function TriketrackMap({
   const mapRef = useRef<maplibregl.Map | null>(null)
   const currentMarkerRef = useRef<maplibregl.Marker | null>(null)
   const destinationMarkerRef = useRef<maplibregl.Marker | null>(null)
+  const markerAnimationRef = useRef<number | null>(null)
   const hasAutoCenteredRef = useRef(false)
   const [selectedStyle, setSelectedStyle] = useState<TriketrackMapStyleId>(mapStyle)
   const [mapReady, setMapReady] = useState(false)
@@ -144,12 +145,16 @@ export function TriketrackMap({
     mapRef.current = map
 
     return () => {
+      if (markerAnimationRef.current !== null) {
+        window.cancelAnimationFrame(markerAnimationRef.current)
+      }
       currentMarkerRef.current?.remove()
       destinationMarkerRef.current?.remove()
       map.remove()
       mapRef.current = null
       currentMarkerRef.current = null
       destinationMarkerRef.current = null
+      markerAnimationRef.current = null
     }
   }, [showControls, selectedStyle])
 
@@ -196,7 +201,33 @@ export function TriketrackMap({
         .setLngLat(toLngLat(effectiveCurrentLocation))
         .addTo(map)
     } else {
-      currentMarkerRef.current.setLngLat(toLngLat(effectiveCurrentLocation))
+      if (markerAnimationRef.current !== null) {
+        window.cancelAnimationFrame(markerAnimationRef.current)
+      }
+
+      const marker = currentMarkerRef.current
+      const start = marker.getLngLat()
+      const end = toLngLat(effectiveCurrentLocation)
+      const startedAt = performance.now()
+      const durationMs = 650
+
+      const animateMarker = (timestamp: number) => {
+        const progress = Math.min(1, (timestamp - startedAt) / durationMs)
+        const eased = 1 - Math.pow(1 - progress, 3)
+        marker.setLngLat([
+          start.lng + (end[0] - start.lng) * eased,
+          start.lat + (end[1] - start.lat) * eased
+        ])
+
+        if (progress < 1) {
+          markerAnimationRef.current = window.requestAnimationFrame(animateMarker)
+          return
+        }
+
+        markerAnimationRef.current = null
+      }
+
+      markerAnimationRef.current = window.requestAnimationFrame(animateMarker)
     }
   }, [effectiveCurrentLocation, mapReady])
 

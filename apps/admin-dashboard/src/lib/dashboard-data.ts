@@ -67,6 +67,7 @@ export type DashboardTricycleRecord = {
 export type DashboardViolationRecord = {
   violationId: string
   alertSource: "system_violation" | "driver_violation"
+  reportId?: number
   driverId?: number
   driverCode?: string
   driverName?: string
@@ -150,7 +151,19 @@ export type DashboardTripRecord = {
   pathPointCount?: number
   pathUpdatedAt?: string
   violationCount: number
+  reportCount?: number
+  issueCount?: number
+  relatedReports?: DashboardTripReportRecord[]
   createdAt: string
+}
+
+export type DashboardTripReportRecord = {
+  reportId: number
+  reportTypeLabel: string
+  passengerName?: string
+  description: string
+  reportedAt: string
+  status: string
 }
 
 export type DashboardNotificationRecord = {
@@ -213,13 +226,23 @@ export type TripPathRecord = {
   pointCount: number
   rawPointCount?: number
   matchedPointCount?: number
+  routeSource?: string
   pathGeojson: unknown
   startedAt?: string
   endedAt?: string
   startLocationName?: string
   endLocationName?: string
+  savedLocations?: TripPathSavedLocationRecord[]
   updatedAt: string
   cacheMeta?: CacheMeta
+}
+
+export type TripPathSavedLocationRecord = {
+  index: number
+  recordedAt: string
+  latitude: number
+  longitude: number
+  speed?: number
 }
 
 type DashboardDataResponse = {
@@ -258,6 +281,38 @@ type PasswordResetDecisionResponse = {
 const DASHBOARD_CACHE_KEY = "dashboard-data"
 const tripPathCacheKey = (tripId: number) => `trip-path:${tripId}`
 
+const normalizeRouteName = (value?: string) => {
+  const routeName = value?.trim()
+  if (!routeName) return value
+
+  const normalized = routeName.replace(/→/g, "->").replace(/\s+/g, " ").toLowerCase()
+  if (normalized === "test route -> live gps tracking" || normalized === "obrero -> route") {
+    return "Obrero Route"
+  }
+
+  return routeName
+}
+
+const normalizeDashboardRoutes = (data: DashboardDataSnapshot): DashboardDataSnapshot => ({
+  ...data,
+  operationalDrivers: data.operationalDrivers.map((driver) => ({
+    ...driver,
+    activeRouteName: normalizeRouteName(driver.activeRouteName)
+  })),
+  recentViolations: data.recentViolations.map((violation) => ({
+    ...violation,
+    routeName: normalizeRouteName(violation.routeName)
+  })),
+  recentEmergencies: data.recentEmergencies.map((emergency) => ({
+    ...emergency,
+    routeName: normalizeRouteName(emergency.routeName)
+  })),
+  recentTrips: data.recentTrips.map((trip) => ({
+    ...trip,
+    routeName: normalizeRouteName(trip.routeName) ?? "Obrero Route"
+  }))
+})
+
 const withCacheMeta = <TData extends object>(
   cached: { savedAt: number; data: TData }
 ) => ({
@@ -270,7 +325,7 @@ const withCacheMeta = <TData extends object>(
 
 export const getCachedDashboardData = async () => {
   const cached = await getSnapshot<DashboardDataSnapshot>(DASHBOARD_CACHE_KEY)
-  return cached ? withCacheMeta(cached) : null
+  return cached ? withCacheMeta({ ...cached, data: normalizeDashboardRoutes(cached.data) }) : null
 }
 
 export const fetchDashboardData = async (accessToken: string) => {
@@ -288,8 +343,9 @@ export const fetchDashboardData = async (accessToken: string) => {
       )
     }
 
-    await saveSnapshot(DASHBOARD_CACHE_KEY, payload.data)
-    return payload.data
+    const data = normalizeDashboardRoutes(payload.data)
+    await saveSnapshot(DASHBOARD_CACHE_KEY, data)
+    return data
   } catch (error) {
     const cached = await getCachedDashboardData()
     if (cached) return cached

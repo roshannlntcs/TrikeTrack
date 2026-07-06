@@ -12,6 +12,9 @@ type StoredTripPathRow = {
   trip_path_id: number
   trip_id: number
   point_count: number
+  raw_point_count: number | null
+  matched_point_count: number | null
+  route_source: string | null
   path_geojson: unknown
   started_at: Date | null
   ended_at: Date | null
@@ -24,6 +27,9 @@ export type StoredTripPath = {
   tripPathId: number
   tripId: number
   pointCount: number
+  rawPointCount?: number
+  matchedPointCount?: number
+  routeSource?: string
   pathGeojson: unknown
   startedAt?: string
   endedAt?: string
@@ -40,12 +46,18 @@ declare global {
 const ensureTripPathsSchemaReady = async () => {
   await ensureDatabaseReady()
 
+  await query("CREATE EXTENSION IF NOT EXISTS postgis")
+
   await query(`
     CREATE TABLE IF NOT EXISTS public.trip_paths (
       trip_path_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
       trip_id bigint NOT NULL UNIQUE REFERENCES public.trips(trip_id) ON DELETE CASCADE,
       point_count integer NOT NULL DEFAULT 0,
       path_geojson jsonb NOT NULL,
+      route_geom geometry(LineString, 4326),
+      raw_point_count integer NOT NULL DEFAULT 0,
+      matched_point_count integer NOT NULL DEFAULT 0,
+      route_source text NOT NULL DEFAULT 'saved_route',
       started_at timestamptz,
       ended_at timestamptz,
       start_location_name text,
@@ -56,11 +68,20 @@ const ensureTripPathsSchemaReady = async () => {
   await query(`
     ALTER TABLE public.trip_paths
       ADD COLUMN IF NOT EXISTS start_location_name text,
-      ADD COLUMN IF NOT EXISTS end_location_name text
+      ADD COLUMN IF NOT EXISTS end_location_name text,
+      ADD COLUMN IF NOT EXISTS route_geom geometry(LineString, 4326),
+      ADD COLUMN IF NOT EXISTS raw_point_count integer NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS matched_point_count integer NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS route_source text NOT NULL DEFAULT 'saved_route'
   `)
   await query(`
     CREATE INDEX IF NOT EXISTS idx_trip_paths_updated_at
     ON public.trip_paths(updated_at DESC)
+  `)
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_trip_paths_route_geom_gist
+    ON public.trip_paths USING gist(route_geom)
+    WHERE route_geom IS NOT NULL
   `)
 }
 
@@ -76,6 +97,10 @@ const mapTripPath = (row: StoredTripPathRow): StoredTripPath => ({
   tripPathId: Number(row.trip_path_id),
   tripId: Number(row.trip_id),
   pointCount: Number(row.point_count),
+  rawPointCount: row.raw_point_count === null ? undefined : Number(row.raw_point_count),
+  matchedPointCount:
+    row.matched_point_count === null ? undefined : Number(row.matched_point_count),
+  routeSource: row.route_source ?? undefined,
   pathGeojson: row.path_geojson,
   startedAt: row.started_at?.toISOString(),
   endedAt: row.ended_at?.toISOString(),
@@ -97,6 +122,11 @@ const dedupeConsecutiveCoordinates = (coordinates: Array<[number, number]>) => {
 
   return next
 }
+
+const lineStringGeometry = (coordinates: Array<[number, number]>) => ({
+  type: "LineString",
+  coordinates
+})
 
 export const rebuildTripPathForTrip = async (tripId: number) => {
   await ensureTripPathsReady()
@@ -166,10 +196,7 @@ export const rebuildTripPathForTrip = async (tripId: number) => {
 
   const pathGeojson = {
     type: "Feature",
-    geometry: {
-      type: "LineString",
-      coordinates: finalCoordinates
-    },
+    geometry: lineStringGeometry(finalCoordinates),
     properties: {
       tripId,
       pointCount: finalCoordinates.length,
@@ -185,17 +212,38 @@ export const rebuildTripPathForTrip = async (tripId: number) => {
         trip_id,
         point_count,
         path_geojson,
+        route_geom,
+        raw_point_count,
+        matched_point_count,
+        route_source,
         started_at,
         ended_at,
         start_location_name,
         end_location_name,
         updated_at
       )
-      VALUES ($1, $2, $3::jsonb, $4::timestamptz, $5::timestamptz, $6, $7, now())
+      VALUES (
+        $1,
+        $2,
+        $3::jsonb,
+        ST_SetSRID(ST_GeomFromGeoJSON($4), 4326),
+        $5,
+        $6,
+        $7,
+        $8::timestamptz,
+        $9::timestamptz,
+        $10,
+        $11,
+        now()
+      )
       ON CONFLICT (trip_id) DO UPDATE
       SET
         point_count = EXCLUDED.point_count,
         path_geojson = EXCLUDED.path_geojson,
+        route_geom = EXCLUDED.route_geom,
+        raw_point_count = EXCLUDED.raw_point_count,
+        matched_point_count = EXCLUDED.matched_point_count,
+        route_source = EXCLUDED.route_source,
         started_at = EXCLUDED.started_at,
         ended_at = EXCLUDED.ended_at,
         start_location_name = EXCLUDED.start_location_name,
@@ -205,6 +253,9 @@ export const rebuildTripPathForTrip = async (tripId: number) => {
         trip_path_id,
         trip_id,
         point_count,
+        raw_point_count,
+        matched_point_count,
+        route_source,
         path_geojson,
         started_at,
         ended_at,
@@ -216,6 +267,10 @@ export const rebuildTripPathForTrip = async (tripId: number) => {
       tripId,
       finalCoordinates.length,
       JSON.stringify(pathGeojson),
+      JSON.stringify(lineStringGeometry(finalCoordinates)),
+      orderedCoordinates.length,
+      finalCoordinates.length,
+      routeSource,
       startedAt,
       endedAt,
       startLocationName,
@@ -236,6 +291,9 @@ export const getTripPathByTripId = async (tripId: number) => {
         tp.trip_path_id,
         tp.trip_id,
         tp.point_count,
+        tp.raw_point_count,
+        tp.matched_point_count,
+        tp.route_source,
         tp.path_geojson,
         tp.started_at,
         tp.ended_at,
